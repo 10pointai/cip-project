@@ -11,6 +11,7 @@ import {
   fetchCategoriesDirect,
   fetchUnitsDirect,
   fetchLocationsDirect,
+  fetchStockAdjustmentsDirect,
 } from '../mysql/operationsService';
 
 export const itemsRouter = Router();
@@ -203,25 +204,34 @@ locationsRouter.delete('/:id', requirePermission('manage_inventory'), (req, res)
 
 export const stockAdjustmentsRouter = Router();
 stockAdjustmentsRouter.use(authenticateToken);
-stockAdjustmentsRouter.get('/', (req, res) => {
+stockAdjustmentsRouter.get('/', async (req, res) => {
   try {
-    res.json({ success: true, data: serverDb.getStockAdjustments() });
+    const data = await fetchStockAdjustmentsDirect();
+    res.json({ success: true, data });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-stockAdjustmentsRouter.post('/', requirePermission('manage_inventory'), (req, res) => {
+stockAdjustmentsRouter.post('/', requirePermission('manage_inventory'), async (req, res) => {
   try {
     const adj = serverDb.createStockAdjustment(req.body);
-    res.status(201).json({ success: true, data: adj });
+    // Include the freshly-stocked item so the client gets an authoritative snapshot
+    const item = serverDb.getItemById(adj.itemId) || null;
+    res.status(201).json({ success: true, data: adj, item });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-stockAdjustmentsRouter.delete('/:id', requirePermission('manage_inventory'), (req, res) => {
+stockAdjustmentsRouter.delete('/:id', requirePermission('manage_inventory'), async (req, res) => {
   try {
+    const adj = serverDb.getStockAdjustments().find((a) => a.id === req.params.id);
     const success = serverDb.deleteStockAdjustment(req.params.id);
-    res.json({ success });
+    if (!success) {
+      return res.status(404).json({ success: false, error: 'Stock adjustment not found' });
+    }
+    // Return the reverted item so the client updates stock immediately
+    const item = adj ? serverDb.getItemById(adj.itemId) || null : null;
+    res.json({ success: true, message: `Stock adjustment deleted and stock reverted`, item });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }

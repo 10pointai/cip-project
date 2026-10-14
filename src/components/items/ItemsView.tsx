@@ -801,10 +801,10 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
             /* Tabular Layout */
             <div className="bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs min-w-[850px]">
+                <table className="w-full text-left border-collapse text-xs min-w-[980px]">
                   <thead>
                     <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-                      <th className="py-3.5 px-4">Item Details & SKU</th>
+                      <th className="py-3.5 px-4 min-w-[240px]">Item Details & SKU</th>
                       <th className="py-3.5 px-3">Type & Category</th>
                       <th className="py-3.5 px-3 text-right">Opening Stock</th>
                       <th className="py-3.5 px-3 text-right">Current Stock</th>
@@ -990,24 +990,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                           {/* Actions */}
                           <td className="py-3 px-4 text-center" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center justify-center gap-1">
-                              {item.type === 'product' && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleOpenAdjustmentModal(item.id)}
-                                  className="p-1.5 text-[var(--color-primary)] hover:bg-[var(--color-primary-container)] rounded-full transition-colors"
-                                  title="Adjust Stock for this item"
-                                >
-                                  <SlidersHorizontal className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => setViewingItem(item)}
-                                className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)] hover:bg-[var(--color-primary-container)] rounded-full transition-colors"
-                                title="View Specs & Parameters"
-                              >
-                                <Eye className="w-3.5 h-3.5" />
-                              </button>
+                            
                               <button
                                 type="button"
                                 onClick={() => handleEdit(item)}
@@ -1249,10 +1232,10 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                 </div>
               </div>
               <p className="text-2xl font-black text-[var(--color-success)] mt-2">
-                + {adjustmentStats.totalAddedQty.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                {adjustmentStats.increaseCount}
               </p>
               <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                {adjustmentStats.increaseCount} surplus / inward records ({currencySymbol} {adjustmentStats.totalAddedValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })})
+                Addition vouchers · {adjustmentStats.totalAddedQty.toLocaleString('en-IN', { maximumFractionDigits: 2 })} qty ({currencySymbol} {adjustmentStats.totalAddedValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })})
               </p>
             </div>
 
@@ -1274,10 +1257,10 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                 </div>
               </div>
               <p className="text-2xl font-black text-[var(--color-error)] mt-2">
-                - {adjustmentStats.totalReducedQty.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                {adjustmentStats.decreaseCount}
               </p>
               <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                {adjustmentStats.decreaseCount} wastage / sampling records ({currencySymbol} {adjustmentStats.totalReducedValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })})
+                Reduction vouchers · {adjustmentStats.totalReducedQty.toLocaleString('en-IN', { maximumFractionDigits: 2 })} qty ({currencySymbol} {adjustmentStats.totalReducedValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })})
               </p>
             </div>
 
@@ -1390,44 +1373,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
               </div>
             </div>
 
-            {/* Type Quick Filter Pills */}
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
-              <button
-                type="button"
-                onClick={() => setAdjTypeFilter('all')}
-                className={`px-3 py-1 rounded-full font-bold whitespace-nowrap transition-colors ${
-                  adjTypeFilter === 'all'
-                    ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)]'
-                    : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)]'
-                }`}
-              >
-                All Vouchers ({stockAdjustments.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setAdjTypeFilter('increase')}
-                className={`px-3 py-1 rounded-full font-bold whitespace-nowrap flex items-center gap-1 transition-colors ${
-                  adjTypeFilter === 'increase'
-                    ? 'bg-[var(--color-success)] text-white'
-                    : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)]'
-                }`}
-              >
-                <TrendingUp className="w-3 h-3" />
-                Additions ({adjustmentStats.increaseCount})
-              </button>
-              <button
-                type="button"
-                onClick={() => setAdjTypeFilter('decrease')}
-                className={`px-3 py-1 rounded-full font-bold whitespace-nowrap flex items-center gap-1 transition-colors ${
-                  adjTypeFilter === 'decrease'
-                    ? 'bg-[var(--color-error)] text-white'
-                    : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)]'
-                }`}
-              >
-                <TrendingDown className="w-3 h-3" />
-                Reductions ({adjustmentStats.decreaseCount})
-              </button>
-            </div>
+            
           </div>
 
           {/* Adjustments Table */}
@@ -1662,7 +1608,10 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
           category={categories.find((c) => c.id === viewingItem.categoryId)}
           currencySymbol={currencySymbol}
           onClose={() => setViewingItem(null)}
-          onEdit={(itm) => handleEdit(itm)}
+          onEdit={(itm) => {
+            setViewingItem(null);
+            handleEdit(itm);
+          }}
           onDelete={(itm) => handleDelete(itm)}
           onGoToInventory={onNavigateToInventory}
         />

@@ -1,6 +1,6 @@
 import { executeMysqlQuery, executeMysqlOne } from './queryClient';
 import { isMysqlConfigured } from './connection';
-import { Item, ItemCategory, ItemUnit, ItemLocation, ProductionBatchRun, Order, Vehicle, Driver, TripSlip, Tyre } from '../../src/types';
+import { Item, ItemCategory, ItemUnit, ItemLocation, ProductionBatchRun, Order, Vehicle, Driver, TripSlip, Tyre, ItemStockAdjustment, StockMovementLog } from '../../src/types';
 import { serverDb } from '../db';
 
 function parseJsonField<T>(field: any, fallback: T): T {
@@ -95,6 +95,60 @@ async function attachLocationsToItems(items: Item[]): Promise<Item[]> {
   return items;
 }
 
+/**
+ * Hydrates item.movements from the stock_movements ledger (latest 100 per item, newest first).
+ * The ledger stores FKs only (item_id, location_id, party_id); names are resolved with JOINs
+ * so item/location/party renames always propagate into movement history display.
+ */
+async function attachMovementsToItems(items: Item[]): Promise<Item[]> {
+  if (items.length === 0) return items;
+  try {
+    const itemIds = items.map((it) => it.id);
+    const placeholders = itemIds.map(() => '?').join(',');
+    const rows = await executeMysqlQuery(
+      `SELECT sm.*, p.name AS party_display,
+              COALESCE(loc.name, ilm.location_name) AS location_display
+       FROM stock_movements sm
+       LEFT JOIN parties p ON p.id = sm.party_id
+       LEFT JOIN item_locations loc ON loc.id = sm.location_id
+       LEFT JOIN item_location_mapping ilm ON ilm.item_id = sm.item_id AND ilm.location_id = sm.location_id
+       WHERE sm.item_id IN (${placeholders})
+       ORDER BY sm.movement_date DESC, sm.created_at DESC`,
+      itemIds
+    );
+
+    const movsByItem = new Map<string, StockMovementLog[]>();
+    for (const m of rows) {
+      const list = movsByItem.get(m.item_id);
+      if (!list) {
+        movsByItem.set(m.item_id, []);
+      } else if (list.length >= 100) {
+        continue;
+      }
+      movsByItem.get(m.item_id)!.push({
+        id: m.id,
+        date: m.movement_date || m.created_at,
+        type: m.movement_type,
+        quantity: parseNum(m.quantity),
+        balanceAfter: m.balance_after !== null && m.balance_after !== undefined ? parseNum(m.balance_after) : 0,
+        referenceNumber: m.reference_number || undefined,
+        sourcePartyOrBatch: m.party_display || undefined,
+        notes: m.notes || undefined,
+      });
+    }
+
+    for (const item of items) {
+      const ledgerMovs = movsByItem.get(item.id);
+      if (ledgerMovs && ledgerMovs.length > 0) {
+        item.movements = ledgerMovs;
+      }
+    }
+  } catch (err: any) {
+    console.warn('[OperationsService] Error fetching stock_movements ledger:', err.message);
+  }
+  return items;
+}
+
 export async function fetchItemsDirect(filter: { categoryId?: string; type?: string; query?: string }): Promise<Item[]> {
   if (!isMysqlConfigured()) {
     return serverDb.getItems(filter);
@@ -120,7 +174,7 @@ export async function fetchItemsDirect(filter: { categoryId?: string; type?: str
   sql += ' ORDER BY name ASC';
   const rows = await executeMysqlQuery(sql, params);
   const items = rows.map(mapItemRow);
-  return attachLocationsToItems(items);
+  return attachMovementsToItems(await attachLocationsToItems(items));
 }
 
 export async function fetchItemByIdDirect(id: string): Promise<Item | null> {
@@ -130,8 +184,8 @@ export async function fetchItemByIdDirect(id: string): Promise<Item | null> {
   const row = await executeMysqlOne('SELECT * FROM items WHERE id = ?', [id]);
   if (!row) return null;
   const item = mapItemRow(row);
-  const itemsWithLocs = await attachLocationsToItems([item]);
-  return itemsWithLocs[0] || item;
+  const hydrated = await attachMovementsToItems(await attachLocationsToItems([item]));
+  return hydrated[0] || item;
 }
 
 export async function fetchCategoriesDirect(): Promise<ItemCategory[]> {
@@ -177,6 +231,43 @@ export async function fetchLocationsDirect(): Promise<ItemLocation[]> {
     type: r.type || 'yard',
     isStandard: Boolean(r.is_standard),
     createdAt: r.created_at,
+  }));
+}
+
+export async function fetchStockAdjustmentsDirect(): Promise<ItemStockAdjustment[]> {
+  if (!isMysqlConfigured()) {
+    return serverDb.getStockAdjustments();
+  }
+  // FK store: adjustments keep item_id/location_id only; names resolved via JOIN
+  // so item/location renames stay in sync everywhere.
+  const rows = await executeMysqlQuery(
+    `SELECT a.*, i.name AS item_name, i.code AS item_code, i.unit AS item_unit,
+            COALESCE(loc.name, ilm.location_name) AS location_display
+     FROM item_stock_adjustments a
+     LEFT JOIN items i ON i.id = a.item_id
+     LEFT JOIN item_locations loc ON loc.id = a.location_id
+     LEFT JOIN item_location_mapping ilm ON ilm.item_id = a.item_id AND ilm.location_id = a.location_id
+     ORDER BY a.created_at DESC, a.adjustment_date DESC`
+  );
+  return rows.map((a: any) => ({
+    id: a.id,
+    adjustmentNumber: a.adjustment_number,
+    itemId: a.item_id,
+    itemName: a.item_name || '',
+    itemCode: a.item_code || '',
+    unit: a.item_unit || 'MT',
+    date: a.adjustment_date,
+    type: a.adjustment_type === 'decrease' ? 'decrease' : 'increase',
+    quantity: parseNum(a.quantity),
+    rate: parseNum(a.rate),
+    totalValue: parseNum(a.total_value),
+    previousStock: parseNum(a.previous_stock),
+    newStock: parseNum(a.new_stock),
+    reason: a.reason || '',
+    location: a.location_display || undefined,
+    referenceNumber: a.reference_number || undefined,
+    notes: a.notes || undefined,
+    createdAt: a.created_at,
   }));
 }
 

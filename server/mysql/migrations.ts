@@ -695,6 +695,157 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
+      // 14. Item Stock Adjustments (STK-ADJ vouchers - persistent inventory adjustment records)
+      // FK store: item_id + location_id only; item/location display names are JOINed at read time.
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS item_stock_adjustments (
+          id VARCHAR(64) PRIMARY KEY,
+          adjustment_number VARCHAR(64) NOT NULL,
+          item_id VARCHAR(64) NOT NULL,
+          location_id VARCHAR(64),
+          adjustment_date VARCHAR(32) NOT NULL,
+          adjustment_type VARCHAR(16) NOT NULL,
+          quantity DECIMAL(15,3) NOT NULL DEFAULT 0.000,
+          rate DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+          total_value DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+          previous_stock DECIMAL(15,3) NOT NULL DEFAULT 0.000,
+          new_stock DECIMAL(15,3) NOT NULL DEFAULT 0.000,
+          reason VARCHAR(255),
+          reference_number VARCHAR(64),
+          notes TEXT,
+          created_at VARCHAR(64) NOT NULL,
+          INDEX idx_isa_item (item_id),
+          INDEX idx_isa_number (adjustment_number),
+          INDEX idx_isa_location (location_id),
+          INDEX idx_isa_date (adjustment_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      // 15. Stock Movements Ledger (append-only: one row per stock change, never rewritten)
+      // FK store: item_id / location_id / party_id; display names resolved by JOINs at read time.
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS stock_movements (
+          id VARCHAR(64) PRIMARY KEY,
+          item_id VARCHAR(64) NOT NULL,
+          location_id VARCHAR(64),
+          movement_type VARCHAR(32) NOT NULL,
+          quantity DECIMAL(15,3) NOT NULL,
+          balance_after DECIMAL(15,3),
+          reference_type VARCHAR(32),
+          reference_number VARCHAR(64),
+          party_id VARCHAR(64),
+          notes TEXT,
+          movement_date VARCHAR(32) NOT NULL,
+          created_at VARCHAR(64) NOT NULL,
+          INDEX idx_sm_item (item_id),
+          INDEX idx_sm_item_date (item_id, movement_date),
+          INDEX idx_sm_location (location_id),
+          INDEX idx_sm_party (party_id),
+          INDEX idx_sm_ref (reference_number)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      // Migrate pre-normalization shapes of these tables (denormalized name columns -> FK cols).
+      try {
+        const [isaCols]: any = await conn.query('SHOW COLUMNS FROM item_stock_adjustments');
+        const isaColNames = (isaCols || []).map((c: any) => c.Field);
+        if (isaColNames.length > 0) {
+          if (!isaColNames.includes('location_id')) {
+            await conn.query('ALTER TABLE item_stock_adjustments ADD COLUMN location_id VARCHAR(64) NULL AFTER reason');
+            // Backfill location_id from the old name column via the item's location mapping
+            await conn.query(`
+              UPDATE item_stock_adjustments isa
+              LEFT JOIN item_location_mapping ilm
+                ON ilm.item_id = isa.item_id AND LOWER(TRIM(ilm.location_name)) = LOWER(TRIM(isa.location))
+              SET isa.location_id = ilm.location_id
+              WHERE isa.location_id IS NULL AND isa.location IS NOT NULL AND isa.location <> ''
+            `);
+          }
+          const isaDrops = ['item_name', 'item_code', 'unit', 'location'].filter((c) => isaColNames.includes(c));
+          if (isaDrops.length > 0) {
+            await conn.query(`ALTER TABLE item_stock_adjustments DROP COLUMN ${isaDrops.join(', DROP COLUMN ')}`);
+          }
+        }
+      } catch (isaMigErr: any) {
+        console.warn('[MySQL Migration] item_stock_adjustments normalization notice:', isaMigErr.message);
+      }
+      try {
+        const [smCols]: any = await conn.query('SHOW COLUMNS FROM stock_movements');
+        const smColNames = (smCols || []).map((c: any) => c.Field);
+        if (smColNames.length > 0) {
+          if (smColNames.includes('location_name') && !smColNames.includes('location_id')) {
+            await conn.query('ALTER TABLE stock_movements ADD COLUMN location_id VARCHAR(64) NULL AFTER item_id');
+          }
+          if (smColNames.includes('party_name') && !smColNames.includes('party_id')) {
+            await conn.query('ALTER TABLE stock_movements ADD COLUMN party_id VARCHAR(64) NULL AFTER reference_number');
+          }
+          if (smColNames.includes('location_name')) {
+            // Backfill location_id from the old name column via the item's location mapping
+            await conn.query(`
+              UPDATE stock_movements sm
+              LEFT JOIN item_location_mapping ilm
+                ON ilm.item_id = sm.item_id AND LOWER(TRIM(ilm.location_name)) = LOWER(TRIM(sm.location_name))
+              SET sm.location_id = ilm.location_id
+              WHERE sm.location_id IS NULL AND sm.location_name IS NOT NULL AND sm.location_name <> ''
+            `);
+          }
+          const smDrops = ['item_name', 'location_name', 'party_name'].filter((c) => smColNames.includes(c));
+          if (smDrops.length > 0) {
+            await conn.query(`ALTER TABLE stock_movements DROP COLUMN ${smDrops.join(', DROP COLUMN ')}`);
+          }
+        }
+      } catch (smMigErr: any) {
+        console.warn('[MySQL Migration] stock_movements normalization notice:', smMigErr.message);
+      }
+
+      // One-time backfill: unroll legacy items.movements JSON into the stock_movements ledger.
+      // Runs only while the ledger table is still completely empty.
+      try {
+        const [movCount]: any = await conn.query('SELECT COUNT(*) as cnt FROM stock_movements');
+        if (movCount[0]?.cnt === 0) {
+          const [itemRows]: any = await conn.query('SELECT id, name, movements FROM items WHERE movements IS NOT NULL');
+          let backfilled = 0;
+          for (const row of itemRows || []) {
+            let movs: any[] = [];
+            try {
+              movs = typeof row.movements === 'string' ? JSON.parse(row.movements) : row.movements;
+            } catch {
+              movs = [];
+            }
+            if (Array.isArray(movs) && movs.length > 0) {
+              // movements JSON is stored newest-first; insert in chronological order
+              const chronological = [...movs].reverse();
+              for (const m of chronological) {
+                if (!m || typeof m !== 'object') continue;
+                const qty = Number(m.quantity) || 0;
+                await conn.query(
+                  `INSERT IGNORE INTO stock_movements (
+                    id, item_id, movement_type, quantity, balance_after, reference_number, notes, movement_date, created_at
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  [
+                    m.id || `stk-bf-${row.id}-${backfilled}`,
+                    row.id,
+                    m.type || 'opening',
+                    qty,
+                    m.balanceAfter !== undefined && m.balanceAfter !== null ? Number(m.balanceAfter) : null,
+                    m.referenceNumber || null,
+                    m.notes || null,
+                    m.date || new Date().toISOString(),
+                    m.date || new Date().toISOString(),
+                  ]
+                );
+                backfilled++;
+              }
+            }
+          }
+          if (backfilled > 0) {
+            console.log(`[MySQL Migration] Backfilled ${backfilled} legacy movements JSON entries into stock_movements ledger.`);
+          }
+        }
+      } catch (backfillErr: any) {
+        console.warn('[MySQL Migration] stock_movements backfill notice:', backfillErr.message);
+      }
+
       console.log('[MySQL Migration] All tables verified successfully.');
       return { success: true, message: 'All MySQL schema tables created or verified.' };
     } finally {
@@ -1222,6 +1373,87 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
             adj.referenceNumber || null,
             adj.notes || null,
             adj.createdAt || new Date().toISOString(),
+          ]
+        );
+      }
+
+      // Seed item stock adjustment vouchers (FK-only: item_id, location_id resolved via mapping)
+      for (const adj of (snapshot.stockAdjustments || []) as any[]) {
+        let locationId: string | null = adj.locationId || null;
+        const adjItem = (snapshot.items || []).find((it: any) => it.id === adj.itemId) as any;
+        if (!locationId && adjItem && adj.location && Array.isArray(adjItem.locations)) {
+          locationId = adjItem.locations.find((l: any) => l.locationName === adj.location)?.locationId || null;
+        }
+        if (!locationId && adj.location) {
+          // Fallback: exact master item_locations match by name
+          const master = (snapshot.locations || []).find(
+            (ml: any) => (ml.name || '').trim().toLowerCase() === (adj.location || '').trim().toLowerCase()
+          ) as any;
+          locationId = master?.id || null;
+        }
+        await conn.query(
+          `REPLACE INTO item_stock_adjustments (id, adjustment_number, item_id, location_id, adjustment_date, adjustment_type, quantity, rate, total_value, previous_stock, new_stock, reason, reference_number, notes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            adj.id,
+            adj.adjustmentNumber,
+            adj.itemId,
+            locationId,
+            adj.date,
+            adj.type,
+            adj.quantity || 0,
+            adj.rate || 0,
+            adj.totalValue || 0,
+            adj.previousStock || 0,
+            adj.newStock || 0,
+            adj.reason || null,
+            adj.referenceNumber || null,
+            adj.notes || null,
+            adj.createdAt || new Date().toISOString(),
+          ]
+        );
+      }
+
+      // Seed stock movements ledger from items' movement logs (best-effort restore)
+      for (const item of (snapshot.items || []) as any[]) {
+        if (!Array.isArray(item.movements)) continue;
+        for (const mov of item.movements) {
+          if (!mov || typeof mov !== 'object') continue;
+          await conn.query(
+            `INSERT IGNORE INTO stock_movements (id, item_id, movement_type, quantity, balance_after, reference_number, notes, movement_date, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              mov.id,
+              item.id,
+              mov.type || 'opening',
+              mov.quantity || 0,
+              mov.balanceAfter !== undefined && mov.balanceAfter !== null ? mov.balanceAfter : null,
+              mov.referenceNumber || null,
+              mov.notes || null,
+              mov.date || new Date().toISOString(),
+              mov.date || new Date().toISOString(),
+            ]
+          );
+        }
+      }
+      // Seed movements from the sandbox stockMovements collection (ledger records with FKs)
+      for (const mov of (snapshot.stockMovements || []) as any[]) {
+        await conn.query(
+          `INSERT IGNORE INTO stock_movements (id, item_id, location_id, movement_type, quantity, balance_after, reference_type, reference_number, party_id, notes, movement_date, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            mov.id,
+            mov.itemId,
+            mov.locationId || null,
+            mov.type || 'opening',
+            mov.quantity || 0,
+            mov.balanceAfter !== undefined && mov.balanceAfter !== null ? mov.balanceAfter : null,
+            mov.referenceType || null,
+            mov.referenceNumber || null,
+            mov.partyId || null,
+            mov.notes || null,
+            mov.date || new Date().toISOString(),
+            mov.date || new Date().toISOString(),
           ]
         );
       }

@@ -84,7 +84,7 @@ export interface ItemLocation {
 export interface StockMovementLog {
   id: string;
   date: string;
-  type: 'purchase_inward' | 'production_output' | 'production_consumed' | 'sale_dispatch' | 'opening' | 'reconciliation_in' | 'reconciliation_out';
+  type: 'purchase_inward' | 'production_output' | 'production_consumed' | 'sale_dispatch' | 'opening' | 'reconciliation_in' | 'reconciliation_out' | 'adjustment_increase' | 'adjustment_decrease';
   quantity: number; // positive for additions, negative for deductions
   balanceAfter: number;
   referenceNumber?: string;
@@ -155,6 +155,7 @@ export interface ItemStockAdjustment {
   newStock: number;
   reason: string; // e.g. "Physical Stock Audit / Reconciliation", "Damaged / Waste", "Opening Stock Correction", etc.
   location?: string;
+  locationId?: string; // FK: resolved display name lives on the item's location mapping, never copied here
   referenceNumber?: string;
   notes?: string;
   createdAt: string;

@@ -1,0 +1,334 @@
+================================================================================
+                    OPERATIONS MANAGEMENT SYSTEM — DOCUMENTATION
+================================================================================
+Project     : Operations Management System (road-construction / asphalt-plant
+              materials business, India; INR currency, GST compliance)
+Stack       : React 19 + Vite + Tailwind v4 + Material Design 3 (client)
+              Express API (server.ts, port 3000) + Vite middleware in dev
+              Azure Database for MySQL Flexible Server (authoritative store)
+Status      : Phase 1 under development
+Phase 1     : Parties, Cash & Bank, Inventory, Sales, Purchase
+================================================================================
+
+--------------------------------------------------------------------------------
+1. ARCHITECTURE OVERVIEW
+--------------------------------------------------------------------------------
+
+Single-repo app: one Express process serves the REST API and (in development)
+the React SPA via Vite middleware.
+
+    React UI (src/)
+        |  optimistic writes + full-snapshot reads
+    cloudStore singleton (src/services/cloudStore.ts)
+        |  REST (src/services/api.ts) with JWT Bearer token
+    Express routes (server/routes/*.ts)
+        |  "…Direct" service functions
+    serverDb in-memory working copy (server/db.ts)  <--->  Azure MySQL (server/mysql/)
+
+Key layers:
+
+  - server/mysql/connection.ts   Azure MySQL pool (TLS enforced, 30 connections)
+  - server/mysql/migrations.ts   Schema creation (idempotent, runs at startup)
+                                 + one-time legacy-data backfills
+  - server/mysql/azureSync.ts    Read hydration (loadAllFromMysql) + liveSync*
+                                 write helpers (fire-and-forget)
+  - server/mysql/azureTransactions.ts  ACID multi-table writers (vouchers,
+                                 balance deltas with commit/rollback)
+  - server/mysql/operationsService.ts, financeService.ts, personnelService.ts
+                                 Per-domain MySQL-aware CRUD services
+  - server/db.ts                 In-memory working copy ("sandbox"). With MySQL
+                                 configured it is hydrated from Azure at startup
+                                 and on GET /api/sync?fresh=true. Without MySQL,
+                                 the app runs entirely on the sandbox.
+  - src/services/cloudStore.ts   Client data layer: optimistic in-memory writes +
+                                 fire-and-forget REST calls + resync. All reads
+                                 come from the cloud snapshot. localStorage is
+                                 decommissioned for business records.
+  - src/hooks/useDatabase.ts     React hook exposing cloudStore state + syncNow().
+
+Sync model: GET /api/sync returns the full snapshot (single source of truth is
+the server, not the browser). Every feature/tab visit triggers a fresh sync.
+
+--------------------------------------------------------------------------------
+2. THE GOLDEN RULE — FOREIGN KEYS + JOINs (PROJECT-WIDE DATA STANDARD)
+--------------------------------------------------------------------------------
+
+THIS IS THE MOST IMPORTANT DATA-MODELING RULE IN THE PROJECT.
+Every new table and every new endpoint must follow it.
+
+RULE
+----
+When one entity references another entity (Item, Party, Location, Account,
+Category, Unit, Employee, Vehicle, ...), it must store the other entity's
+PRIMARY KEY (foreign key) — never a copied display value (name, code, label).
+
+    WRONG (denormalized):                     RIGHT (normalized):
+    +------------------+                      +----------------------+
+    | stock_movements  |                      | stock_movements      |
+    | item_name    ❌  |                      | item_id     (FK) ✅  |
+    | location_name ❌ |                      | location_id (FK) ✅  |
+    +------------------+                      +----------------------+
+
+READS — always resolve display values with JOINs:
+------------------------------------------------
+Fetch names/details by JOINing the referenced tables at read time:
+
+    SELECT sm.*, p.name AS party_display, ilm.location_name AS location_display
+    FROM stock_movements sm
+    LEFT JOIN parties p ON p.id = sm.party_id
+    LEFT JOIN item_location_mapping ilm
+      ON ilm.item_id = sm.item_id AND ilm.location_id = sm.location_id;
+
+Because the joins resolve at read time, if a user renames an entity, EVERY view
+that joins it shows the new name automatically — party ledgers, movement
+histories, adjustment documents, dashboards — with no backfill job and no
+chance of the stored copies drifting out of sync. (Renaming is the reason this
+rule exists.)
+
+WRITE/UPDATE — display values must never be written to child tables:
+--------------------------------------------------------------------
+The server may resolve a display name for validation or human logs/audit
+messages, but the data row itself stores only the FK id.
+
+WHY IT MUST HOLD EVERYWHERE IN THE PROJECT
+------------------------------------------
+  * Name changes (item renamed, party renamed, account renamed, location
+    renamed) stay consistent everywhere in one step.
+  * No drift between copies: one source of truth per property.
+  * No stale-name data leak into reports, exports, or printed documents.
+  * Future-proof: adding display variants (abbreviations, translations) is a
+    JOIN away, not a data migration.
+
+EXCEPTIONS — documented, allowed snapshot copies:
+------------------------------------------------
+  1. STATUTORY DOCUMENT SNAPSHOTS: rows that REPRESENT an already-issued
+     commercial/statutory document keep the display values AS ISSUED (snapshot
+     at creation time): orders.items[] JSON (line-item names/rates on an
+     invoice), transactions.party_name ("party as on voucher"). Law/audit
+     requires issued documents to show what was printed. These copies never
+     get "corrected" by renames — that is intentional.
+  2. FREE-TEXT NARRATIVE: notes/description/reason fields are narrative text.
+     They may mention names; they are not structured references.
+  3. NUMERIC SNAPSHOTS: balance-after / previous-stock / rate / amount fields
+     are facts-as-of-event and are correct to keep per row.
+  4. LEGACY COLUMNS kept for backward compatibility (e.g.
+     item_location_mapping.location_name, items.stock_location CSV, items
+     movements JSON): normalizing parents must NOT be joined to these;
+     children must reference the FK columns, and legacy columns are written
+     null/empty going forward.
+
+DESIGN PROCEDURE FOR ANY NEW FEATURE (checklist)
+------------------------------------------------
+  1. Model: every cross-entity reference is `<entity>_id` VARCHAR(64) with an
+     index; NO `<entity>_name` column in the child table.
+  2. Create both the CREATE TABLE (IF NOT EXISTS) in server/mysql/migrations.ts
+     AND, if the table already exists on some deployments, an idempotent
+     migration block (SHOW COLUMNS + ALTER TABLE ADD/UPDATE/DROP) — see the
+     item_stock_adjustments / stock_movements blocks in migrations.ts.
+  3. Read: "…Direct" fetch functions use SELECT ... LEFT JOIN <parent> to
+     attach display names (see fetchStockAdjustmentsDirect in
+     server/mysql/operationsService.ts).
+  4. Write: liveSync* helpers REPLACE/INSERT rows with FK ids only (see
+     liveSyncStockAdjustment / liveSyncStockMovement in server/mysql/azureSync.ts).
+  5. Deletion of a referenced entity: child rows are LEFT JOINed — they must
+     keep working (name renders empty rather than crashing). Decide per case
+     whether to keep the child as historical record or purge it.
+  6. Never trust a client-supplied display name for persistence.
+
+--------------------------------------------------------------------------------
+3. INVENTORY — STOCK LEDGER DESIGN (implemented in Phase 1)
+--------------------------------------------------------------------------------
+
+The items table holds the CATALOG only (name, code, prices, unit, category,
+per-location cached stock, opening stocks). Movement history is NEVER stored
+on the items row (the legacy items.movements JSON column is kept only for
+backward compatibility and written as NULL going forward).
+
+STOCK MOVEMENTS LEDGER — `stock_movements` (append-only)
+  One row per stock change. Rows are INSERTed and never updated or rewritten.
+    id, item_id (FK), location_id (FK, nullable), movement_type, quantity
+      (signed: + inward, − outward), balance_after (item-level snapshot),
+      reference_type (order | stock_adjustment | production_batch | opening |
+      manual), reference_number (order number / STK-ADJ voucher no. / batch no.),
+      party_id (FK, nullable), notes, movement_date, created_at.
+
+STOCK ADJUSTMENT VOUCHERS — `item_stock_adjustments`
+  Persistent STK-ADJ vouchers (this was previously in-memory only and got lost):
+    id, adjustment_number (STK-ADJ-26/NNN, server-generated, collision-free),
+    item_id (FK), location_id (FK), adjustment_date, adjustment_type
+    ('increase'|'decrease'), quantity, rate, total_value, previous_stock,
+    new_stock, reason, reference_number, notes, created_at.
+  Display values (item name/code/unit, location name) are resolved via:
+    LEFT JOIN items i ON i.id = a.item_id
+    LEFT JOIN item_locations loc ON loc.id = a.location_id
+    LEFT JOIN item_location_mapping ilm ON ilm.item_id = a.item_id
+                                        AND ilm.location_id = a.location_id
+    (location display = COALESCE(loc.name, ilm.location_name))
+
+  LIVE-VIEW RULE for stock adjustments: a voucher record stores ONLY the FKs
+  (item_id, location_id). Its displayed item name, item code, unit and storage
+  location are ALWAYS resolved live from the items table (and the location
+  master / the item's location mapping) at fetch time — never from stored
+  copies. Renaming an item (or a location) therefore updates every stock
+  adjustment voucher display everywhere, with no backfill.
+
+HOW STOCK CHANGES ARE APPLIED — single funnel serverDb.adjustItemStock():
+  1. Mutates the in-memory item aggregate (currentStock recomputed from the
+     item's per-location breakdown; clamped at >= 0).
+  2. Appends one ledger row (in-memory sandbox list / stock_movements table).
+  3. On Azure MySQL applies ATOMIC increments — never a full-row REPLACE:
+        UPDATE items SET current_stock = current_stock + ? WHERE id = ?
+        UPDATE item_location_mapping SET current_stock = current_stock + ?
+               WHERE item_id = ? AND location_id = ?
+        (or INSERT of the mapping row when a new location gains stock)
+  This makes concurrent changes from sales dispatches, purchase inwards,
+  production, and adjustments race-safe (no lost updates).
+
+PRODUCERS of stock deltas:
+  - Orders: sales dispatch (−qty, live JOIN name via party_id), purchase GRN
+    (+receivedQuantity), RFQ skipped, cancelled orders skipped; order edits
+    apply reverse-then-reapply compensation movements.
+  - Production batches: consume raw materials (−), output output item (+).
+  - Stock adjustments: ±qty with adjustment_* movement types; deleting a
+    voucher auto-writes a compensating movement (REV-<number>).
+
+Movement read-back: item.movements shown in the UI (item detail ledger) is
+HYDRATED from the ledger at read time (latest 100 per item, newest first) —
+see hydrateItemWithMovements (server/db.ts), loadAllFromMysql (azureSync.ts),
+attachMovementsToItems / fetchStockAdjustmentsDirect (operationsService.ts).
+
+BACKFILL: on first migration after this change, legacy items.movements JSON
+(rows created before the ledger, capped at 100 each) are unrolled into
+stock_movements once, in chronological order, only while the ledger is empty.
+
+--------------------------------------------------------------------------------
+4. PARTIES & VOUCHERS — BALANCE CONVENTIONS (used by Cash & Bank + Parties)
+--------------------------------------------------------------------------------
+
+  Party balance sign:  currentBalance > 0  -> we will RECEIVE (Receivable, Dr)
+                       currentBalance < 0  -> we must PAY    (Payable, Cr)
+
+  Voucher ledger effect (party balance):
+                       sale_invoice   +amount       credit_note    -amount
+                       debit_note     +amount       purchase_bill  -amount
+                       payment_in     -amount       payment_out    +amount
+    Cancelled vouchers are ignored in recalculations.
+
+  Account (cash/bank) effect: payment_in / sale_invoice -> +amount
+                              payment_out / purchase_bill -> -amount
+  (Stock adjustments are inventory-only; they do NOT create financial vouchers.)
+
+  Balance is recalculated from scratch (openingBalance + all vouchers) on the
+  server: recalculatePartyBalance / recalculateAccountBalance (server/db.ts);
+  the Azure ACID writer (azureTransactions.ts) applies the same deltas in one
+  transaction with rollback.
+
+  Transfers are contra entries touching both accounts; account adjustments
+  carry increase/decrease with previous/new balance snapshots.
+
+--------------------------------------------------------------------------------
+5. AUTH & PERMISSIONS
+--------------------------------------------------------------------------------
+
+  - JWT (7-day tokens) via /api/auth; users hold a permission matrix
+    (UserPermissions, src/types/index.ts). Every /api domain route is behind
+    authenticateToken; writes behind requirePermission / requireEitherPermission.
+  - Client tab access mirrors the same permission keys.
+  - Client routes: super_admin has everything.
+
+KNOWN SECURITY TODO (must fix before external deployment):
+  - GET /api/sync and GET /api/health currently have NO authentication.
+    /api/sync returns the ENTIRE snapshot (including users with password
+    hashes). Add authenticateToken before any public exposure.
+  - JWT secret fallback in server/middleware/auth.ts must be overridden by an
+    env secret in production.
+
+--------------------------------------------------------------------------------
+6. RUNNING THE PROJECT
+--------------------------------------------------------------------------------
+
+  npm install
+  npm run dev        # Express API + Vite dev server on port 3000
+  npm run lint       # TypeScript check (tsc --noEmit)
+  npm run build      # vite build + esbuild server bundle -> dist/
+
+  MySQL config (Azure Database for MySQL Flexible Server) is read from .env:
+  AZURE_MYSQL_URL (or DATABASE_URL / host+credentials vars). Leave them empty
+  to run the non-persistent in-memory sandbox (development only).
+
+  On startup the server: tests the MySQL connection, runs runMysqlMigrations()
+  (idempotent CREATE TABLE IF NOT EXISTS + legacy ALTER/backfills — including
+  the stock ledger tables), then hydrates the server working copy.
+
+--------------------------------------------------------------------------------
+7. MYSQL SCHEMA REFERENCE (as of Phase 1 inventory completion)
+--------------------------------------------------------------------------------
+
+  company_settings         Global company/settings row
+  users                    App users + bcrypt hashes + permission matrix
+  parties                  Customer/vendor/transporter directory + balances
+  transactions             Vouchers (sale_invoice, purchase_bill, payment_in,
+                           payment_out, debit_note, credit_note) — party_id FK
+                           + account_id FK; keeps party_name snapshot (statutory)
+  item_categories / item_units / item_locations    Catalog masters
+  items                    Product/service catalog; per-location stock cached in
+                           item_location_mapping; movements JSON column LEGACY-
+                           ONLY (NULL going forward; ledger is authoritative)
+  item_location_mapping    Normalized per-item x per-location stock
+  stock_movements          APPEND-ONLY stock ledger (FKs only; see §3)
+  item_stock_adjustments   STK-ADJ vouchers (FKs only; see §3)
+  orders                   Sales/purchase orders; items[] JSON = document
+                           snapshot (statutory); party_id FK
+  production_batches       Batching runs (raw consumption + output)
+  vehicles / drivers / trip_slips / tyres    Fleet operations
+  employees / attendance / leaves / employee_payments    HR
+  cash_bank_accounts / internal_transfers / account_adjustments
+                           Cash & bank module (account names copied into
+                           transfer/adjustment rows are to be migrated to FK +
+                           JOIN when that module is completed in Phase 1)
+  audit_logs               Action audit trail
+
+If you created the inventory tables BEFORE this documentation (from the first
+DDL), the migration at startup normalizes them automatically. The equivalent
+manual SQL, should you prefer to run it yourself:
+
+  -- stock_movements: replace denormalized name columns with FKs
+  ALTER TABLE stock_movements
+    ADD COLUMN location_id VARCHAR(64) NULL AFTER item_id,
+    ADD COLUMN party_id VARCHAR(64) NULL AFTER reference_number;
+  UPDATE stock_movements sm
+    LEFT JOIN item_location_mapping ilm
+      ON ilm.item_id = sm.item_id AND LOWER(TRIM(ilm.location_name)) = LOWER(TRIM(sm.location_name))
+    SET sm.location_id = ilm.location_id
+    WHERE sm.location_id IS NULL AND sm.location_name IS NOT NULL AND sm.location_name <> '';
+  ALTER TABLE stock_movements DROP COLUMN item_name, DROP COLUMN location_name, DROP COLUMN party_name;
+
+  -- item_stock_adjustments: replace denormalized columns with FKs
+  ALTER TABLE item_stock_adjustments ADD COLUMN location_id VARCHAR(64) NULL AFTER reason;
+  UPDATE item_stock_adjustments isa
+    LEFT JOIN item_location_mapping ilm
+      ON ilm.item_id = isa.item_id AND LOWER(TRIM(ilm.location_name)) = LOWER(TRIM(isa.location))
+    SET isa.location_id = ilm.location_id
+    WHERE isa.location_id IS NULL AND isa.location IS NOT NULL AND isa.location <> '';
+  ALTER TABLE item_stock_adjustments
+    DROP COLUMN item_name, DROP COLUMN item_code, DROP COLUMN unit, DROP COLUMN location;
+
+--------------------------------------------------------------------------------
+8. PHASE 1 REMAINING WORK (as of this documentation)
+--------------------------------------------------------------------------------
+
+  - Sales & Purchase: persist purchaseStage + rfqDetails/poDetails/
+    receiptDetails to MySQL (columns + mapping + update path); wire orders to
+    the voucher/party-balance system; compute partially_delivered; migrate
+    orders/transactions account references to the FK + JOIN standard.
+  - Cash & Bank: account-name references in transfers/adjustments -> FK + JOIN;
+    Edit-account UI; real reconciliation.
+  - Parties: bulk entry to use POST /api/parties/bulk; voucher edit/delete UI;
+    unify client-side balance delta with server logic; capture server-minted
+    IDs on create instead of fabricating optimistic IDs.
+  - Cross-cutting: authenticate /api/sync + /api/health; env-based JWT secret;
+    client resync/ID-capture discipline for optimistic writes.
+
+================================================================================
+END OF DOCUMENTATION — keep this file updated as modules are completed.
+================================================================================

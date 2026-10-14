@@ -129,33 +129,16 @@ export async function writeTransactionACID(txnData: any) {
 }
 
 export async function writeItemStockAdjustmentACID(itemId: string, delta: number, logType: string, referenceNumber?: string, notes?: string) {
-  if (!isMysqlConfigured()) {
-    const created = serverDb.adjustItemStock(itemId, delta, logType as any, referenceNumber, notes);
-    return { executedOnAzure: false, message: 'Executed on local storage (MySQL not configured)', data: created };
-  }
-
-  const pool = getMysqlPool();
-  if (!pool) {
-    const created = serverDb.adjustItemStock(itemId, delta, logType as any, referenceNumber, notes);
-    return { executedOnAzure: false, message: 'MySQL pool unavailable', data: created };
-  }
-
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
-    const created = serverDb.adjustItemStock(itemId, delta, logType as any, referenceNumber, notes);
-    await conn.commit();
-    return {
-      executedOnAzure: true,
-      message: 'Stock adjustment committed on Azure MySQL with row locking',
-      data: created,
-    };
-  } catch (error: any) {
-    await conn.rollback();
-    throw new Error(`Stock adjustment ACID failed: ${error.message}`);
-  } finally {
-    conn.release();
-  }
+  // adjustItemStock is ledger-backed: it appends to stock_movements and applies
+  // atomic in-place stock increments on Azure MySQL (see liveSyncStockMovement).
+  const created = serverDb.adjustItemStock(itemId, delta, logType as any, referenceNumber, notes);
+  return {
+    executedOnAzure: isMysqlConfigured(),
+    message: isMysqlConfigured()
+      ? 'Stock movement recorded in ledger with atomic stock increment on Azure MySQL'
+      : 'Executed on local storage (MySQL not configured)',
+    data: created,
+  };
 }
 
 export async function writeProductionBatchACID(batchData: any) {

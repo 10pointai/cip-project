@@ -503,8 +503,10 @@ class CloudStore {
 
   public createStockAdjustment(adj: Partial<ItemStockAdjustment>): ItemStockAdjustment {
     const newAdj: ItemStockAdjustment = {
-      id: `stk-adj-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-      adjustmentNumber: adj.adjustmentNumber || `STK-ADJ-${Date.now().toString().substr(-6)}`,
+      id: `stk-adj-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      // No client-side voucher number: the server generates the authoritative
+      // collision-free STK-ADJ-26/NNN numbering and the post-create sync adopts it.
+      adjustmentNumber: adj.adjustmentNumber || '',
       itemId: adj.itemId || '',
       itemName: adj.itemName || '',
       itemCode: adj.itemCode || '',
@@ -520,6 +522,7 @@ class CloudStore {
       createdAt: new Date().toISOString(),
       ...adj,
     };
+    if (!newAdj.adjustmentNumber) delete (newAdj as any).adjustmentNumber;
     this.stockAdjustments.unshift(newAdj);
     // Update item stock level in memory
     const itm = this.items.find((i) => i.id === adj.itemId);
@@ -537,7 +540,15 @@ class CloudStore {
     if (exists) {
       this.stockAdjustments = this.stockAdjustments.filter((a) => a.id !== id);
       this.notify();
-      this.syncWithServer(true);
+      // Notify the server so it reverts the stock and deletes the voucher row.
+      // Only re-sync after the server confirms, otherwise the deleted voucher resurrects.
+      api.deleteStockAdjustment(id)
+        .then(() => this.syncWithServer(true))
+        .catch((err) => {
+          console.error('[CloudStore] deleteStockAdjustment cloud error:', err);
+          // Server delete failed - re-sync to restore the authoritative state
+          this.syncWithServer(true);
+        });
       return true;
     }
     return false;

@@ -21,6 +21,7 @@ import {
   EmployeeLeave,
   EmployeePayment,
   ItemStockAdjustment,
+  StockMovementLog,
   AppUser,
   UserPermissions,
   UserRole,
@@ -53,7 +54,10 @@ import {
   liveSyncAccount,
   liveSyncTransfer,
   liveSyncAdjustment,
+  liveSyncStockAdjustment,
+  liveSyncStockMovement,
 } from './mysql/azureSync';
+import { isMysqlConfigured } from './mysql/connection';
 import {
   SEED_SETTINGS,
   SEED_PARTIES,
@@ -114,8 +118,24 @@ export interface DatabaseSchema {
   accounts: CashBankAccount[];
   transfers: InternalTransfer[];
   adjustments: AccountAdjustment[];
+  stockMovements: StockMovementRecord[];
   users: AppUser[];
   auditLogs: AuditLog[];
+}
+
+/**
+ * Internal ledger record shape for the in-memory sandbox (dev without MySQL).
+ * Mirrors the Azure MySQL `stock_movements` table: append-only, references by
+ * primary keys only (item_id, location_id, party_id) — names are joined at read time.
+ */
+export interface StockMovementRecord extends StockMovementLog {
+  itemId: string;
+  locationId?: string;
+  partyId?: string;
+  referenceType?: string;
+  // Display names resolved via JOIN at read time (never persisted by name in MySQL)
+  locationName?: string;
+  partyName?: string;
 }
 
 class ServerLocalDatabase {
@@ -140,6 +160,7 @@ class ServerLocalDatabase {
       units: JSON.parse(JSON.stringify(SEED_UNITS)),
       locations: JSON.parse(JSON.stringify(SEED_LOCATIONS)),
       stockAdjustments: [],
+      stockMovements: [],
       productionBatches: JSON.parse(JSON.stringify(SEED_BATCHES)),
       orders: [],
       vehicles: JSON.parse(JSON.stringify(SEED_VEHICLES)),
@@ -568,6 +589,35 @@ class ServerLocalDatabase {
   }
 
   // --- ITEMS / PRODUCTS & SERVICES ---
+
+  /**
+   * Movement history lives ONLY in the stock_movements ledger (in-memory sandbox
+   * collection here, stock_movements table on Azure MySQL) — never in the items
+   * table. Item reads are hydrated from the ledger by reference, so renaming an
+   * item or a location never orphans historical movement display.
+   */
+  private hydrateItemWithMovements(item: Item): Item {
+    const ledger = (this.data.stockMovements || []).slice(0, 5000).filter((m) => m.itemId === item.id);
+    if (ledger.length === 0) return item;
+    return {
+      ...item,
+      movements: ledger.slice(0, 100).map((m) => ({
+        id: m.id,
+        date: m.date,
+        type: m.type,
+        quantity: m.quantity,
+        balanceAfter: m.balanceAfter,
+        referenceNumber: m.referenceNumber,
+        sourcePartyOrBatch: m.sourcePartyOrBatch,
+        notes: m.notes,
+      })),
+    };
+  }
+
+  private findItemRaw(id: string): Item | undefined {
+    return this.data.items.find((i) => i.id === id);
+  }
+
   public getItems(filter?: { categoryId?: string; type?: string; query?: string }): Item[] {
     let result = this.data.items;
     if (filter?.categoryId && filter.categoryId !== 'all') {
@@ -580,11 +630,12 @@ class ServerLocalDatabase {
       const q = filter.query.toLowerCase();
       result = result.filter((i) => i.name.toLowerCase().includes(q) || i.code.toLowerCase().includes(q));
     }
-    return result;
+    return result.map((i) => this.hydrateItemWithMovements(i));
   }
 
   public getItemById(id: string): Item | undefined {
-    return this.data.items.find((i) => i.id === id);
+    const raw = this.findItemRaw(id);
+    return raw ? this.hydrateItemWithMovements(raw) : undefined;
   }
 
   public createItem(data: Partial<Item>): Item {
@@ -647,6 +698,8 @@ class ServerLocalDatabase {
       createdAt: data.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
+    // Movements are ledger-only: never persist movement history on the item row.
+    delete newItem.movements;
     if (existingIdx !== -1) {
       this.data.items[existingIdx] = newItem;
     } else {
@@ -697,6 +750,8 @@ class ServerLocalDatabase {
       id,
       updatedAt: new Date().toISOString(),
     };
+    // Movements are ledger-only: never persist movement history on the item row.
+    delete updated.movements;
     this.data.items[index] = updated;
     this.logAudit('UPDATE', 'ITEM', id, `Updated item ${updated.name}`);
     this.save();
@@ -716,20 +771,12 @@ class ServerLocalDatabase {
     return true;
   }
 
-  public adjustItemStock(id: string, delta: number, logType: 'purchase_inward' | 'production_output' | 'production_consumed' | 'sale_dispatch' | 'opening', refNo?: string, notes?: string, locationName?: string): Item {
-    const item = this.getItemById(id);
+  public adjustItemStock(id: string, delta: number, logType: 'purchase_inward' | 'production_output' | 'production_consumed' | 'sale_dispatch' | 'opening' | 'adjustment_increase' | 'adjustment_decrease', refNo?: string, notes?: string, locationName?: string, partyId?: string): Item {
+    const item = this.findItemRaw(id);
     if (!item) throw new Error(`Item ${id} not found.`);
     const current = item.currentStock || 0;
     const nextStock = Math.max(0, current + delta);
-    const newLog = {
-      id: `stk-${Date.now()}`,
-      date: new Date().toISOString(),
-      type: logType,
-      quantity: delta,
-      balanceAfter: nextStock,
-      referenceNumber: refNo,
-      notes: notes,
-    };
+    const movementId = `stk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
     // Normalize and deduplicate existing location stock breakdown
     let updatedLocations: ItemLocationStock[] = [];
@@ -775,6 +822,7 @@ class ServerLocalDatabase {
     }
 
     const targetLoc = locationName?.trim();
+    let targetLocationId: string | undefined;
     if (targetLoc) {
       const locIdx = updatedLocations.findIndex((l) => l.locationName.trim().toLowerCase() === targetLoc.toLowerCase());
       if (locIdx !== -1) {
@@ -783,6 +831,7 @@ class ServerLocalDatabase {
           ...updatedLocations[locIdx],
           currentStock: Math.max(0, curLocStock + delta),
         };
+        targetLocationId = updatedLocations[locIdx].locationId;
       } else if (delta > 0) {
         updatedLocations.push({
           locationName: targetLoc,
@@ -811,12 +860,47 @@ class ServerLocalDatabase {
     item.stockLocations = uniqueNames;
     item.stockLocation = uniqueNames.join(', ');
     item.lastStockUpdate = new Date().toISOString();
-    item.movements = [newLog, ...(item.movements || []).slice(0, 99)];
     item.updatedAt = new Date().toISOString();
+
+    const movement: StockMovementRecord = {
+      id: movementId,
+      itemId: item.id,
+      locationId: targetLocationId || undefined,
+      date: new Date().toISOString(),
+      type: logType,
+      quantity: delta,
+      balanceAfter: item.currentStock,
+      referenceNumber: refNo,
+      sourcePartyOrBatch: undefined, // resolved via party JOIN on read, never stored by name
+      partyId: partyId && partyId !== 'unassigned' ? partyId : undefined,
+      notes: notes,
+    };
+    switch (logType) {
+      case 'adjustment_increase':
+      case 'adjustment_decrease':
+        movement.referenceType = 'stock_adjustment';
+        break;
+      case 'opening':
+        movement.referenceType = 'opening';
+        break;
+      case 'production_output':
+      case 'production_consumed':
+        movement.referenceType = 'production_batch';
+        break;
+      default:
+        movement.referenceType = 'order';
+    }
+
+    // Append-only ledger: one INSERT per stock change, never rewritten.
+    this.data.stockMovements.unshift(movement);
 
     this.logAudit('UPDATE', 'ITEM_STOCK', id, `Adjusted stock for ${item.name} by ${delta} ${item.unit} (New: ${nextStock}${targetLoc ? ` at ${targetLoc}` : ''})`);
     this.save();
-    liveSyncItem(item);
+    if (isMysqlConfigured()) {
+      // Ledger path on Azure MySQL: INSERT movement + atomic in-place increments
+      // (no full-row REPLACE, so concurrent stock changes never overwrite each other).
+      liveSyncStockMovement(item, movement, targetLoc, partyId && partyId !== 'unassigned' ? partyId : undefined);
+    }
     return item;
   }
 
@@ -990,8 +1074,32 @@ class ServerLocalDatabase {
   }
 
   // --- ITEM STOCK ADJUSTMENTS ---
+
+  /**
+   * Voucher display fields (itemName/itemCode/unit/location) are LIVE VIEW fields:
+   * always resolved from the items table + its location mapping (or the item_locations
+   * master) at read time — so item/location renames propagate to every voucher display.
+   * Only FKs (itemId, locationId) are authoritative on the stored record.
+   */
+  private hydrateStockAdjustment(adj: ItemStockAdjustment): ItemStockAdjustment {
+    const item = this.findItemRaw(adj.itemId);
+    let locationName = adj.location;
+    if (item) {
+      if (adj.locationId && Array.isArray(item.locations)) {
+        locationName = item.locations.find((l) => l.locationId === adj.locationId)?.locationName || locationName;
+      }
+      // Master item_locations table fallback (renamed master locations propagate)
+      if (adj.locationId && !locationName) {
+        const masterLoc = (this.data.locations || []).find((ml) => ml.id === adj.locationId);
+        locationName = masterLoc?.name || locationName;
+      }
+      return { ...adj, itemName: item.name, itemCode: item.code, unit: item.unit, location: locationName };
+    }
+    return { ...adj, location: locationName };
+  }
+
   public getStockAdjustments(): ItemStockAdjustment[] {
-    return this.data.stockAdjustments || [];
+    return (this.data.stockAdjustments || []).map((a) => this.hydrateStockAdjustment(a));
   }
 
   public createStockAdjustment(adjData: Partial<ItemStockAdjustment>): ItemStockAdjustment {
@@ -999,7 +1107,16 @@ class ServerLocalDatabase {
       this.data.stockAdjustments = [];
     }
     const newId = adjData.id || `stk-adj-${Date.now()}`;
-    const count = this.data.stockAdjustments.length + 1;
+    // Generate a collision-free sequential adjustment number
+    let count = this.data.stockAdjustments.length + 1;
+    let adjustmentNumber = adjData.adjustmentNumber || '';
+    if (!adjustmentNumber) {
+      const existing = new Set(this.data.stockAdjustments.map((a) => a.adjustmentNumber));
+      do {
+        adjustmentNumber = `STK-ADJ-26/${String(count).padStart(3, '0')}`;
+        count++;
+      } while (existing.has(adjustmentNumber));
+    }
     const item = this.getItemById(adjData.itemId || '');
     const prevStock = item ? (item.currentStock || 0) : 0;
     const qty = Number(adjData.quantity) || 0;
@@ -1009,11 +1126,11 @@ class ServerLocalDatabase {
 
     const newAdj: ItemStockAdjustment = {
       id: newId,
-      adjustmentNumber: adjData.adjustmentNumber || `STK-ADJ-26/${String(count).padStart(3, '0')}`,
+      adjustmentNumber,
       itemId: adjData.itemId || '',
-      itemName: adjData.itemName || item?.name || '',
-      itemCode: adjData.itemCode || item?.code || '',
-      unit: adjData.unit || item?.unit || 'MT',
+      itemName: adjData.itemName || item?.name || '',   // display field; resolved live on read
+      itemCode: adjData.itemCode || item?.code || '',   // display field; resolved live on read
+      unit: adjData.unit || item?.unit || 'MT',         // display field; resolved live on read
       date: adjData.date || new Date().toISOString().split('T')[0],
       type: adjData.type || 'increase',
       quantity: qty,
@@ -1022,11 +1139,20 @@ class ServerLocalDatabase {
       previousStock: prevStock,
       newStock: newStock,
       reason: adjData.reason || 'Inventory Stock Reconciliation',
-      location: adjData.location || item?.stockLocation || '',
+      location: adjData.location || item?.stockLocation || '',  // display field; resolved live on read
       referenceNumber: adjData.referenceNumber || '',
       notes: adjData.notes || '',
       createdAt: adjData.createdAt || new Date().toISOString(),
     };
+    // Store the FK of the chosen storage location (display name is resolved at read time)
+    newAdj.locationId = this.findItemRaw(newAdj.itemId)?.locations?.find(
+      (l) => (l.locationName || '').trim().toLowerCase() === (newAdj.location || '').trim().toLowerCase()
+    )?.locationId;
+    if (!newAdj.locationId) {
+      // A location typed freely without an exact item-location match: fall back to the item's own location copy
+      const fallbackName = (newAdj.location || '').trim().toLowerCase();
+      newAdj.locationId = (this.data.locations || []).find((ml) => ml.name?.trim().toLowerCase() === fallbackName)?.id;
+    }
 
     this.data.stockAdjustments.unshift(newAdj);
 
@@ -1034,7 +1160,7 @@ class ServerLocalDatabase {
       this.adjustItemStock(
         item.id,
         adjData.type === 'increase' ? qty : -qty,
-        adjData.type === 'increase' ? 'opening' : 'sale_dispatch',
+        adjData.type === 'increase' ? 'adjustment_increase' : 'adjustment_decrease',
         newAdj.adjustmentNumber,
         `[Stock Adj: ${newAdj.reason}] ${newAdj.notes || ''}`.trim(),
         newAdj.location
@@ -1043,6 +1169,7 @@ class ServerLocalDatabase {
 
     this.logAudit('CREATE', 'STOCK_ADJUSTMENT', newId, `Stock Adjustment ${newAdj.adjustmentNumber} (${newAdj.type}) for ${newAdj.itemName}: ${qty} ${newAdj.unit} at ${newAdj.location || 'Storage'}`);
     this.save();
+    liveSyncStockAdjustment(newAdj, false, newAdj.locationId);
     return newAdj;
   }
 
@@ -1056,18 +1183,22 @@ class ServerLocalDatabase {
     const item = this.getItemById(adj.itemId);
     if (item) {
       const revertDelta = adj.type === 'increase' ? -adj.quantity : adj.quantity;
+      // Revert at the SAME storage the voucher touched: resolve the display name
+      // live from the location FK so a rename never breaks the revert.
+      const revertLocation = this.hydrateStockAdjustment(adj).location;
       this.adjustItemStock(
         item.id,
         revertDelta,
-        revertDelta >= 0 ? 'opening' : 'sale_dispatch',
+        revertDelta >= 0 ? 'adjustment_increase' : 'adjustment_decrease',
         `REV-${adj.adjustmentNumber}`,
         `Revert stock adjustment ${adj.adjustmentNumber}`,
-        adj.location
+        revertLocation
       );
     }
 
     this.logAudit('DELETE', 'STOCK_ADJUSTMENT', id, `Deleted stock adjustment ${adj.adjustmentNumber}`);
     this.save();
+    liveSyncStockAdjustment(adj, true, adj.locationId);
     return true;
   }
 
@@ -1101,7 +1232,7 @@ class ServerLocalDatabase {
           : isPurchase
             ? `${order.purchaseStage === 'goods_receipt' ? 'Goods Receipt / GRN' : 'Purchase Order'} from ${order.partyName} (${refNo})${item.location ? ` [${item.location}]` : ''}${item.shortageQuantity ? ` [Shortage: ${item.shortageQuantity} ${item.unit}]` : ''}`
             : `Dispatched to ${order.partyName} (Order ${order.orderNumber})${item.location ? ` [${item.location}]` : ''}`;
-        this.adjustItemStock(item.itemId, delta, logType as any, refNo, notes, item.location);
+        this.adjustItemStock(item.itemId, delta, logType as any, refNo, notes, item.location, order.partyId);
       } catch (e) {
         console.error(`Failed to sync inventory for order item ${item.itemId}:`, e);
       }

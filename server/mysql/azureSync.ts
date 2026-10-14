@@ -21,8 +21,10 @@ import {
   CashBankAccount,
   InternalTransfer,
   AccountAdjustment,
+  ItemStockAdjustment,
+  StockMovementLog,
 } from '../../src/types';
-import { DatabaseSchema, AuditLog } from '../db';
+import { DatabaseSchema, AuditLog, StockMovementRecord } from '../db';
 import {
   SEED_SETTINGS,
   SEED_ORDERS,
@@ -183,6 +185,65 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         }
       } catch (ilmErr: any) {
         console.warn('[Azure MySQL] Notice loading item_location_mapping:', ilmErr.message);
+      }
+
+      // 4c. Stock movements ledger -> hydrate item.movements (latest 100 per item, newest first).
+      // FK store: item_id / location_id / party_id only. Names are resolved with JOINs
+      // so party/item renames always propagate into the movement ledger display.
+      const stockMovements: StockMovementRecord[] = [];
+      try {
+        const [smRows]: [any[], any] = await conn.query(`
+          SELECT sm.*, p.name AS party_display,
+                 COALESCE(loc.name, ilm.location_name) AS location_display
+          FROM stock_movements sm
+          LEFT JOIN parties p ON p.id = sm.party_id
+          LEFT JOIN item_locations loc ON loc.id = sm.location_id
+          LEFT JOIN item_location_mapping ilm ON ilm.item_id = sm.item_id AND ilm.location_id = sm.location_id
+          ORDER BY sm.movement_date DESC, sm.created_at DESC
+        `);
+        const movsByItem = new Map<string, StockMovementLog[]>();
+        for (const m of smRows || []) {
+          stockMovements.push({
+            id: m.id,
+            itemId: m.item_id,
+            locationId: m.location_id || undefined,
+            locationName: m.location_display || undefined,
+            partyId: m.party_id || undefined,
+            partyName: m.party_display || undefined,
+            date: m.movement_date || m.created_at,
+            type: m.movement_type,
+            quantity: parseNum(m.quantity),
+            balanceAfter: m.balance_after !== null && m.balance_after !== undefined ? parseNum(m.balance_after) : 0,
+            referenceNumber: m.reference_number || undefined,
+            sourcePartyOrBatch: m.party_display || undefined,
+            notes: m.notes || undefined,
+            referenceType: m.reference_type || undefined,
+          } as StockMovementRecord);
+          const list = movsByItem.get(m.item_id);
+          if (!list) {
+            movsByItem.set(m.item_id, []);
+          } else if (list.length >= 100) {
+            continue;
+          }
+          movsByItem.get(m.item_id)!.push({
+            id: m.id,
+            date: m.movement_date || m.created_at,
+            type: m.movement_type,
+            quantity: parseNum(m.quantity),
+            balanceAfter: m.balance_after !== null && m.balance_after !== undefined ? parseNum(m.balance_after) : 0,
+            referenceNumber: m.reference_number || undefined,
+            sourcePartyOrBatch: m.party_display || undefined,
+            notes: m.notes || undefined,
+          });
+        }
+        for (const item of items) {
+          const ledgerMovs = movsByItem.get(item.id);
+          if (ledgerMovs && ledgerMovs.length > 0) {
+            item.movements = ledgerMovs;
+          }
+        }
+      } catch (smErr: any) {
+        console.warn('[Azure MySQL] Notice loading stock_movements ledger:', smErr.message);
       }
 
       // 5. Transactions (filter out any orphaned transactions where party does not exist)
@@ -489,6 +550,42 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         console.warn('[Azure MySQL] Notice querying account_adjustments:', adjErr.message);
       }
 
+      // 12b. Item Stock Adjustments (STK-ADJ vouchers) — names via JOIN, FKs only in storage
+      let stockAdjustments: ItemStockAdjustment[] = [];
+      try {
+        const [isaRows]: [any[], any] = await conn.query(`
+          SELECT a.*, i.name AS item_name, i.code AS item_code, i.unit AS item_unit,
+                 COALESCE(loc.name, ilm.location_name) AS location_display
+          FROM item_stock_adjustments a
+          LEFT JOIN items i ON i.id = a.item_id
+          LEFT JOIN item_locations loc ON loc.id = a.location_id
+          LEFT JOIN item_location_mapping ilm ON ilm.item_id = a.item_id AND ilm.location_id = a.location_id
+          ORDER BY a.created_at DESC, a.adjustment_date DESC
+        `);
+        stockAdjustments = (isaRows || []).map((a) => ({
+          id: a.id,
+          adjustmentNumber: a.adjustment_number,
+          itemId: a.item_id,
+          itemName: a.item_name || '',
+          itemCode: a.item_code || '',
+          unit: a.item_unit || 'MT',
+          date: a.adjustment_date,
+          type: a.adjustment_type === 'decrease' ? 'decrease' : 'increase',
+          quantity: parseNum(a.quantity),
+          rate: parseNum(a.rate),
+          totalValue: parseNum(a.total_value),
+          previousStock: parseNum(a.previous_stock),
+          newStock: parseNum(a.new_stock),
+          reason: a.reason || '',
+          location: a.location_display || undefined,
+          referenceNumber: a.reference_number || undefined,
+          notes: a.notes || undefined,
+          createdAt: a.created_at,
+        }));
+      } catch (isaErr: any) {
+        console.warn('[Azure MySQL] Notice querying item_stock_adjustments:', isaErr.message);
+      }
+
       // 13. Audit Logs
       const [audRows]: [any[], any] = await conn.query('SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 200');
       const auditLogs: AuditLog[] = audRows.map((aud) => ({
@@ -532,7 +629,8 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         accounts,
         transfers,
         adjustments,
-        stockAdjustments: [],
+        stockAdjustments,
+        stockMovements,
         auditLogs,
       };
     } finally {
@@ -629,7 +727,8 @@ export async function liveSyncItem(item: Item, isDelete = false) {
             JSON.stringify(item.locations || []),
             JSON.stringify(item.stockLocations || []),
             item.lastStockUpdate || null,
-            JSON.stringify(item.movements || []),
+            // Movements live in the stock_movements ledger only — never on the items row.
+            null,
             item.createdAt || new Date().toISOString(),
             item.updatedAt || new Date().toISOString(),
           ]
@@ -1321,3 +1420,110 @@ export async function liveSyncAdjustment(adj: AccountAdjustment, isDelete = fals
   }
 }
 
+
+export async function liveSyncStockAdjustment(adj: ItemStockAdjustment, isDelete = false, locationId?: string) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM item_stock_adjustments WHERE id = ?', [adj.id]);
+    } else {
+      // Stores FKs only (item_id, location_id); item name/code/unit and location
+      // display name are resolved with JOINs at read time so renames propagate.
+      await pool.query(
+        `REPLACE INTO item_stock_adjustments (id, adjustment_number, item_id, location_id, adjustment_date, adjustment_type, quantity, rate, total_value, previous_stock, new_stock, reason, reference_number, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          adj.id,
+          adj.adjustmentNumber,
+          adj.itemId,
+          locationId || null,
+          adj.date,
+          adj.type,
+          adj.quantity || 0,
+          adj.rate || 0,
+          adj.totalValue || 0,
+          adj.previousStock || 0,
+          adj.newStock || 0,
+          adj.reason || null,
+          adj.referenceNumber || null,
+          adj.notes || null,
+          adj.createdAt || new Date().toISOString(),
+        ]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync stock adjustment:', e.message);
+  }
+}
+
+/**
+ * Appends a stock movement to the ledger and applies the delta atomically:
+ *  - INSERT into stock_movements (append-only history; stores FKs only)
+ *  - UPDATE items.current_stock  -> atomic in-place increment (no lost-update race)
+ *  - UPDATE item_location_mapping.current_stock -> atomic per-location increment
+ * Never does a full-row REPLACE of the items row, so concurrent stock changes
+ * from orders, adjustments, and production cannot overwrite each other.
+ * The ledger stores primary keys (item_id, location_id, party_id) — display names
+ * are always resolved with JOINs at read time, so renames propagate everywhere.
+ */
+export async function liveSyncStockMovement(item: Item, movement: StockMovementRecord, locationName?: string, partyId?: string) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  const delta = Number(movement.quantity) || 0;
+  try {
+    await pool.query(
+      `INSERT INTO stock_movements (
+        id, item_id, location_id, movement_type, quantity,
+        balance_after, reference_type, reference_number, party_id, notes, movement_date, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        movement.id,
+        item.id,
+        movement.locationId || null,
+        movement.type,
+        delta,
+        movement.balanceAfter !== undefined && movement.balanceAfter !== null ? Number(movement.balanceAfter) : null,
+        movement.referenceType || null,
+        movement.referenceNumber || null,
+        movement.partyId || null,
+        movement.notes || null,
+        movement.date,
+        movement.date,
+      ]
+    );
+
+    // Atomic item-level stock increment (single statement, race-safe)
+    const [updateRes]: any = await pool.query(
+      `UPDATE items SET current_stock = current_stock + ?, last_stock_update = ?, updated_at = ? WHERE id = ?`,
+      [delta, item.lastStockUpdate || new Date().toISOString(), item.updatedAt || new Date().toISOString(), item.id]
+    );
+
+    // Row missing (item created in-memory but its create REPLACE hasn't landed yet):
+    // fall back to a full-row write carrying the already-incremented memory state.
+    if (!updateRes.affectedRows) {
+      console.warn(`[Azure MySQL LiveSync] stock movement: items row ${item.id} missing, falling back to liveSyncItem REPLACE`);
+      await liveSyncItem(item);
+    }
+
+    // Atomic per-location increment
+    if (movement.locationId || locationName?.trim()) {
+      const fallbackLocId = `loc-${locationName!.trim().toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
+      const locId = movement.locationId || fallbackLocId;
+      const now = new Date().toISOString();
+      const [locRes]: any = await pool.query(
+        `UPDATE item_location_mapping SET current_stock = current_stock + ?, updated_at = ? WHERE item_id = ? AND location_id = ?`,
+        [delta, now, item.id, locId]
+      );
+      if (!locRes.affectedRows && delta > 0) {
+        await pool.query(
+          `INSERT IGNORE INTO item_location_mapping (id, item_id, location_id, location_name, opening_stock, current_stock, min_stock_level, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [`ilm-${item.id}-${locId}`, item.id, locId, locationName?.trim() || locId, 0, delta, 0, now, now]
+        );
+      }
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to record stock movement:', e.message);
+  }
+}

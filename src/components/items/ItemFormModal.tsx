@@ -36,7 +36,9 @@ interface FormLocationEntry {
   locationName: string;
   openingStock: string;
   minStockLevel: string;
+  maxCapacity: string;
   currentStock?: number;
+  isNewRow?: boolean;
 }
 
 const GST_RATES = [0, 5, 12, 18, 28];
@@ -73,6 +75,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
         locationName: l.locationName,
         openingStock: String(l.openingStock !== undefined ? l.openingStock : 0),
         minStockLevel: String(l.minStockLevel !== undefined ? l.minStockLevel : (initialItem.minStockLevel || 0)),
+        maxCapacity: l.maxCapacity !== undefined && l.maxCapacity !== null ? String(l.maxCapacity) : '',
         currentStock: l.currentStock,
       }));
     }
@@ -86,6 +89,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
           locationName: p,
           openingStock: String(idx === 0 && initialItem.openingStock !== undefined ? initialItem.openingStock : 0),
           minStockLevel: String(idx === 0 && initialItem.minStockLevel !== undefined ? initialItem.minStockLevel : 0),
+          maxCapacity: '',
           currentStock: idx === 0 ? initialItem.currentStock : 0,
         }));
       }
@@ -96,6 +100,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
         locationName: locations[0].name,
         openingStock: initialItem?.openingStock !== undefined ? String(initialItem.openingStock) : '0',
         minStockLevel: initialItem?.minStockLevel !== undefined ? String(initialItem.minStockLevel) : '0',
+        maxCapacity: '',
         currentStock: initialItem?.currentStock,
       }];
     }
@@ -111,6 +116,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
         locationName: locations[0].name,
         openingStock: initialItem?.openingStock !== undefined ? String(initialItem.openingStock) : '0',
         minStockLevel: initialItem?.minStockLevel !== undefined ? String(initialItem.minStockLevel) : '0',
+        maxCapacity: '',
       }]);
     }
   }, [locations, type, formLocations.length, initialItem]);
@@ -120,10 +126,6 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
       ? String(initialItem.openingStockPrice)
       : (initialItem?.purchasePrice ? String(initialItem.purchasePrice) : '')
   );
-  const [openingStockDate, setOpeningStockDate] = useState(
-    initialItem?.openingStockDate || new Date().toISOString().split('T')[0]
-  );
-  
   const [isActive, setIsActive] = useState(initialItem?.isActive ?? true);
   const [error, setError] = useState('');
 
@@ -138,8 +140,6 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   );
   const numOpeningStockPrice = parseFloat(openingStockPrice) || 0;
   const calculatedOpeningValuation = totalAllocatedOpeningStock * numOpeningStockPrice;
-
-  // Add & remove location rows
   const handleAddLocationRow = () => {
     if (locations.length === 0) {
       if (onOpenLocations) onOpenLocations();
@@ -155,6 +155,8 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
         locationName: newLoc?.name || '',
         openingStock: '0',
         minStockLevel: '0',
+        maxCapacity: '',
+        isNewRow: true,
       },
     ]);
   };
@@ -166,7 +168,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
 
   const handleLocationChange = (
     index: number,
-    field: 'locationName' | 'openingStock' | 'minStockLevel',
+    field: 'locationName' | 'openingStock' | 'minStockLevel' | 'maxCapacity',
     val: string
   ) => {
     const updated = [...formLocations];
@@ -233,6 +235,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
     const mappedLocations: ItemLocationStock[] = formLocations.map((l) => {
       const locOpening = parseFloat(l.openingStock) || 0;
       const locMinSafety = parseFloat(l.minStockLevel) || 0;
+      const locMaxCapacity = l.maxCapacity ? parseFloat(l.maxCapacity) : undefined;
       const matchedMaster = locations.find((loc) => loc.name === l.locationName);
       const locCurrent = initialItem
         ? (l.currentStock !== undefined ? l.currentStock : locOpening)
@@ -242,6 +245,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
         locationName: l.locationName.trim(),
         openingStock: locOpening,
         minStockLevel: locMinSafety,
+        maxCapacity: locMaxCapacity,
         currentStock: locCurrent,
       };
     });
@@ -279,7 +283,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
           ...(type === 'product' ? {
             openingStock: totalOpeningStock,
             openingStockPrice: opPrice,
-            openingStockDate: openingStockDate || new Date().toISOString().split('T')[0],
+            openingStockDate: new Date().toISOString().split('T')[0],
             purchasePrice: opPrice,
             minStockLevel: totalMinSafetyStock,
             currentStock: totalCurrentStock,
@@ -305,7 +309,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
           ...(type === 'product' ? {
             openingStock: totalOpeningStock,
             openingStockPrice: opPrice,
-            openingStockDate: openingStockDate || new Date().toISOString().split('T')[0],
+            openingStockDate: new Date().toISOString().split('T')[0],
             purchasePrice: opPrice,
             minStockLevel: totalMinSafetyStock,
             currentStock: totalCurrentStock,
@@ -355,70 +359,6 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
               <span>{error}</span>
             </div>
           )}
-
-          {/* Type Selector (Product vs Service) */}
-          <div>
-            <label className="block text-xs font-semibold text-[var(--color-on-surface)] uppercase tracking-wider mb-2">
-              Item Classification *
-            </label>
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                type="button"
-                onClick={() => {
-                  setType('product');
-                  const prodCats = categories.filter((c) => c.type === 'product' || c.type === 'both');
-                  if (prodCats.length > 0 && !prodCats.some((c) => c.id === categoryId)) {
-                    setCategoryId(prodCats[0].id);
-                  }
-                }}
-                className={`p-3.5 rounded-2xl border flex items-center gap-3 transition-all ${
-                  type === 'product'
-                    ? 'border-[var(--color-primary)] bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)] shadow-xs ring-1 ring-[var(--color-primary)]'
-                    : 'border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)]'
-                }`}
-              >
-                <div
-                  className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold ${
-                    type === 'product' ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)]' : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
-                  }`}
-                >
-                  <Package className="w-5 h-5" />
-                </div>
-                <div className="text-left">
-                  <p className="text-xs font-bold text-[var(--color-on-surface)]">Product / Material</p>
-                  <p className="text-[10px] text-[var(--color-on-surface-variant)]">Physical goods (Stock managed in Inventory)</p>
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setType('service');
-                  const srvCats = categories.filter((c) => c.type === 'service' || c.type === 'both');
-                  if (srvCats.length > 0 && !srvCats.some((c) => c.id === categoryId)) {
-                    setCategoryId(srvCats[0].id);
-                  }
-                }}
-                className={`p-3.5 rounded-2xl border flex items-center gap-3 transition-all ${
-                  type === 'service'
-                    ? 'border-[var(--color-primary)] bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)] shadow-xs ring-1 ring-[var(--color-primary)]'
-                    : 'border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)]'
-                }`}
-              >
-                <div
-                  className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold ${
-                    type === 'service' ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)]' : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
-                  }`}
-                >
-                  <Wrench className="w-5 h-5" />
-                </div>
-                <div className="text-left">
-                  <p className="text-xs font-bold text-[var(--color-on-surface)]">Service / Contract</p>
-                  <p className="text-[10px] text-[var(--color-on-surface-variant)]">Plant hire, tipper freight, QA testing, paving</p>
-                </div>
-              </button>
-            </div>
-          </div>
 
           {/* Basic Item Info */}
           <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-4">
@@ -517,7 +457,9 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                 <select
                   value={unit}
                   onChange={(e) => setUnit(e.target.value)}
-                  className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                  disabled={!!initialItem}
+                  title={initialItem ? 'Unit of Measurement is fixed after item creation to keep stock figures comparable.' : undefined}
+                  className={`w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${initialItem ? 'opacity-50 cursor-not-allowed' : ''}`}
                   required
                 >
                   {units.map((u) => (
@@ -587,86 +529,58 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                   ))}
                 </select>
               </div>
+
+              {type === 'product' && (
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
+                    Procured Cost Rate ({currencySymbol} / {unit || 'Unit'})
+                  </label>
+                  <div className="relative">
+                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[var(--color-outline)] font-bold text-xs">
+                      {currencySymbol}
+                    </span>
+                    <input
+                      type="number"
+                      step="any"
+                      placeholder="0.00"
+                      value={openingStockPrice}
+                      onChange={(e) => setOpeningStockPrice(e.target.value)}
+                      className="w-full pl-8 pr-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                    />
+                  </div>
+                  <p className="text-[9px] text-[var(--color-outline)] mt-1 ml-2">Baseline valuation rate</p>
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Inventory Tracking, Multi-Location Allocation & Valuation (Products Only) */}
+          {/* Assigned Stock Locations (Products Only) */}
           {type === 'product' && (
-            <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-4">
+            <div className="space-y-2.5">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div>
-                  <h3 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-2">
-                    <Warehouse className="w-4 h-4 text-[var(--color-primary)]" />
-                    Storage Locations & Opening Stock Allocation
-                  </h3>
-                  <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
-                    Assign inventory across multiple silos, yards, or stockpoints
-                  </p>
-                </div>
-                {totalAllocatedOpeningStock > 0 && numOpeningStockPrice > 0 && (
-                  <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-bold bg-[var(--color-tertiary-container)] text-[var(--color-on-tertiary-container)] border border-[var(--color-outline-variant)] self-start sm:self-auto">
-                    Opening Value: {currencySymbol}{calculatedOpeningValuation.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </span>
-                )}
-              </div>
-
-              {/* Procured Price & Opening Date */}
-              <div className="p-3 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)]">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                      Procured Cost Rate ({currencySymbol} / {unit || 'Unit'})
-                    </label>
-                    <div className="relative">
-                      <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[var(--color-outline)] font-bold text-xs">
-                        {currencySymbol}
-                      </span>
-                      <input
-                        type="number"
-                        step="any"
-                        placeholder="0.00"
-                        value={openingStockPrice}
-                        onChange={(e) => setOpeningStockPrice(e.target.value)}
-                        className="w-full pl-8 pr-4 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                      />
-                    </div>
-                    <p className="text-[9px] text-[var(--color-outline)] mt-1 ml-2">Baseline valuation rate</p>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                      Opening Balance Audit Date
-                    </label>
-                    <input
-                      type="date"
-                      value={openingStockDate}
-                      onChange={(e) => setOpeningStockDate(e.target.value)}
-                      className="w-full px-4 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                    />
-                    <p className="text-[9px] text-[var(--color-outline)] mt-1 ml-2">Stock audit baseline date</p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Multi-Location Allocation Rows */}
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xs font-bold text-[var(--color-on-surface)] flex items-center gap-1.5">
                     <MapPin className="w-3.5 h-3.5 text-[var(--color-primary)]" />
                     Assigned Stock Locations ({formLocations.length})
                   </span>
-                  {onOpenLocations && (
-                    <button
-                      type="button"
-                      onClick={onOpenLocations}
-                      className="text-[11px] font-bold text-[var(--color-primary)] hover:underline flex items-center gap-1"
-                    >
-                      <Plus className="w-3 h-3" /> Manage Master Locations
-                    </button>
+                  {totalAllocatedOpeningStock > 0 && numOpeningStockPrice > 0 && (
+                    <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-bold bg-[var(--color-tertiary-container)] text-[var(--color-on-tertiary-container)] border border-[var(--color-outline-variant)]">
+                      Opening Value: {currencySymbol}{calculatedOpeningValuation.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </span>
                   )}
                 </div>
+                {onOpenLocations && (
+                  <button
+                    type="button"
+                    onClick={onOpenLocations}
+                    className="text-[11px] font-bold text-[var(--color-primary)] hover:underline flex items-center gap-1"
+                  >
+                    <Plus className="w-3 h-3" /> Manage Master Locations
+                  </button>
+                )}
+              </div>
 
-                {locations.length === 0 ? (
+              {locations.length === 0 ? (
                   <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-dashed border-[var(--color-outline-variant)] text-center space-y-3">
                     <div className="w-10 h-10 rounded-full bg-[var(--color-primary-container)] text-[var(--color-primary)] flex items-center justify-center mx-auto">
                       <Warehouse className="w-5 h-5" />
@@ -694,9 +608,9 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                       {formLocations.map((locRow, idx) => (
                         <div
                           key={idx}
-                          className="p-3.5 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] flex flex-col sm:flex-row sm:items-center gap-3 transition-all hover:border-[var(--color-primary)]/40"
+                          className="p-3.5 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] flex flex-col sm:flex-row sm:items-end gap-3 transition-all hover:border-[var(--color-primary)]/40"
                         >
-                          {/* Location Dropdown */}
+                          {/* Location Dropdown (locked for existing rows while editing) */}
                           <div className="flex-1 space-y-1">
                             <label className="block text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
                               Location #{idx + 1} *
@@ -704,8 +618,10 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                             <select
                               value={locRow.locationName}
                               onChange={(e) => handleLocationChange(idx, 'locationName', e.target.value)}
+                              disabled={!!initialItem && !locRow.isNewRow}
+                              title={initialItem && !locRow.isNewRow ? 'Existing location assignment is locked while editing. Remove this row and add a new one to change it.' : undefined}
                               required
-                              className="w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-semibold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                              className={`w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-semibold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${initialItem && !locRow.isNewRow ? 'opacity-50 cursor-not-allowed' : ''}`}
                             >
                               <option value="">-- Choose Storage Location --</option>
                               {locations.map((loc) => (
@@ -716,8 +632,8 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                             </select>
                           </div>
 
-                          {/* Opening Stock at this Location */}
-                          <div className="w-full sm:w-36 space-y-1">
+                          {/* Opening Stock at this Location (fixed after creation) */}
+                          <div className="w-full sm:w-28 space-y-1">
                             <label className="block text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
                               Opening Stock ({unit || 'Unit'})
                             </label>
@@ -728,12 +644,14 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                               placeholder="0.00"
                               value={locRow.openingStock}
                               onChange={(e) => handleLocationChange(idx, 'openingStock', e.target.value)}
-                              className="w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                              disabled={!!initialItem}
+                              title={initialItem ? 'Opening stock is fixed after item creation. Use Stock Adjustments to modify stock.' : undefined}
+                              className={`w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${initialItem ? 'opacity-50 cursor-not-allowed' : ''}`}
                             />
                           </div>
 
                           {/* Min Safety Stock at this Location */}
-                          <div className="w-full sm:w-36 space-y-1">
+                          <div className="w-full sm:w-28 space-y-1">
                             <label className="block text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
                               Min Safety Stock ({unit || 'Unit'})
                             </label>
@@ -744,6 +662,22 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                               placeholder="0.00"
                               value={locRow.minStockLevel}
                               onChange={(e) => handleLocationChange(idx, 'minStockLevel', e.target.value)}
+                              className="w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                            />
+                          </div>
+
+                          {/* Max Stock Capacity at this Location */}
+                          <div className="w-full sm:w-28 space-y-1">
+                            <label className="block text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
+                              Max Capacity ({unit || 'Unit'})
+                            </label>
+                            <input
+                              type="number"
+                              step="any"
+                              min="0"
+                              placeholder="∞"
+                              value={locRow.maxCapacity}
+                              onChange={(e) => handleLocationChange(idx, 'maxCapacity', e.target.value)}
                               className="w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                             />
                           </div>
@@ -802,7 +736,6 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                     </div>
                   </>
                 )}
-              </div>
             </div>
           )}
 
