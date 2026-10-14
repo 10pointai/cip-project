@@ -2,6 +2,8 @@ import { executeMysqlQuery, executeMysqlOne } from './queryClient';
 import { isMysqlConfigured } from './connection';
 import { Item, ItemCategory, ItemUnit, ItemLocation, ProductionBatchRun, Order, Vehicle, Driver, TripSlip, Tyre, ItemStockAdjustment, StockMovementLog } from '../../src/types';
 import { serverDb } from '../db';
+import { computeItemValuation } from '../inventoryValuation';
+import { resolveUnitIdByCode } from './azureSync';
 
 function parseJsonField<T>(field: any, fallback: T): T {
   if (!field) return fallback;
@@ -30,8 +32,11 @@ function mapItemRow(it: any): Item {
     code: it.code,
     type: it.type,
     categoryId: it.category_id,
-    categoryName: it.category_name,
-    unit: it.unit,
+    unitId: it.unit_id || undefined,
+    // categoryName / unit are LIVE VIEW fields (Golden Rule §2) — resolved by
+    // JOINs against the masters in the selecting queries.
+    categoryName: it.category_display || undefined,
+    unit: it.unit_display || it.unit_name_display || undefined,
     hsnSacCode: it.hsn_sac_code || undefined,
     taxRateGst: parseNum(it.tax_rate_gst, 18),
     salePrice: parseNum(it.sale_price),
@@ -45,9 +50,6 @@ function mapItemRow(it: any): Item {
     currentStock: parseNum(it.current_stock),
     minStockLevel: parseNum(it.min_stock_level),
     maxCapacity: it.max_capacity ? parseNum(it.max_capacity) : undefined,
-    stockLocation: it.stock_location || undefined,
-    stockLocations: parseJsonField(it.stock_locations, []),
-    locations: parseJsonField(it.locations, []),
     lastStockUpdate: it.last_stock_update || undefined,
     movements: parseJsonField(it.movements, []),
     createdAt: it.created_at,
@@ -60,11 +62,14 @@ async function attachLocationsToItems(items: Item[]): Promise<Item[]> {
   try {
     const itemIds = items.map((it) => it.id);
     const placeholders = itemIds.map(() => '?').join(',');
+    // Location NAME resolved with a JOIN against the item_locations master
+    // (no location_name copy in the mapping table).
     const mappingRows = await executeMysqlQuery(
-      `SELECT id, item_id, location_id, location_name, opening_stock, current_stock, min_stock_level
-       FROM item_location_mapping
-       WHERE item_id IN (${placeholders})
-       ORDER BY location_name ASC`,
+      `SELECT m.*, ml.name AS location_display
+       FROM item_location_mapping m
+       LEFT JOIN item_locations ml ON ml.id = m.location_id
+       WHERE m.item_id IN (${placeholders})
+       ORDER BY location_display ASC`,
       itemIds
     );
 
@@ -73,10 +78,11 @@ async function attachLocationsToItems(items: Item[]): Promise<Item[]> {
       const list = mapByItem.get(m.item_id) || [];
       list.push({
         locationId: m.location_id,
-        locationName: m.location_name,
+        locationName: m.location_display || undefined,
         openingStock: parseNum(m.opening_stock),
         currentStock: parseNum(m.current_stock),
         minStockLevel: parseNum(m.min_stock_level),
+        maxCapacity: m.max_capacity !== null && m.max_capacity !== undefined ? parseNum(m.max_capacity) : undefined,
       });
       mapByItem.set(m.item_id, list);
     }
@@ -107,18 +113,29 @@ async function attachMovementsToItems(items: Item[]): Promise<Item[]> {
     const placeholders = itemIds.map(() => '?').join(',');
     const rows = await executeMysqlQuery(
       `SELECT sm.*, p.name AS party_display,
-              COALESCE(loc.name, ilm.location_name) AS location_display
+              loc.name AS location_display
        FROM stock_movements sm
        LEFT JOIN parties p ON p.id = sm.party_id
        LEFT JOIN item_locations loc ON loc.id = sm.location_id
-       LEFT JOIN item_location_mapping ilm ON ilm.item_id = sm.item_id AND ilm.location_id = sm.location_id
+       
        WHERE sm.item_id IN (${placeholders})
        ORDER BY sm.movement_date DESC, sm.created_at DESC`,
       itemIds
     );
 
+    // Full per-item ledger for valuation (uncapped) + capped display history.
+    const fullLedger = new Map<string, { type: string; quantity: number; rate?: number | null; date?: string }[]>();
     const movsByItem = new Map<string, StockMovementLog[]>();
     for (const m of rows) {
+      const rate = m.rate !== null && m.rate !== undefined ? parseNum(m.rate) : undefined;
+      const entry = {
+        type: m.movement_type,
+        quantity: parseNum(m.quantity),
+        rate,
+        date: m.movement_date || m.created_at,
+      };
+      if (!fullLedger.has(m.item_id)) fullLedger.set(m.item_id, []);
+      fullLedger.get(m.item_id)!.push(entry);
       const list = movsByItem.get(m.item_id);
       if (!list) {
         movsByItem.set(m.item_id, []);
@@ -131,6 +148,9 @@ async function attachMovementsToItems(items: Item[]): Promise<Item[]> {
         type: m.movement_type,
         quantity: parseNum(m.quantity),
         balanceAfter: m.balance_after !== null && m.balance_after !== undefined ? parseNum(m.balance_after) : 0,
+        rate,
+        movementValue: m.movement_value !== null && m.movement_value !== undefined ? parseNum(m.movement_value) : undefined,
+        valuationRateAfter: m.valuation_rate_after !== null && m.valuation_rate_after !== undefined ? parseNum(m.valuation_rate_after) : undefined,
         referenceNumber: m.reference_number || undefined,
         sourcePartyOrBatch: m.party_display || undefined,
         notes: m.notes || undefined,
@@ -142,6 +162,10 @@ async function attachMovementsToItems(items: Item[]): Promise<Item[]> {
       if (ledgerMovs && ledgerMovs.length > 0) {
         item.movements = ledgerMovs;
       }
+      // FIFO actual-cost valuation replayed server-side from the full ledger.
+      const valuation = computeItemValuation(item, fullLedger.get(item.id) || []);
+      if (valuation.valuationRate > 0) item.valuationRate = valuation.valuationRate;
+      if (valuation.stockValue > 0) item.stockValue = valuation.stockValue;
     }
   } catch (err: any) {
     console.warn('[OperationsService] Error fetching stock_movements ledger:', err.message);
@@ -154,24 +178,30 @@ export async function fetchItemsDirect(filter: { categoryId?: string; type?: str
     return serverDb.getItems(filter);
   }
 
-  let sql = 'SELECT * FROM items WHERE 1=1';
+  // Category name + unit string resolved with JOINs against the masters
+  // (Golden Rule §2) so renames propagate to every item display.
   const params: any[] = [];
+  let sql = `SELECT it.*, c.name AS category_display, u.code AS unit_display, u.name AS unit_name_display
+             FROM items it
+             LEFT JOIN item_categories c ON c.id = it.category_id
+             LEFT JOIN item_units u ON u.id = it.unit_id
+             WHERE 1=1`;
 
   if (filter.categoryId) {
-    sql += ' AND category_id = ?';
+    sql += ' AND it.category_id = ?';
     params.push(filter.categoryId);
   }
   if (filter.type) {
-    sql += ' AND type = ?';
+    sql += ' AND it.type = ?';
     params.push(filter.type);
   }
   if (filter.query) {
-    sql += ' AND (name LIKE ? OR code LIKE ?)';
+    sql += ' AND (it.name LIKE ? OR it.code LIKE ?)';
     const q = `%${filter.query}%`;
     params.push(q, q);
   }
 
-  sql += ' ORDER BY name ASC';
+  sql += ' ORDER BY it.name ASC';
   const rows = await executeMysqlQuery(sql, params);
   const items = rows.map(mapItemRow);
   return attachMovementsToItems(await attachLocationsToItems(items));
@@ -241,12 +271,13 @@ export async function fetchStockAdjustmentsDirect(): Promise<ItemStockAdjustment
   // FK store: adjustments keep item_id/location_id only; names resolved via JOIN
   // so item/location renames stay in sync everywhere.
   const rows = await executeMysqlQuery(
-    `SELECT a.*, i.name AS item_name, i.code AS item_code, i.unit AS item_unit,
-            COALESCE(loc.name, ilm.location_name) AS location_display
+    `SELECT a.*, i.name AS item_name, i.code AS item_code,
+            u.code AS item_unit_display, u.name AS item_unit_name,
+            loc.name AS location_display
      FROM item_stock_adjustments a
      LEFT JOIN items i ON i.id = a.item_id
+     LEFT JOIN item_units u ON u.id = i.unit_id
      LEFT JOIN item_locations loc ON loc.id = a.location_id
-     LEFT JOIN item_location_mapping ilm ON ilm.item_id = a.item_id AND ilm.location_id = a.location_id
      ORDER BY a.created_at DESC, a.adjustment_date DESC`
   );
   return rows.map((a: any) => ({
@@ -255,7 +286,7 @@ export async function fetchStockAdjustmentsDirect(): Promise<ItemStockAdjustment
     itemId: a.item_id,
     itemName: a.item_name || '',
     itemCode: a.item_code || '',
-    unit: a.item_unit || 'MT',
+    unit: a.item_unit_display || a.item_unit_name || 'MT',
     date: a.adjustment_date,
     type: a.adjustment_type === 'decrease' ? 'decrease' : 'increase',
     quantity: parseNum(a.quantity),
@@ -472,16 +503,17 @@ async function syncItemLocationMappings(itemId: string, locations: any[]) {
     [itemId, ...locIds]
   );
 
-  // Upsert current mapped locations
+  // Upsert current mapped locations (FKs only — no location_name copy;
+  // numeric stock fields + optional per-location max capacity)
   for (const l of locations) {
     const locId = l.locationId || `loc-${l.locationName.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
     const mappingId = `ilm-${itemId}-${locId}`;
     await executeMysqlQuery(
       `INSERT INTO item_location_mapping (
-        id, item_id, location_id, location_name, opening_stock, current_stock, min_stock_level, created_at, updated_at
+        id, item_id, location_id, max_capacity, opening_stock, current_stock, min_stock_level, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE
-        location_name = VALUES(location_name),
+        max_capacity = VALUES(max_capacity),
         opening_stock = VALUES(opening_stock),
         current_stock = VALUES(current_stock),
         min_stock_level = VALUES(min_stock_level),
@@ -490,7 +522,7 @@ async function syncItemLocationMappings(itemId: string, locations: any[]) {
         mappingId,
         itemId,
         locId,
-        l.locationName,
+        l.maxCapacity !== undefined && l.maxCapacity !== null ? Number(l.maxCapacity) : null,
         Number(l.openingStock) || 0,
         Number(l.currentStock) || 0,
         Number(l.minStockLevel) || 0,
@@ -505,18 +537,21 @@ export async function createItemDirect(itemData: any): Promise<Item> {
   const item = serverDb.createItem(itemData);
   if (!isMysqlConfigured()) return item;
 
+  // FK store (Golden Rule §2): categoryId + unit_id only — the category name,
+  // unit string and all location data are JOINed at read time / live in
+  // item_location_mapping (written below).
+  const unitId = await resolveUnitIdByCode(item.unit);
   await executeMysqlQuery(
     `INSERT INTO items (
-      id, name, code, type, category_id, category_name, unit, hsn_sac_code,
+      id, name, code, type, category_id, unit_id, hsn_sac_code,
       tax_rate_gst, sale_price, purchase_price, opening_stock, opening_stock_price,
       opening_stock_date, technical_specs, remarks, is_active, current_stock,
-      min_stock_level, max_capacity, stock_location, locations, stock_locations,
-      last_stock_update, movements, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      min_stock_level, max_capacity, last_stock_update, movements, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       name=VALUES(name), code=VALUES(code), type=VALUES(type),
-      category_id=VALUES(category_id), category_name=VALUES(category_name),
-      unit=VALUES(unit), hsn_sac_code=VALUES(hsn_sac_code),
+      category_id=VALUES(category_id), unit_id=VALUES(unit_id),
+      hsn_sac_code=VALUES(hsn_sac_code),
       tax_rate_gst=VALUES(tax_rate_gst), sale_price=VALUES(sale_price),
       purchase_price=VALUES(purchase_price),
       opening_stock=VALUES(opening_stock), opening_stock_price=VALUES(opening_stock_price),
@@ -524,9 +559,8 @@ export async function createItemDirect(itemData: any): Promise<Item> {
       technical_specs=VALUES(technical_specs),
       remarks=VALUES(remarks), is_active=VALUES(is_active),
       current_stock=VALUES(current_stock), min_stock_level=VALUES(min_stock_level),
-      max_capacity=VALUES(max_capacity), stock_location=VALUES(stock_location),
-      locations=VALUES(locations), stock_locations=VALUES(stock_locations),
-      last_stock_update=VALUES(last_stock_update), movements=VALUES(movements),
+      max_capacity=VALUES(max_capacity), movements=VALUES(movements),
+      last_stock_update=VALUES(last_stock_update),
       updated_at=VALUES(updated_at)`,
     [
       item.id,
@@ -534,8 +568,7 @@ export async function createItemDirect(itemData: any): Promise<Item> {
       item.code,
       item.type,
       item.categoryId,
-      item.categoryName,
-      item.unit,
+      item.unitId || unitId || null,
       item.hsnSacCode || null,
       item.taxRateGst || 18,
       item.salePrice || 0,
@@ -549,11 +582,9 @@ export async function createItemDirect(itemData: any): Promise<Item> {
       item.currentStock || 0,
       item.minStockLevel || 0,
       item.maxCapacity || null,
-      item.stockLocation || null,
-      JSON.stringify(item.locations || []),
-      JSON.stringify(item.stockLocations || []),
       item.lastStockUpdate || null,
-      JSON.stringify(item.movements || []),
+      // Movements live in the stock_movements ledger only — never on the items row.
+      null,
       item.createdAt || new Date().toISOString(),
       item.updatedAt || new Date().toISOString(),
     ]
@@ -574,61 +605,59 @@ export async function updateItemDirect(id: string, updates: any): Promise<Item |
   const item = serverDb.updateItem(id, updates);
   if (!item || !isMysqlConfigured()) return item;
 
+  // FK store + full-SET from the merged item (no COALESCE, no name copies —
+  // Golden Rule §2; the mapping table below carries per-location stock).
+  const unitId = await resolveUnitIdByCode(item.unit);
   await executeMysqlQuery(
     `UPDATE items SET
-      name = COALESCE(?, name),
-      code = COALESCE(?, code),
-      type = COALESCE(?, type),
-      category_id = COALESCE(?, category_id),
-      category_name = COALESCE(?, category_name),
-      unit = COALESCE(?, unit),
-      hsn_sac_code = COALESCE(?, hsn_sac_code),
-      tax_rate_gst = COALESCE(?, tax_rate_gst),
-      sale_price = COALESCE(?, sale_price),
-      purchase_price = COALESCE(?, purchase_price),
-      opening_stock = COALESCE(?, opening_stock),
-      opening_stock_price = COALESCE(?, opening_stock_price),
-      opening_stock_date = COALESCE(?, opening_stock_date),
-      technical_specs = COALESCE(?, technical_specs),
-      remarks = COALESCE(?, remarks),
-      is_active = COALESCE(?, is_active),
-      current_stock = COALESCE(?, current_stock),
-      min_stock_level = COALESCE(?, min_stock_level),
-      max_capacity = COALESCE(?, max_capacity),
-      stock_location = COALESCE(?, stock_location),
-      locations = COALESCE(?, locations),
-      stock_locations = COALESCE(?, stock_locations),
+      name = ?,
+      code = ?,
+      type = ?,
+      category_id = ?,
+      unit_id = ?,
+      hsn_sac_code = ?,
+      tax_rate_gst = ?,
+      sale_price = ?,
+      purchase_price = ?,
+      opening_stock = ?,
+      opening_stock_price = ?,
+      opening_stock_date = ?,
+      technical_specs = ?,
+      remarks = ?,
+      is_active = ?,
+      current_stock = ?,
+      min_stock_level = ?,
+      max_capacity = ?,
+      movements = NULL,
+      last_stock_update = ?,
       updated_at = ?
     WHERE id = ?`,
     [
-      updates.name || null,
-      updates.code || null,
-      updates.type || null,
-      updates.categoryId || null,
-      updates.categoryName || null,
-      updates.unit || null,
-      updates.hsnSacCode || null,
-      updates.taxRateGst !== undefined ? updates.taxRateGst : null,
-      updates.salePrice !== undefined ? updates.salePrice : null,
-      updates.purchasePrice !== undefined ? updates.purchasePrice : null,
-      updates.openingStock !== undefined ? updates.openingStock : null,
-      updates.openingStockPrice !== undefined ? updates.openingStockPrice : null,
-      updates.openingStockDate || null,
-      updates.technicalSpecs || null,
-      updates.remarks || null,
-      updates.isActive !== undefined ? (updates.isActive ? 1 : 0) : null,
-      updates.currentStock !== undefined ? updates.currentStock : null,
-      updates.minStockLevel !== undefined ? updates.minStockLevel : null,
-      updates.maxCapacity !== undefined ? updates.maxCapacity : null,
-      updates.stockLocation || null,
-      updates.locations !== undefined ? JSON.stringify(updates.locations) : null,
-      updates.stockLocations !== undefined ? JSON.stringify(updates.stockLocations) : null,
-      new Date().toISOString(),
+      item.name,
+      item.code,
+      item.type,
+      item.categoryId,
+      item.unitId || unitId || null,
+      item.hsnSacCode || null,
+      item.taxRateGst || 18,
+      item.salePrice || 0,
+      item.purchasePrice || 0,
+      item.openingStock !== undefined ? item.openingStock : null,
+      item.openingStockPrice !== undefined ? item.openingStockPrice : null,
+      item.openingStockDate || null,
+      item.technicalSpecs || null,
+      item.remarks || null,
+      item.isActive ? 1 : 0,
+      item.currentStock || 0,
+      item.minStockLevel || 0,
+      item.maxCapacity || null,
+      item.lastStockUpdate || null,
+      item.updatedAt || new Date().toISOString(),
       id,
     ]
   );
 
-  if (updates.locations !== undefined) {
+  if (item.locations !== undefined) {
     try {
       await syncItemLocationMappings(id, updates.locations);
     } catch (mErr: any) {

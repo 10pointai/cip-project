@@ -87,13 +87,9 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
       if (defaultRate > 0) {
         setRate(String(defaultRate));
       }
-      if (itemConfiguredLocations.length > 0) {
-        setLocation(itemConfiguredLocations[0].locationName);
-      } else if (selectedItem.stockLocation) {
-        setLocation(selectedItem.stockLocation);
-      } else if (locations.length > 0) {
-        setLocation(locations[0].name);
-      }
+      // Default to the item's first ASSIGNED location; never pre-select an
+      // unassigned master location — adjustments only apply to assigned ones.
+      setLocation(itemConfiguredLocations.length > 0 ? itemConfiguredLocations[0].locationName : '');
     }
   }, [selectedItemId]);
 
@@ -119,7 +115,7 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
       return;
     }
     if (!location.trim()) {
-      setError('Please select or enter the storage location being adjusted.');
+      setError('Please select the storage location being adjusted. Only locations assigned to this item are allowed.');
       return;
     }
     if (numQty <= 0) {
@@ -395,27 +391,17 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
                 className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:ring-2 focus:ring-[var(--color-primary)]"
               >
                 <option value="">-- Choose Location to Adjust --</option>
-                {itemConfiguredLocations.length > 0 && (
-                  <optgroup label="Assigned Locations for this Item">
-                    {itemConfiguredLocations.map((loc, idx) => (
-                      <option key={`cfg-${idx}`} value={loc.locationName}>
-                        {loc.locationName} (Available: {Number(loc.currentStock || 0).toLocaleString('en-IN')} {selectedItem?.unit})
-                      </option>
-                    ))}
-                  </optgroup>
-                )}
-                {locations.filter((l) => !itemConfiguredLocations.some((c) => c.locationName.toLowerCase().trim() === l.name.toLowerCase().trim())).length > 0 && (
-                  <optgroup label="Other Available Master Locations">
-                    {locations
-                      .filter((l) => !itemConfiguredLocations.some((c) => c.locationName.toLowerCase().trim() === l.name.toLowerCase().trim()))
-                      .map((loc) => (
-                        <option key={loc.id} value={loc.name}>
-                          {loc.name} {loc.capacity ? `(${loc.capacity})` : ''}
-                        </option>
-                      ))}
-                  </optgroup>
-                )}
+                {itemConfiguredLocations.map((loc, idx) => (
+                  <option key={`cfg-${idx}`} value={loc.locationName}>
+                    {loc.locationName} (Available: {Number(loc.currentStock || 0).toLocaleString('en-IN')} {selectedItem?.unit})
+                  </option>
+                ))}
               </select>
+              {itemConfiguredLocations.length === 0 && (
+                <p className="text-[10px] text-[var(--color-error)] mt-1 font-medium">
+                  This item has no assigned storage locations. Assign locations in the Item Master first.
+                </p>
+              )}
 
               {locationStock !== undefined && numQty > 0 && (
                 <div className="mt-1.5 px-3 py-1 bg-[var(--color-surface-container-high)] rounded-xl border border-[var(--color-outline-variant)] flex items-center justify-between text-[11px]">

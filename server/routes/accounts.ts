@@ -121,7 +121,10 @@ transfersRouter.get('/', async (req: Request, res: Response) => {
 // POST /api/transfers
 transfersRouter.post('/', requireEitherPermission('record_payments', 'manage_cash_bank'), async (req: Request, res: Response) => {
   try {
-    const { date, fromAccountId, fromAccountName, toAccountId, toAccountName, transferType, amount, referenceNumber, notes } = req.body;
+    // Accounts are stored by FK ONLY (Golden Rule §2) — no name copies are
+    // accepted or fabricated here. Display names are resolved with JOINs
+    // against cash_bank_accounts at read time.
+    const { date, fromAccountId, toAccountId, transferType, amount, referenceNumber, notes } = req.body;
     if (!fromAccountId || !toAccountId || !amount) {
       return res.status(400).json({ success: false, error: 'Source account, destination account, and amount are required' });
     }
@@ -130,19 +133,19 @@ transfersRouter.post('/', requireEitherPermission('record_payments', 'manage_cas
       return res.status(400).json({ success: false, error: 'Source and destination accounts must be different' });
     }
 
-    const newTransfer = await serverDb.addTransferAsync({
+    const created = await serverDb.addTransferAsync({
       date: date || new Date().toISOString().split('T')[0],
       fromAccountId,
-      fromAccountName: fromAccountName || 'Source Account',
       toAccountId,
-      toAccountName: toAccountName || 'Destination Account',
       transferType: transferType || 'bank_to_bank',
       amount: Number(amount) || 0,
       referenceNumber,
       notes,
     });
 
-    res.status(201).json({ success: true, message: 'Transfer recorded successfully', data: newTransfer });
+    // Respond with the read-model row (account names JOIN-resolved)
+    const hydratedTransfer = (await fetchTransfersDirect()).find((t: any) => t.id === created.id);
+    res.status(201).json({ success: true, message: 'Transfer recorded successfully', data: hydratedTransfer });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -178,15 +181,15 @@ adjustmentsRouter.get('/', async (req: Request, res: Response) => {
 // POST /api/adjustments
 adjustmentsRouter.post('/', requirePermission('manage_cash_bank'), async (req: Request, res: Response) => {
   try {
-    const { accountId, accountName, accountType, date, type, amount, reason, referenceNumber, notes } = req.body;
+    // Account stored by FK ONLY (Golden Rule §2) — no name copies. The display
+    // name/type are resolved with JOINs against cash_bank_accounts at read time.
+    const { accountId, date, type, amount, reason, referenceNumber, notes } = req.body;
     if (!accountId || !amount || !type || !reason) {
       return res.status(400).json({ success: false, error: 'Account, amount, adjustment type, and reason are required' });
     }
 
-    const newAdjustment = await serverDb.addAdjustmentAsync({
+    const created = await serverDb.addAdjustmentAsync({
       accountId,
-      accountName: accountName || 'Account',
-      accountType: accountType || 'bank',
       date: date || new Date().toISOString().split('T')[0],
       type,
       amount: Number(amount) || 0,
@@ -195,7 +198,9 @@ adjustmentsRouter.post('/', requirePermission('manage_cash_bank'), async (req: R
       notes,
     });
 
-    res.status(201).json({ success: true, message: 'Adjustment recorded successfully', data: newAdjustment });
+    // Respond with the read-model row (account name/type JOIN-resolved)
+    const hydratedAdjustment = (await fetchAdjustmentsDirect()).find((a: any) => a.id === created.id);
+    res.status(201).json({ success: true, message: 'Adjustment recorded successfully', data: hydratedAdjustment });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }

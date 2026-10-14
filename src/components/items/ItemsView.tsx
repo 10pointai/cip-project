@@ -127,6 +127,9 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
   const catalogStats = useMemo(() => {
     const products = items.filter((i) => i.type === 'product');
     const services = items.filter((i) => i.type === 'service');
+    // Stock Valuation card values every product at its item MASTER cost rate
+    // (default: Opening Cost -> Purchase -> Sale). FIFO lots stay recorded on
+    // the stock_movements ledger for audit, but do not drive this card.
     const totalInventoryValue = products.reduce((acc, itm) => {
       const rate = itm.openingStockPrice || itm.purchasePrice || itm.salePrice || 0;
       return acc + (itm.currentStock || 0) * rate;
@@ -307,16 +310,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
   ) => {
     localDb.createStockAdjustment(adjData);
     setIsStockAdjustmentModalOpen(false);
-  };
-
-  const handleDeleteAdjustment = (adj: ItemStockAdjustment) => {
-    if (
-      window.confirm(
-        `Are you sure you want to delete and revert stock adjustment ${adj.adjustmentNumber || ''} for "${adj.itemName}"? This will undo the stock change.`
-      )
-    ) {
-      localDb.deleteStockAdjustment(adj.id);
-    }
   };
 
   const handleExportCSV = () => {
@@ -554,52 +547,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
               </p>
             </div>
 
-            {/* Products Card */}
-            <div
-              onClick={() => setTypeFilter(typeFilter === 'product' ? 'all' : 'product')}
-              className={`p-4 rounded-2xl border cursor-pointer transition-all ${
-                typeFilter === 'product'
-                  ? 'bg-[var(--color-primary-container)]/30 border-[var(--color-primary)]'
-                  : 'bg-[var(--color-surface-container-lowest)] border-[var(--color-outline-variant)]'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-                  Physical Products
-                </span>
-                <div className="w-8 h-8 rounded-xl bg-[var(--color-surface-container-high)] text-[var(--color-primary)] flex items-center justify-center font-bold">
-                  <Warehouse className="w-4 h-4" />
-                </div>
-              </div>
-              <p className="text-2xl font-black text-[var(--color-on-surface)] mt-2">{catalogStats.totalProducts}</p>
-              <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                Asphalt mixes, Bitumen, Aggregates
-              </p>
-            </div>
-
-            {/* Services Card */}
-            <div
-              onClick={() => setTypeFilter(typeFilter === 'service' ? 'all' : 'service')}
-              className={`p-4 rounded-2xl border cursor-pointer transition-all ${
-                typeFilter === 'service'
-                  ? 'bg-[var(--color-success-container)]/40 border-[var(--color-success)]'
-                  : 'bg-[var(--color-surface-container-lowest)] border-[var(--color-outline-variant)]'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-                  Equipment & Services
-                </span>
-                <div className="w-8 h-8 rounded-xl bg-[var(--color-success-container)] text-[var(--color-success)] flex items-center justify-center font-bold">
-                  <Wrench className="w-4 h-4" />
-                </div>
-              </div>
-              <p className="text-2xl font-black text-[var(--color-on-surface)] mt-2">{catalogStats.totalServices}</p>
-              <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                Paver hire, haulage, core testing
-              </p>
-            </div>
-
             {/* Inventory Valuation */}
             <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs">
               <div className="flex items-center justify-between">
@@ -614,7 +561,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                 {currencySymbol} {catalogStats.totalInventoryValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
               </p>
               <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                Valued by opening / cost rate
+                Valued at item master cost rate
               </p>
             </div>
           </div>
@@ -735,45 +682,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                 </div>
               </div>
             </div>
-
-            {/* Quick Filter Pill Tabs */}
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
-              <button
-                type="button"
-                onClick={() => setTypeFilter('all')}
-                className={`px-3 py-1 rounded-full font-bold whitespace-nowrap transition-colors ${
-                  typeFilter === 'all'
-                    ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)]'
-                    : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)]'
-                }`}
-              >
-                All Items ({items.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setTypeFilter('product')}
-                className={`px-3 py-1 rounded-full font-bold whitespace-nowrap flex items-center gap-1 transition-colors ${
-                  typeFilter === 'product'
-                    ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)]'
-                    : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)]'
-                }`}
-              >
-                <Package className="w-3 h-3" />
-                Products ({catalogStats.totalProducts})
-              </button>
-              <button
-                type="button"
-                onClick={() => setTypeFilter('service')}
-                className={`px-3 py-1 rounded-full font-bold whitespace-nowrap flex items-center gap-1 transition-colors ${
-                  typeFilter === 'service'
-                    ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)]'
-                    : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)]'
-                }`}
-              >
-                <Wrench className="w-3 h-3" />
-                Services ({catalogStats.totalServices})
-              </button>
-            </div>
           </div>
 
           {/* Item List Rendering (Table vs Cards) */}
@@ -818,6 +726,8 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                   <tbody className="divide-y divide-[var(--color-outline-variant)]">
                     {filteredItems.map((item) => {
                       const category = categories.find((c) => c.id === item.categoryId);
+                      // Live FIFO valuation rate from the ledger; catalog chain as fallback
+                      // Item master's default cost rate (NOT the FIFO blend — lots only drive the Stock Valuation card)
                       const costRate = item.openingStockPrice || item.purchasePrice || 0;
                       const rawLocs = item.type === 'product'
                         ? (item.locations && item.locations.length > 0
@@ -999,14 +909,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                               >
                                 <Edit2 className="w-3.5 h-3.5" />
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => handleDelete(item)}
-                                className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-error)] hover:bg-[var(--color-error-container)] rounded-full transition-colors"
-                                title="Delete Item"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
                             </div>
                           </td>
                         </tr>
@@ -1021,6 +923,8 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {filteredItems.map((item) => {
                 const category = categories.find((c) => c.id === item.categoryId);
+                // Live FIFO valuation rate from the ledger; catalog chain as fallback
+                // Item master's default cost rate (NOT the FIFO blend — lots only drive the Stock Valuation card)
                 const costRate = item.openingStockPrice || item.purchasePrice || 0;
                 const rawCardLocs = item.type === 'product'
                   ? (item.locations && item.locations.length > 0
@@ -1173,14 +1077,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                           title="Edit Item"
                         >
                           <Edit2 className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDelete(item)}
-                          className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-error)] hover:bg-[var(--color-error-container)] rounded-full transition-colors"
-                          title="Delete Item"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
                     </div>
@@ -1410,7 +1306,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                       <th className="py-3.5 px-3 text-right">Rate & Valuation</th>
                       <th className="py-3.5 px-3 text-center">Stock Progression</th>
                       <th className="py-3.5 px-3">Reason & Reference</th>
-                      <th className="py-3.5 px-4 text-center">Action</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--color-outline-variant)]">
@@ -1522,17 +1417,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                             </div>
                           </td>
 
-                          {/* Action */}
-                          <td className="py-3 px-4 text-center">
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteAdjustment(adj)}
-                              className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-error)] hover:bg-[var(--color-error-container)] rounded-full transition-colors"
-                              title="Delete & Revert Adjustment"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </td>
                         </tr>
                       );
                     })}

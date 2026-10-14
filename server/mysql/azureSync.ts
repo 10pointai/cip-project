@@ -1,4 +1,5 @@
 import { getMysqlPool, isMysqlConfigured } from './connection';
+import { computeItemValuation } from '../inventoryValuation';
 import {
   CompanySettings,
   Party,
@@ -128,16 +129,26 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         updatedAt: p.updated_at,
       }));
 
-      // 4. Items
-      const [itemRows]: [any[], any] = await conn.query('SELECT * FROM items ORDER BY name ASC');
+      // 4. Items — category NAME and unit STRING are LIVE VIEWS (Golden Rule §2):
+      // resolved with JOINs against the item_categories / item_units masters so
+      // renames propagate everywhere. Per-location stock is NOT stored here —
+      // it is attached from item_location_mapping below.
+      const [itemRows]: [any[], any] = await conn.query(
+        `SELECT it.*, c.name AS category_display, u.code AS unit_display, u.name AS unit_name_display
+         FROM items it
+         LEFT JOIN item_categories c ON c.id = it.category_id
+         LEFT JOIN item_units u ON u.id = it.unit_id
+         ORDER BY it.name ASC`
+      );
       const items: Item[] = itemRows.map((it) => ({
         id: it.id,
         name: it.name,
         code: it.code,
         type: it.type,
         categoryId: it.category_id,
-        categoryName: it.category_name,
-        unit: it.unit,
+        unitId: it.unit_id || undefined,
+        categoryName: it.category_display || undefined,
+        unit: it.unit_display || it.unit_name_display || undefined,
         hsnSacCode: it.hsn_sac_code || undefined,
         taxRateGst: parseNum(it.tax_rate_gst, 18),
         salePrice: parseNum(it.sale_price),
@@ -151,9 +162,8 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         currentStock: parseNum(it.current_stock),
         minStockLevel: parseNum(it.min_stock_level),
         maxCapacity: it.max_capacity ? parseNum(it.max_capacity) : undefined,
-        stockLocation: it.stock_location || undefined,
-        stockLocations: parseJsonField(it.stock_locations, []),
-        locations: parseJsonField(it.locations, []),
+        // locations / stockLocations / stockLocation arrive from the
+        // item_location_mapping JOIN below (no name copies on the items row)
         lastStockUpdate: it.last_stock_update || undefined,
         movements: parseJsonField(it.movements, []),
         createdAt: it.created_at,
@@ -162,16 +172,24 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
 
       // 4b. Load and attach normalized item location mappings
       try {
-        const [ilmRows]: [any[], any] = await conn.query('SELECT * FROM item_location_mapping ORDER BY location_name ASC');
+        // Location NAME resolved with a JOIN against the item_locations master
+        // (no location_name copy in the mapping table).
+        const [ilmRows]: [any[], any] = await conn.query(
+          `SELECT m.*, ml.name AS location_display
+           FROM item_location_mapping m
+           LEFT JOIN item_locations ml ON ml.id = m.location_id
+           ORDER BY location_display ASC`
+        );
         const mappingByItem = new Map<string, any[]>();
         for (const m of ilmRows || []) {
           const list = mappingByItem.get(m.item_id) || [];
           list.push({
             locationId: m.location_id,
-            locationName: m.location_name,
+            locationName: m.location_display || undefined,
             openingStock: parseNum(m.opening_stock),
             currentStock: parseNum(m.current_stock),
             minStockLevel: parseNum(m.min_stock_level),
+            maxCapacity: m.max_capacity !== null && m.max_capacity !== undefined ? parseNum(m.max_capacity) : undefined,
           });
           mappingByItem.set(m.item_id, list);
         }
@@ -194,11 +212,11 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
       try {
         const [smRows]: [any[], any] = await conn.query(`
           SELECT sm.*, p.name AS party_display,
-                 COALESCE(loc.name, ilm.location_name) AS location_display
+                 loc.name AS location_display
           FROM stock_movements sm
           LEFT JOIN parties p ON p.id = sm.party_id
           LEFT JOIN item_locations loc ON loc.id = sm.location_id
-          LEFT JOIN item_location_mapping ilm ON ilm.item_id = sm.item_id AND ilm.location_id = sm.location_id
+          
           ORDER BY sm.movement_date DESC, sm.created_at DESC
         `);
         const movsByItem = new Map<string, StockMovementLog[]>();
@@ -214,6 +232,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
             type: m.movement_type,
             quantity: parseNum(m.quantity),
             balanceAfter: m.balance_after !== null && m.balance_after !== undefined ? parseNum(m.balance_after) : 0,
+            rate: m.rate !== null && m.rate !== undefined ? parseNum(m.rate) : undefined,
+            movementValue: m.movement_value !== null && m.movement_value !== undefined ? parseNum(m.movement_value) : undefined,
+            valuationRateAfter: m.valuation_rate_after !== null && m.valuation_rate_after !== undefined ? parseNum(m.valuation_rate_after) : undefined,
             referenceNumber: m.reference_number || undefined,
             sourcePartyOrBatch: m.party_display || undefined,
             notes: m.notes || undefined,
@@ -241,25 +262,39 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
           if (ledgerMovs && ledgerMovs.length > 0) {
             item.movements = ledgerMovs;
           }
+          // FIFO actual-cost valuation, replayed from the FULL ledger
+          // (not the 100-row display cap) at read time, server-side.
+          const fullLedger = stockMovements.filter((m) => m.itemId === item.id);
+          const valuation = computeItemValuation(item, fullLedger);
+          if (valuation.valuationRate > 0) item.valuationRate = valuation.valuationRate;
+          if (valuation.stockValue > 0) item.stockValue = valuation.stockValue;
         }
       } catch (smErr: any) {
         console.warn('[Azure MySQL] Notice loading stock_movements ledger:', smErr.message);
       }
 
-      // 5. Transactions (filter out any orphaned transactions where party does not exist)
-      const validPartyIds = new Set(parties.map((p) => p.id));
-      const [txRows]: [any[], any] = await conn.query('SELECT * FROM transactions ORDER BY date DESC, created_at DESC');
+      // 5. Transactions (filter out any orphaned transactions where party does not exist).
+      // partyName AND accountName are LIVE VIEWS (Golden Rule §2): resolved with JOINs
+      // against the parties / cash_bank_accounts masters at read time, so renames
+      // update every voucher display. No name copies are stored on the row.
+      const [txRows]: [any[], any] = await conn.query(
+        `SELECT t.*, p.id AS party_exists, p.name AS party_display, acc.name AS account_display
+         FROM transactions t
+         LEFT JOIN parties p ON p.id = t.party_id
+         LEFT JOIN cash_bank_accounts acc ON acc.id = t.account_id
+         ORDER BY t.date DESC, t.created_at DESC`
+      );
       const transactions: Transaction[] = txRows
-        .filter((t) => validPartyIds.has(t.party_id))
+        .filter((t) => t.party_exists !== null && t.party_exists !== undefined)
         .map((t) => ({
         id: t.id,
         voucherNumber: t.voucher_number,
         date: t.date,
         accountId: t.account_id || undefined,
-        accountName: t.account_name || undefined,
+        accountName: t.account_display || undefined,
         type: t.type,
         partyId: t.party_id,
-        partyName: t.party_name,
+        partyName: t.party_display || undefined,
         partyType: (t.party_type as any) || 'customer',
         amount: parseNum(t.amount),
         paymentMode: t.payment_mode || undefined,
@@ -508,15 +543,23 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
 
       let transfers: InternalTransfer[] = [];
       try {
-        const [trfRows]: [any[], any] = await conn.query('SELECT * FROM internal_transfers ORDER BY date DESC, created_at DESC');
+        // Names are resolved with JOINs against the account master so account
+        // renames propagate to every transfer display (Golden Rule §2).
+        const [trfRows]: [any[], any] = await conn.query(
+          `SELECT tr.*, fa.name AS from_account_display, ta.name AS to_account_display
+           FROM internal_transfers tr
+           LEFT JOIN cash_bank_accounts fa ON fa.id = tr.from_account_id
+           LEFT JOIN cash_bank_accounts ta ON ta.id = tr.to_account_id
+           ORDER BY tr.date DESC, tr.created_at DESC`
+        );
         transfers = trfRows.map((tr) => ({
           id: tr.id,
           transferNumber: tr.transfer_number,
           date: tr.date,
           fromAccountId: tr.from_account_id,
-          fromAccountName: tr.from_account_name,
+          fromAccountName: tr.from_account_display || undefined,
           toAccountId: tr.to_account_id,
-          toAccountName: tr.to_account_name,
+          toAccountName: tr.to_account_display || undefined,
           transferType: tr.transfer_type,
           amount: parseNum(tr.amount),
           referenceNumber: tr.reference_number || undefined,
@@ -529,13 +572,19 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
 
       let adjustments: AccountAdjustment[] = [];
       try {
-        const [adjRows]: [any[], any] = await conn.query('SELECT * FROM account_adjustments ORDER BY date DESC, created_at DESC');
+        // Account name/type resolved with JOINs (Golden Rule §2).
+        const [adjRows]: [any[], any] = await conn.query(
+          `SELECT aj.*, acc.name AS account_display, acc.type AS account_type_display
+           FROM account_adjustments aj
+           LEFT JOIN cash_bank_accounts acc ON acc.id = aj.account_id
+           ORDER BY aj.date DESC, aj.created_at DESC`
+        );
         adjustments = adjRows.map((ad) => ({
           id: ad.id,
           adjustmentNumber: ad.adjustment_number,
           accountId: ad.account_id,
-          accountName: ad.account_name,
-          accountType: ad.account_type,
+          accountName: ad.account_display || undefined,
+          accountType: ad.account_type_display || undefined,
           date: ad.date,
           type: ad.type,
           amount: parseNum(ad.amount),
@@ -554,12 +603,13 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
       let stockAdjustments: ItemStockAdjustment[] = [];
       try {
         const [isaRows]: [any[], any] = await conn.query(`
-          SELECT a.*, i.name AS item_name, i.code AS item_code, i.unit AS item_unit,
-                 COALESCE(loc.name, ilm.location_name) AS location_display
+          SELECT a.*, i.name AS item_name, i.code AS item_code,
+                 u.code AS item_unit_display, u.name AS item_unit_name,
+                 COALESCE(loc.name) AS location_display
           FROM item_stock_adjustments a
           LEFT JOIN items i ON i.id = a.item_id
+          LEFT JOIN item_units u ON u.id = i.unit_id
           LEFT JOIN item_locations loc ON loc.id = a.location_id
-          LEFT JOIN item_location_mapping ilm ON ilm.item_id = a.item_id AND ilm.location_id = a.location_id
           ORDER BY a.created_at DESC, a.adjustment_date DESC
         `);
         stockAdjustments = (isaRows || []).map((a) => ({
@@ -568,7 +618,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
           itemId: a.item_id,
           itemName: a.item_name || '',
           itemCode: a.item_code || '',
-          unit: a.item_unit || 'MT',
+          unit: a.item_unit_display || a.item_unit_name || 'MT',
           date: a.adjustment_date,
           type: a.adjustment_type === 'decrease' ? 'decrease' : 'increase',
           quantity: parseNum(a.quantity),
@@ -685,6 +735,28 @@ export async function liveSyncParty(party: Party, isDelete = false) {
   }
 }
 
+/**
+ * Resolve an item_units FK from the unit code the UI already stores on the
+ * item (matched case/trim-insensitively against code, then name). Returns
+ * null when the unit code is not a known master unit — callers keep the
+ * legacy display string in that case, and the migration reports unmatched rows.
+ */
+export async function resolveUnitIdByCode(unitCode?: string | null): Promise<string | null> {
+  const code = (unitCode || '').trim();
+  if (!code || !getMysqlPool()) return null;
+  try {
+    const [rows]: any = await getMysqlPool()!.query(
+      `SELECT id FROM item_units
+       WHERE LOWER(TRIM(code)) = LOWER(?) OR LOWER(TRIM(name)) = LOWER(?)
+       LIMIT 1`,
+      [code.toLowerCase(), code.toLowerCase()]
+    );
+    return (rows || [])[0]?.id || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function liveSyncItem(item: Item, isDelete = false) {
   const pool = getMysqlPool();
   if (!pool) return;
@@ -693,65 +765,45 @@ export async function liveSyncItem(item: Item, isDelete = false) {
       await pool.query('DELETE FROM item_location_mapping WHERE item_id = ?', [item.id]);
       await pool.query('DELETE FROM items WHERE id = ?', [item.id]);
     } else {
-      const executeInsert = async (locVal: string | null) => {
-        await pool.query(
-          `REPLACE INTO items (
-            id, name, code, type, category_id, category_name, unit, hsn_sac_code,
-            tax_rate_gst, sale_price, purchase_price, opening_stock, opening_stock_price,
-            opening_stock_date, technical_specs, remarks, is_active, current_stock,
-            min_stock_level, max_capacity, stock_location, locations, stock_locations,
-            last_stock_update, movements, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            item.id,
-            item.name,
-            item.code,
-            item.type,
-            item.categoryId,
-            item.categoryName,
-            item.unit,
-            item.hsnSacCode || null,
-            item.taxRateGst || 18,
-            item.salePrice || 0,
-            item.purchasePrice || 0,
-            item.openingStock !== undefined ? item.openingStock : null,
-            item.openingStockPrice !== undefined ? item.openingStockPrice : null,
-            item.openingStockDate || null,
-            item.technicalSpecs || null,
-            item.remarks || null,
-            item.isActive ? 1 : 0,
-            item.currentStock || 0,
-            item.minStockLevel || 0,
-            item.maxCapacity || null,
-            locVal,
-            JSON.stringify(item.locations || []),
-            JSON.stringify(item.stockLocations || []),
-            item.lastStockUpdate || null,
-            // Movements live in the stock_movements ledger only — never on the items row.
-            null,
-            item.createdAt || new Date().toISOString(),
-            item.updatedAt || new Date().toISOString(),
-          ]
-        );
-      };
-
-      try {
-        await executeInsert(item.stockLocation || null);
-      } catch (insertErr: any) {
-        if (insertErr?.message && insertErr.message.includes("Data too long for column 'stock_location'")) {
-          console.warn('[Azure MySQL LiveSync] Column stock_location exceeded length limit. Migrating column to TEXT...');
-          try {
-            await pool.query('ALTER TABLE items MODIFY COLUMN stock_location TEXT NULL');
-            await executeInsert(item.stockLocation || null);
-          } catch (alterErr: any) {
-            console.warn('[Azure MySQL LiveSync] ALTER TABLE failed, falling back to safe truncation:', alterErr.message);
-            const safeLoc = (item.stockLocation || '').slice(0, 120);
-            await executeInsert(safeLoc || null);
-          }
-        } else {
-          throw insertErr;
-        }
-      }
+      // FK store (Golden Rule §2): no category_name / unit / location names are
+      // saved on the items row — categoryId + unit_id only. The display strings
+      // are resolved with JOINs at read time, and per-location stock lives ONLY
+      // in item_location_mapping (written below with FKs + numeric stock).
+      const unitId = await resolveUnitIdByCode(item.unit);
+      await pool.query(
+        `REPLACE INTO items (
+          id, name, code, type, category_id, unit_id, hsn_sac_code,
+          tax_rate_gst, sale_price, purchase_price, opening_stock, opening_stock_price,
+          opening_stock_date, technical_specs, remarks, is_active, current_stock,
+          min_stock_level, max_capacity, last_stock_update, movements, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          item.id,
+          item.name,
+          item.code,
+          item.type,
+          item.categoryId,
+          item.unitId || unitId || null,
+          item.hsnSacCode || null,
+          item.taxRateGst || 18,
+          item.salePrice || 0,
+          item.purchasePrice || 0,
+          item.openingStock !== undefined ? item.openingStock : null,
+          item.openingStockPrice !== undefined ? item.openingStockPrice : null,
+          item.openingStockDate || null,
+          item.technicalSpecs || null,
+          item.remarks || null,
+          item.isActive ? 1 : 0,
+          item.currentStock || 0,
+          item.minStockLevel || 0,
+          item.maxCapacity || null,
+          item.lastStockUpdate || null,
+          // Movements live in the stock_movements ledger only — never on the items row.
+          null,
+          item.createdAt || new Date().toISOString(),
+          item.updatedAt || new Date().toISOString(),
+        ]
+      );
 
       // Sync relational item_location_mapping table
       if (item.locations !== undefined) {
@@ -771,13 +823,13 @@ export async function liveSyncItem(item: Item, isDelete = false) {
             const mappingId = `ilm-${item.id}-${locId}`;
             await pool.query(
               `REPLACE INTO item_location_mapping (
-                id, item_id, location_id, location_name, opening_stock, current_stock, min_stock_level, created_at, updated_at
+                id, item_id, location_id, max_capacity, opening_stock, current_stock, min_stock_level, created_at, updated_at
               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               [
                 mappingId,
                 item.id,
                 locId,
-                l.locationName,
+                l.maxCapacity !== undefined && l.maxCapacity !== null ? Number(l.maxCapacity) : null,
                 Number(l.openingStock) || 0,
                 Number(l.currentStock) || 0,
                 Number(l.minStockLevel) || 0,
@@ -802,17 +854,16 @@ export async function liveSyncTransaction(txn: Transaction, isDelete = false) {
       await pool.query('DELETE FROM transactions WHERE id = ?', [txn.id]);
     } else {
       await pool.query(
-        `REPLACE INTO transactions (id, voucher_number, date, account_id, account_name, type, party_id, party_name, amount, payment_mode, reference_number, material_or_service, quantity_tonnes, description, status, due_date, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        // FKs only (Golden Rule §2): no party_name/account_name copies stored.
+        `REPLACE INTO transactions (id, voucher_number, date, account_id, type, party_id, amount, payment_mode, reference_number, material_or_service, quantity_tonnes, description, status, due_date, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           txn.id,
           txn.voucherNumber,
           txn.date,
           txn.accountId || null,
-          txn.accountName || null,
           txn.type,
           txn.partyId,
-          txn.partyName,
           txn.amount,
           txn.paymentMode || null,
           txn.referenceNumber || null,
@@ -1363,17 +1414,17 @@ export async function liveSyncTransfer(trf: InternalTransfer, isDelete = false) 
     if (isDelete) {
       await pool.query('DELETE FROM internal_transfers WHERE id = ?', [trf.id]);
     } else {
+      // Stores account FKs only (Golden Rule, documentation §2); from/to account
+      // display names are resolved with JOINs at read time so renames propagate.
       await pool.query(
-        `REPLACE INTO internal_transfers (id, transfer_number, date, from_account_id, from_account_name, to_account_id, to_account_name, transfer_type, amount, reference_number, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `REPLACE INTO internal_transfers (id, transfer_number, date, from_account_id, to_account_id, transfer_type, amount, reference_number, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           trf.id,
           trf.transferNumber,
           trf.date,
           trf.fromAccountId,
-          trf.fromAccountName,
           trf.toAccountId,
-          trf.toAccountName,
           trf.transferType,
           trf.amount || 0,
           trf.referenceNumber || null,
@@ -1394,15 +1445,15 @@ export async function liveSyncAdjustment(adj: AccountAdjustment, isDelete = fals
     if (isDelete) {
       await pool.query('DELETE FROM account_adjustments WHERE id = ?', [adj.id]);
     } else {
+      // Stores the account FK only (Golden Rule, documentation §2); account
+      // display name/type are resolved with JOINs at read time so renames propagate.
       await pool.query(
-        `REPLACE INTO account_adjustments (id, adjustment_number, account_id, account_name, account_type, date, type, amount, previous_balance, new_balance, reason, reference_number, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `REPLACE INTO account_adjustments (id, adjustment_number, account_id, date, type, amount, previous_balance, new_balance, reason, reference_number, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           adj.id,
           adj.adjustmentNumber,
           adj.accountId,
-          adj.accountName,
-          adj.accountType,
           adj.date,
           adj.type,
           adj.amount || 0,
@@ -1475,8 +1526,9 @@ export async function liveSyncStockMovement(item: Item, movement: StockMovementR
     await pool.query(
       `INSERT INTO stock_movements (
         id, item_id, location_id, movement_type, quantity,
-        balance_after, reference_type, reference_number, party_id, notes, movement_date, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        balance_after, rate, movement_value, valuation_rate_after,
+        reference_type, reference_number, party_id, notes, movement_date, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         movement.id,
         item.id,
@@ -1484,6 +1536,9 @@ export async function liveSyncStockMovement(item: Item, movement: StockMovementR
         movement.type,
         delta,
         movement.balanceAfter !== undefined && movement.balanceAfter !== null ? Number(movement.balanceAfter) : null,
+        movement.rate !== undefined && movement.rate !== null ? Number(movement.rate) : null,
+        movement.movementValue !== undefined && movement.movementValue !== null ? Number(movement.movementValue) : null,
+        movement.valuationRateAfter !== undefined && movement.valuationRateAfter !== null ? Number(movement.valuationRateAfter) : null,
         movement.referenceType || null,
         movement.referenceNumber || null,
         movement.partyId || null,
@@ -1517,13 +1572,23 @@ export async function liveSyncStockMovement(item: Item, movement: StockMovementR
       );
       if (!locRes.affectedRows && delta > 0) {
         await pool.query(
-          `INSERT IGNORE INTO item_location_mapping (id, item_id, location_id, location_name, opening_stock, current_stock, min_stock_level, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [`ilm-${item.id}-${locId}`, item.id, locId, locationName?.trim() || locId, 0, delta, 0, now, now]
+          `INSERT IGNORE INTO item_location_mapping (id, item_id, location_id, opening_stock, current_stock, min_stock_level, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [`ilm-${item.id}-${locId}`, item.id, locId, 0, delta, 0, now, now]
         );
       }
     }
   } catch (e: any) {
+    // NEVER lose a stock effect silently: if the ledger insert fails (missing
+    // column / table shape drift), fall back to writing the full item row so
+    // the stock level and movement history remain visible, and surface it loudly.
     console.error('[Azure MySQL LiveSync] Failed to record stock movement:', e.message);
+    if (!isMysqlConfigured()) return;
+    try {
+      console.warn('[Azure MySQL LiveSync] Falling back to liveSyncItem full-row write for item', item.id);
+      await liveSyncItem(item);
+    } catch (fallbackErr: any) {
+      console.error('[Azure MySQL LiveSync] Stock movement fallback ALSO failed:', fallbackErr.message);
+    }
   }
 }

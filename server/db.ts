@@ -59,6 +59,10 @@ import {
 } from './mysql/azureSync';
 import { isMysqlConfigured } from './mysql/connection';
 import {
+  computeItemValuation,
+  computeOutwardConsumptionRate,
+} from './inventoryValuation';
+import {
   SEED_SETTINGS,
   SEED_PARTIES,
   SEED_CATEGORIES,
@@ -142,6 +146,10 @@ class ServerLocalDatabase {
   private data: DatabaseSchema;
   private isLoaded = false;
   private saveTimeout: NodeJS.Timeout | null = null;
+  // Monotonic ledger clock: two movements within the same millisecond (bulk
+  // entry, tests, back-to-back vouchers) must still sort chronologically —
+  // the valuation replay orders strictly by movement date.
+  private lastLedgerMs = 0;
 
   constructor() {
     this.data = this.getDefaultSchema();
@@ -322,7 +330,17 @@ class ServerLocalDatabase {
 
   public getFullSnapshot(): DatabaseSchema {
     this.ensureOrphanedTransactionsCleaned();
-    return this.data;
+    // Item reads are views: movements are hydrated from the stock movement
+    // ledger on every snapshot, whichever sync mode the client uses.
+    const snapshot = {
+      ...this.data,
+      items: this.data.items.map((i) => this.hydrateItemWithMovements(i)),
+      // Transfer/adjustment display names are live views from the account master
+      transfers: (this.data.transfers || []).map((t) => this.hydrateTransfer(t)),
+      adjustments: (this.data.adjustments || []).map((a) => this.hydrateAdjustment(a)),
+      transactions: (this.data.transactions || []).map((t) => this.hydrateTransactionParty(t)),
+    };
+    return snapshot;
   }
 
   public getStats() {
@@ -421,7 +439,8 @@ class ServerLocalDatabase {
   }
 
   public createParty(partyData: Omit<Party, 'id' | 'createdAt' | 'updatedAt' | 'currentBalance'> & { currentBalance?: number }): Party {
-    const newId = `pty-${Date.now()}`;
+    // Monotonic clock id: concurrent creates must never share an id
+    const newId = `pty-${this.nextLedgerMs()}`;
     const initialBal =
       partyData.currentBalance !== undefined
         ? partyData.currentBalance
@@ -505,6 +524,21 @@ class ServerLocalDatabase {
   }
 
   // --- TRANSACTIONS ---
+  /**
+   * The transaction voucher row KEEPS its party_name copy (statutory: printed
+   * vouchers show the party as issued), but every READ resolves partyName as a
+   * LIVE VIEW from the parties table (Golden Rule §2) so renames propagate.
+   */
+  private hydrateTransactionParty(tx: Transaction): Transaction {
+    const party = (this.data.parties || []).find((p) => p.id === tx.partyId);
+    const account = tx.accountId ? (this.data.accounts || []).find((a) => a.id === tx.accountId) : undefined;
+    return {
+      ...tx,
+      partyName: party?.name || tx.partyName,
+      accountName: account?.name || tx.accountName,
+    };
+  }
+
   public getTransactions(filter?: { partyId?: string; type?: string; status?: string }): Transaction[] {
     const validPartyIds = new Set((this.data.parties || []).map((p) => p.id));
     let result = (this.data.transactions || []).filter((t) => validPartyIds.has(t.partyId));
@@ -517,11 +551,12 @@ class ServerLocalDatabase {
     if (filter?.status && filter.status !== 'all') {
       result = result.filter((t) => t.status === filter.status);
     }
-    return result;
+    return result.map((t) => this.hydrateTransactionParty(t));
   }
 
   public getTransactionById(id: string): Transaction | undefined {
-    return this.data.transactions.find((t) => t.id === id);
+    const t = this.data.transactions.find((t) => t.id === id);
+    return t ? this.hydrateTransactionParty(t) : undefined;
   }
 
   public createTransaction(data: Omit<Transaction, 'id' | 'createdAt'> & { id?: string; createdAt?: string }, skipLiveSync: boolean = false): Transaction {
@@ -598,24 +633,63 @@ class ServerLocalDatabase {
    */
   private hydrateItemWithMovements(item: Item): Item {
     const ledger = (this.data.stockMovements || []).slice(0, 5000).filter((m) => m.itemId === item.id);
-    if (ledger.length === 0) return item;
-    return {
+    // FIFO actual-cost valuation is computed SERVER-side from the full
+    // ledger at read time — a single source of truth for every client view.
+    const valuation = computeItemValuation(item, ledger);
+    const hydrated: Item = {
       ...item,
-      movements: ledger.slice(0, 100).map((m) => ({
-        id: m.id,
-        date: m.date,
-        type: m.type,
-        quantity: m.quantity,
-        balanceAfter: m.balanceAfter,
-        referenceNumber: m.referenceNumber,
-        sourcePartyOrBatch: m.sourcePartyOrBatch,
-        notes: m.notes,
-      })),
+      valuationRate: valuation.valuationRate > 0 ? valuation.valuationRate : undefined,
+      stockValue: valuation.stockValue > 0 ? valuation.stockValue : undefined,
+      // categoryName / unit / location names are LIVE VIEW fields: resolved
+      // from the masters (by FK) at read time so renames propagate (§2).
+      // Mirrors the MySQL item_location_mapping ↔ item_locations JOIN.
+      categoryName: (this.data.categories || []).find((c) => c.id === item.categoryId)?.name || item.categoryName,
+      unit:
+        (item.unitId && (this.data.units || []).find((u) => u.id === item.unitId)?.code) ||
+        item.unit,
     };
+    if (item.type === 'product' && item.locations && item.locations.length > 0) {
+      const liveLocs = item.locations.map((l) => ({
+        ...l,
+        locationName:
+          (l.locationId && (this.data.locations || []).find((ml) => ml.id === l.locationId)?.name) || l.locationName,
+      }));
+      hydrated.locations = liveLocs;
+      hydrated.stockLocations = liveLocs.map((l) => l.locationName).filter(Boolean);
+      hydrated.stockLocation = hydrated.stockLocations.join(', ');
+    }
+    if (ledger.length === 0) return hydrated;
+    hydrated.movements = ledger.slice(0, 100).map((m) => ({
+      id: m.id,
+      date: m.date,
+      type: m.type,
+      quantity: m.quantity,
+      balanceAfter: m.balanceAfter,
+      rate: m.rate,
+      movementValue: m.movementValue,
+      valuationRateAfter: m.valuationRateAfter,
+      referenceNumber: m.referenceNumber,
+      sourcePartyOrBatch: m.sourcePartyOrBatch,
+      notes: m.notes,
+    }));
+    return hydrated;
   }
 
   private findItemRaw(id: string): Item | undefined {
     return this.data.items.find((i) => i.id === id);
+  }
+
+  /** Strictly increasing millisecond clock (ledger rows, voucher ids). */
+  private nextLedgerMs(): number {
+    let now = Date.now();
+    if (now <= this.lastLedgerMs) now = this.lastLedgerMs + 1;
+    this.lastLedgerMs = now;
+    return now;
+  }
+
+  /** Strictly increasing ISO timestamp: equal-millisecond events get +1ms each. */
+  private nextLedgerTimestamp(): string {
+    return new Date(this.nextLedgerMs()).toISOString();
   }
 
   public getItems(filter?: { categoryId?: string; type?: string; query?: string }): Item[] {
@@ -699,7 +773,15 @@ class ServerLocalDatabase {
       updatedAt: new Date().toISOString(),
     };
     // Movements are ledger-only: never persist movement history on the item row.
+    // valuationRate/stockValue are read-time computations — likewise never persisted.
     delete newItem.movements;
+    delete newItem.valuationRate;
+    delete newItem.stockValue;
+    // Resolve the item_units FK from the unit code the form sends (Golden Rule §2):
+    // the unit display string is JOINed at read time — no unit name is stored.
+    newItem.unitId =
+      (this.data.units || []).find((u) => (u.code || '').trim().toLowerCase() === (newItem.unit || '').trim().toLowerCase() ||
+        (u.name || '').trim().toLowerCase() === (newItem.unit || '').trim().toLowerCase())?.id || newItem.unitId;
     if (existingIdx !== -1) {
       this.data.items[existingIdx] = newItem;
     } else {
@@ -751,8 +833,17 @@ class ServerLocalDatabase {
       updatedAt: new Date().toISOString(),
     };
     // Movements are ledger-only: never persist movement history on the item row.
+    // valuationRate/stockValue are read-time computations — likewise never persisted.
     delete updated.movements;
+    delete updated.valuationRate;
+    delete updated.stockValue;
     this.data.items[index] = updated;
+    // Resolve the item_units FK from the unit code (the unit display string is
+    // JOIN-resolved at read time — Golden Rule §2).
+    updated.unitId = (this.data.units || []).find((u) =>
+      (u.code || '').trim().toLowerCase() === (updated.unit || '').trim().toLowerCase() ||
+      (u.name || '').trim().toLowerCase() === (updated.unit || '').trim().toLowerCase()
+    )?.id || updated.unitId;
     this.logAudit('UPDATE', 'ITEM', id, `Updated item ${updated.name}`);
     this.save();
     liveSyncItem(updated);
@@ -771,12 +862,12 @@ class ServerLocalDatabase {
     return true;
   }
 
-  public adjustItemStock(id: string, delta: number, logType: 'purchase_inward' | 'production_output' | 'production_consumed' | 'sale_dispatch' | 'opening' | 'adjustment_increase' | 'adjustment_decrease', refNo?: string, notes?: string, locationName?: string, partyId?: string): Item {
+  public adjustItemStock(id: string, delta: number, logType: 'purchase_inward' | 'production_output' | 'production_consumed' | 'sale_dispatch' | 'opening' | 'adjustment_increase' | 'adjustment_decrease', refNo?: string, notes?: string, locationName?: string, partyId?: string, rate?: number): Item {
     const item = this.findItemRaw(id);
     if (!item) throw new Error(`Item ${id} not found.`);
     const current = item.currentStock || 0;
     const nextStock = Math.max(0, current + delta);
-    const movementId = `stk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const movementId = `stk-${this.nextLedgerMs()}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Normalize and deduplicate existing location stock breakdown
     let updatedLocations: ItemLocationStock[] = [];
@@ -862,14 +953,27 @@ class ServerLocalDatabase {
     item.lastStockUpdate = new Date().toISOString();
     item.updatedAt = new Date().toISOString();
 
+    // Actual-cost snapshots on the ledger row (numeric snapshots, documentation §2):
+    //  - rate: the actual cost per unit of THIS event — inward enters at the
+    //    rate it was entered/purchased at (existing lots are never re-priced);
+    //    outward records the blended FIFO rate of what it actually consumed
+    //  - movementValue: the value of the quantity moved at that rate
+    //  - valuationRateAfter: the item's blended valuation rate after this event
+    const priorMovements = (this.data.stockMovements || []).filter((m) => m.itemId === item.id);
+    const isOutward = delta < 0;
+    const outwardRate = isOutward ? computeOutwardConsumptionRate(item, priorMovements, Math.abs(delta)) : 0;
+    const rateToRecord = isOutward ? outwardRate : Number(rate) || 0;
+
     const movement: StockMovementRecord = {
       id: movementId,
       itemId: item.id,
       locationId: targetLocationId || undefined,
-      date: new Date().toISOString(),
+      date: this.nextLedgerTimestamp(),
       type: logType,
       quantity: delta,
       balanceAfter: item.currentStock,
+      rate: rateToRecord > 0 ? rateToRecord : undefined,
+      movementValue: rateToRecord > 0 ? Math.abs(delta) * rateToRecord : undefined,
       referenceNumber: refNo,
       sourcePartyOrBatch: undefined, // resolved via party JOIN on read, never stored by name
       partyId: partyId && partyId !== 'unassigned' ? partyId : undefined,
@@ -892,6 +996,9 @@ class ServerLocalDatabase {
     }
 
     // Append-only ledger: one INSERT per stock change, never rewritten.
+    // Snapshot the blended valuation rate WITH this movement applied.
+    const valuation = computeItemValuation(item, priorMovements.concat(movement));
+    movement.valuationRateAfter = valuation.valuationRate > 0 ? valuation.valuationRate : undefined;
     this.data.stockMovements.unshift(movement);
 
     this.logAudit('UPDATE', 'ITEM_STOCK', id, `Adjusted stock for ${item.name} by ${delta} ${item.unit} (New: ${nextStock}${targetLoc ? ` at ${targetLoc}` : ''})`);
@@ -1085,13 +1192,14 @@ class ServerLocalDatabase {
     const item = this.findItemRaw(adj.itemId);
     let locationName = adj.location;
     if (item) {
-      if (adj.locationId && Array.isArray(item.locations)) {
-        locationName = item.locations.find((l) => l.locationId === adj.locationId)?.locationName || locationName;
-      }
-      // Master item_locations table fallback (renamed master locations propagate)
-      if (adj.locationId && !locationName) {
+      // MASTER (renamed item_locations) FIRST — renames propagate (Golden Rule §2)
+      if (adj.locationId) {
         const masterLoc = (this.data.locations || []).find((ml) => ml.id === adj.locationId);
         locationName = masterLoc?.name || locationName;
+      }
+      // Item's mapped-locations fallback (raw row names, only if master absent)
+      if (adj.locationId && Array.isArray(item.locations) && !locationName) {
+        locationName = item.locations.find((l) => l.locationId === adj.locationId)?.locationName || locationName;
       }
       return { ...adj, itemName: item.name, itemCode: item.code, unit: item.unit, location: locationName };
     }
@@ -1106,7 +1214,10 @@ class ServerLocalDatabase {
     if (!this.data.stockAdjustments) {
       this.data.stockAdjustments = [];
     }
-    const newId = adjData.id || `stk-adj-${Date.now()}`;
+    // Voucher id uses the monotonic clock: two vouchers created in the same
+    // millisecond (bulk ops, tests) must never share an id — a collision makes
+    // lookups resolve the wrong voucher (wrong revert direction).
+    const newId = adjData.id || `stk-adj-${this.nextLedgerMs()}`;
     // Generate a collision-free sequential adjustment number
     let count = this.data.stockAdjustments.length + 1;
     let adjustmentNumber = adjData.adjustmentNumber || '';
@@ -1163,7 +1274,11 @@ class ServerLocalDatabase {
         adjData.type === 'increase' ? 'adjustment_increase' : 'adjustment_decrease',
         newAdj.adjustmentNumber,
         `[Stock Adj: ${newAdj.reason}] ${newAdj.notes || ''}`.trim(),
-        newAdj.location
+        newAdj.location,
+        undefined,
+        // Actual rate of this event (recorded on the ledger; the valuation
+        // engine enters increases at it and consumes decreases at WAC):
+        Number(newAdj.rate) || undefined
       );
     }
 
@@ -1186,13 +1301,24 @@ class ServerLocalDatabase {
       // Revert at the SAME storage the voucher touched: resolve the display name
       // live from the location FK so a rename never breaks the revert.
       const revertLocation = this.hydrateStockAdjustment(adj).location;
+      // Reverting a decrease re-enters stock at the FIFO blended cost the
+      // original movement actually consumed at (recorded on its ledger row);
+      // reverting an increase consumes at the current WAC (no rate passed).
+      const originalMovement = (this.data.stockMovements || []).find(
+        (m) => m.itemId === adj.itemId && m.referenceNumber === adj.adjustmentNumber
+      );
+      const revertRate = revertDelta > 0
+        ? (originalMovement?.rate || originalMovement?.valuationRateAfter || undefined)
+        : undefined;
       this.adjustItemStock(
         item.id,
         revertDelta,
         revertDelta >= 0 ? 'adjustment_increase' : 'adjustment_decrease',
         `REV-${adj.adjustmentNumber}`,
         `Revert stock adjustment ${adj.adjustmentNumber}`,
-        revertLocation
+        revertLocation,
+        undefined,
+        revertRate
       );
     }
 
@@ -1232,7 +1358,7 @@ class ServerLocalDatabase {
           : isPurchase
             ? `${order.purchaseStage === 'goods_receipt' ? 'Goods Receipt / GRN' : 'Purchase Order'} from ${order.partyName} (${refNo})${item.location ? ` [${item.location}]` : ''}${item.shortageQuantity ? ` [Shortage: ${item.shortageQuantity} ${item.unit}]` : ''}`
             : `Dispatched to ${order.partyName} (Order ${order.orderNumber})${item.location ? ` [${item.location}]` : ''}`;
-        this.adjustItemStock(item.itemId, delta, logType as any, refNo, notes, item.location, order.partyId);
+        this.adjustItemStock(item.itemId, delta, logType as any, refNo, notes, item.location, order.partyId, isPurchase && delta > 0 ? (Number(item.rate) || undefined) : undefined);
       } catch (e) {
         console.error(`Failed to sync inventory for order item ${item.itemId}:`, e);
       }
@@ -1866,7 +1992,8 @@ class ServerLocalDatabase {
 
   public addAccount(accountData: Omit<CashBankAccount, 'id' | 'createdAt' | 'updatedAt' | 'currentBalance'>): CashBankAccount {
     if (!this.data.accounts) this.data.accounts = [];
-    const newId = `acc-${Date.now()}`;
+    // Monotonic clock id: concurrent account creates must never share an id
+    const newId = `acc-${this.nextLedgerMs()}`;
     const now = new Date().toISOString();
     const openingBal = Number(accountData.openingBalance) || 0;
 
@@ -1984,8 +2111,33 @@ class ServerLocalDatabase {
 
   // --- INTERNAL TRANSFERS ---
 
+  /**
+   * Transfer/adjustment records store ONLY account FKs (Golden Rule,
+   * documentation §2). Display names (and the adjustment's account type)
+   * are resolved from the cash_bank_accounts master at read time, so any
+   * account rename propagates to every transfer/adjustment display.
+   */
+  private hydrateTransfer(trf: InternalTransfer): InternalTransfer {
+    const from = this.getAccountById(trf.fromAccountId);
+    const to = this.getAccountById(trf.toAccountId);
+    return {
+      ...trf,
+      fromAccountName: from?.name || trf.fromAccountName || undefined,
+      toAccountName: to?.name || trf.toAccountName || undefined,
+    };
+  }
+
+  private hydrateAdjustment(adj: AccountAdjustment): AccountAdjustment {
+    const acc = this.getAccountById(adj.accountId);
+    return {
+      ...adj,
+      accountName: acc?.name || adj.accountName || undefined,
+      accountType: acc?.type || adj.accountType || undefined,
+    };
+  }
+
   public getTransfers(): InternalTransfer[] {
-    return this.data.transfers || [];
+    return (this.data.transfers || []).map((t) => this.hydrateTransfer(t));
   }
 
   public addTransfer(transferData: Omit<InternalTransfer, 'id' | 'createdAt' | 'transferNumber'>): InternalTransfer {
@@ -1998,13 +2150,19 @@ class ServerLocalDatabase {
       id: newId,
       transferNumber,
       createdAt: new Date().toISOString(),
+      // Accounts are referenced by FK only; display names are JOINed at read
+      // time and never stored on the voucher row (documentation §2).
+      fromAccountName: undefined,
+      toAccountName: undefined,
     };
 
     this.data.transfers.unshift(newTransfer);
     this.recalculateAccountBalance(transferData.fromAccountId);
     this.recalculateAccountBalance(transferData.toAccountId);
 
-    this.logAudit('CREATE', 'TRANSFER', newId, `Transferred ₹${transferData.amount} from ${transferData.fromAccountName} to ${transferData.toAccountName}.`);
+    const fromAcc = this.getAccountById(transferData.fromAccountId);
+    const toAcc = this.getAccountById(transferData.toAccountId);
+    this.logAudit('CREATE', 'TRANSFER', newId, `Transferred ₹${transferData.amount} from ${fromAcc?.name} to ${toAcc?.name}.`);
     this.save();
     liveSyncTransfer(newTransfer).catch((e) => console.error('[DB] Failed liveSync for addTransfer:', e.message));
     return newTransfer;
@@ -2044,7 +2202,7 @@ class ServerLocalDatabase {
   // --- ACCOUNT ADJUSTMENTS ---
 
   public getAdjustments(): AccountAdjustment[] {
-    return this.data.adjustments || [];
+    return (this.data.adjustments || []).map((a) => this.hydrateAdjustment(a));
   }
 
   public addAdjustment(adjData: Omit<AccountAdjustment, 'id' | 'createdAt' | 'adjustmentNumber' | 'previousBalance' | 'newBalance'>): AccountAdjustment {
@@ -2065,12 +2223,17 @@ class ServerLocalDatabase {
       previousBalance: prevBal,
       newBalance: newBal,
       createdAt: new Date().toISOString(),
+      // Account referenced by FK only; display name/type are JOINed at read
+      // time and never stored on the voucher row (documentation §2).
+      accountName: undefined,
+      accountType: undefined,
     };
 
     this.data.adjustments.unshift(newAdj);
     this.recalculateAccountBalance(adjData.accountId);
 
-    this.logAudit('CREATE', 'ADJUSTMENT', newId, `Adjusted ${adjData.accountName} (${adjData.type} ₹${amt}): ${adjData.reason}.`);
+    const acc = this.getAccountById(adjData.accountId);
+    this.logAudit('CREATE', 'ADJUSTMENT', newId, `Adjusted ${acc?.name} (${adjData.type} ₹${amt}): ${adjData.reason}.`);
     this.save();
     liveSyncAdjustment(newAdj).catch((e) => console.error('[DB] Failed liveSync for addAdjustment:', e.message));
     return newAdj;

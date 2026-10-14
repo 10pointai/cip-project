@@ -230,7 +230,20 @@ class CloudStore {
     };
     this.parties.unshift(newParty);
     this.notify();
-    api.createParty(partyData).catch((err) => console.error('[CloudStore] addParty cloud error:', err));
+    // Capture the SERVER-minted party (authoritative ID) — the optimistic ID
+    // is only a placeholder and would orphan follow-up edits before resync.
+    api
+      .createParty(partyData)
+      .then((res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.parties = this.parties.map((p) =>
+            p.id === newParty.id ? { ...created } : p
+          );
+          this.notify();
+        }
+      })
+      .catch((err) => console.error('[CloudStore] addParty cloud error:', err));
     return newParty;
   }
 
@@ -244,8 +257,21 @@ class CloudStore {
     }));
     this.parties = [...created, ...this.parties];
     this.notify();
-    partiesData.forEach((p) => {
-      api.createParty(p).catch((err) => console.error('[CloudStore] addPartiesBulk cloud error:', err));
+    partiesData.forEach((p, idx) => {
+      // Capture each server-minted party and swap the optimistic record by
+      // index (created[idx] corresponds to partiesData[idx]).
+      api
+        .createParty(p)
+        .then((res) => {
+          const srv = res?.data;
+          if (srv?.id) {
+            this.parties = this.parties.map((q) =>
+              q.id === created[idx]?.id ? { ...srv } : q
+            );
+            this.notify();
+          }
+        })
+        .catch((err) => console.error('[CloudStore] addPartiesBulk cloud error:', err));
     });
     return created;
   }
@@ -607,15 +633,20 @@ class CloudStore {
       id: `trf-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
       transferNumber: data.transferNumber || `TRF-${Date.now().toString().substr(-6)}`,
       date: data.date || new Date().toISOString().split('T')[0],
+      // Account FKs only; the optimistic record hydrates display names from the
+      // local account mirror until the server resync replaces it with the
+      // JOIN-resolved row (Golden Rule, documentation §2).
       fromAccountId: data.fromAccountId || '',
-      fromAccountName: data.fromAccountName || '',
       toAccountId: data.toAccountId || '',
-      toAccountName: data.toAccountName || '',
       transferType: data.transferType || 'bank_to_bank',
       amount: data.amount || 0,
       createdAt: new Date().toISOString(),
       ...data,
     };
+    newTrf.fromAccountName =
+      this.accounts.find((a) => a.id === newTrf.fromAccountId)?.name || newTrf.fromAccountName || undefined;
+    newTrf.toAccountName =
+      this.accounts.find((a) => a.id === newTrf.toAccountId)?.name || newTrf.toAccountName || undefined;
     this.transfers.unshift(newTrf);
     this.notify();
     api.createTransfer(data).then(() => this.syncWithServer(true)).catch((err) => console.error('[CloudStore] addTransfer cloud error:', err));
@@ -637,9 +668,10 @@ class CloudStore {
     const newAdj: AccountAdjustment = {
       id: `adj-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
       adjustmentNumber: data.adjustmentNumber || `ADJ-${Date.now().toString().substr(-6)}`,
+      // Account FK only; the optimistic record hydrates the display name/type
+      // from the local account mirror until the server resync replaces it with
+      // the JOIN-resolved row (Golden Rule, documentation §2).
       accountId: data.accountId || '',
-      accountName: data.accountName || '',
-      accountType: data.accountType || 'cash',
       date: data.date || new Date().toISOString().split('T')[0],
       type: data.type || 'increase',
       amount: data.amount || 0,
@@ -649,6 +681,9 @@ class CloudStore {
       createdAt: new Date().toISOString(),
       ...data,
     };
+    const adjAcc = this.accounts.find((a) => a.id === newAdj.accountId);
+    newAdj.accountName = adjAcc?.name || newAdj.accountName || undefined;
+    newAdj.accountType = adjAcc?.type || newAdj.accountType || undefined;
     this.adjustments.unshift(newAdj);
     this.notify();
     api.createAdjustment(data).then(() => this.syncWithServer(true)).catch((err) => console.error('[CloudStore] addAdjustment cloud error:', err));

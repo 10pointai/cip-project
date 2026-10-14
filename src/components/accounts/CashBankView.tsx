@@ -32,7 +32,6 @@ import {
   Printer,
   Check,
   Edit2,
-  Eye,
   ShieldCheck,
 } from 'lucide-react';
 import {
@@ -96,6 +95,7 @@ export function CashBankView({
 
   // Modals
   const [isAddAccountModalOpen, setIsAddAccountModalOpen] = useState(false);
+  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
   const [isAdjustmentModalOpen, setIsAdjustmentModalOpen] = useState(false);
 
@@ -373,18 +373,32 @@ export function CashBankView({
 
     const openBal = parseFloat(accountFormData.openingBalance) || 0;
 
-    onAddAccount({
-      name: accountFormData.name.trim(),
-      type: accountFormData.type,
-      bankName: accountFormData.type === 'bank' ? accountFormData.bankName.trim() : undefined,
-      accountNumber: accountFormData.type === 'bank' ? accountFormData.accountNumber.trim() : undefined,
-      ifscCode: accountFormData.type === 'bank' ? accountFormData.ifscCode.trim() : undefined,
-      openingBalance: openBal,
-      asOfDate: accountFormData.asOfDate || new Date().toISOString().split('T')[0],
-      notes: accountFormData.notes.trim(),
-    });
+    if (editingAccountId) {
+      onUpdateAccount(editingAccountId, {
+        name: accountFormData.name.trim(),
+        type: accountFormData.type,
+        bankName: accountFormData.type === 'bank' ? accountFormData.bankName.trim() : undefined,
+        accountNumber: accountFormData.type === 'bank' ? accountFormData.accountNumber.trim() : undefined,
+        ifscCode: accountFormData.type === 'bank' ? accountFormData.ifscCode.trim() : undefined,
+        openingBalance: openBal,
+        asOfDate: accountFormData.asOfDate || new Date().toISOString().split('T')[0],
+        notes: accountFormData.notes.trim(),
+      });
+    } else {
+      onAddAccount({
+        name: accountFormData.name.trim(),
+        type: accountFormData.type,
+        bankName: accountFormData.type === 'bank' ? accountFormData.bankName.trim() : undefined,
+        accountNumber: accountFormData.type === 'bank' ? accountFormData.accountNumber.trim() : undefined,
+        ifscCode: accountFormData.type === 'bank' ? accountFormData.ifscCode.trim() : undefined,
+        openingBalance: openBal,
+        asOfDate: accountFormData.asOfDate || new Date().toISOString().split('T')[0],
+        notes: accountFormData.notes.trim(),
+      });
+    }
 
     setIsAddAccountModalOpen(false);
+    setEditingAccountId(null);
     setAccountFormData({
       name: '',
       type: 'bank',
@@ -396,6 +410,25 @@ export function CashBankView({
       notes: '',
     });
     setFormError('');
+  };
+
+  // Open the account modal in EDIT mode, prefilled from the stored account.
+  // (opening balance / as-of date / category stay fixed after creation —
+  // same convention as parties: current balance flows from vouchers only)
+  const openEditAccount = (acc: CashBankAccount) => {
+    setEditingAccountId(acc.id);
+    setAccountFormData({
+      name: acc.name || '',
+      type: acc.type || 'bank',
+      bankName: acc.bankName || '',
+      accountNumber: acc.accountNumber || '',
+      ifscCode: acc.ifscCode || '',
+      openingBalance: acc.openingBalance !== undefined ? String(acc.openingBalance) : '0',
+      asOfDate: acc.asOfDate || new Date().toISOString().split('T')[0],
+      notes: acc.notes || '',
+    });
+    setFormError('');
+    setIsAddAccountModalOpen(true);
   };
 
   // Handle Internal Transfer Submit
@@ -434,12 +467,11 @@ export function CashBankView({
     else if (fromAcc.type === 'bank' && toAcc.type === 'cash') transferType = 'bank_to_cash';
     else if (fromAcc.type === 'cash' && toAcc.type === 'cash') transferType = 'cash_to_cash';
 
+    // Account FKs only — display names are resolved by JOIN at read time
     onAddTransfer({
       date: transferFormData.date,
       fromAccountId: fromAcc.id,
-      fromAccountName: fromAcc.name,
       toAccountId: toAcc.id,
-      toAccountName: toAcc.name,
       transferType,
       amount: amt,
       referenceNumber: transferFormData.referenceNumber.trim(),
@@ -479,10 +511,9 @@ export function CashBankView({
     const acc = accounts.find((a) => a.id === adjustmentFormData.accountId);
     if (!acc) return;
 
+    // Account FK only — display name/type are resolved by JOIN at read time
     onAddAdjustment({
       accountId: acc.id,
-      accountName: acc.name,
-      accountType: acc.type,
       date: adjustmentFormData.date,
       type: adjustmentFormData.type,
       amount: amt,
@@ -1000,14 +1031,10 @@ export function CashBankView({
                     <th className="py-3.5 px-3">IFSC / Branch</th>
                     <th className="py-3.5 px-3 text-right">Opening Balance</th>
                     <th className="py-3.5 px-3 text-right">Current Balance</th>
-                    <th className="py-3.5 px-3 text-center">Txns</th>
-                    <th className="py-3.5 px-4 text-center">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--color-outline-variant)]">
                   {filteredAccounts.map((acc) => {
-                    const txInfo = transactionCounts[acc.id] || { total: 0 };
-
                     return (
                       <tr
                         key={acc.id}
@@ -1107,77 +1134,6 @@ export function CashBankView({
                           </div>
                         </td>
 
-                        {/* Transaction Count Badge */}
-                        <td className="py-3 px-3 text-center">
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]">
-                            {txInfo.total} logs
-                          </span>
-                        </td>
-
-                        {/* Actions */}
-                        <td className="py-3 px-4 text-center">
-                          <div
-                            className="flex items-center justify-center gap-1"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => setSelectedAccountId(acc.id)}
-                              className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)] hover:bg-[var(--color-surface-container)] rounded-full transition-colors"
-                              title="View Ledger Statement"
-                            >
-                              <Eye className="w-3.5 h-3.5" />
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setTransferFormData({
-                                  fromAccountId: acc.id,
-                                  toAccountId: '',
-                                  amount: '',
-                                  date: new Date().toISOString().split('T')[0],
-                                  referenceNumber: '',
-                                  notes: '',
-                                });
-                                setIsTransferModalOpen(true);
-                              }}
-                              className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)] hover:bg-[var(--color-surface-container)] rounded-full transition-colors"
-                              title="Transfer from this Account"
-                            >
-                              <ArrowLeftRight className="w-3.5 h-3.5" />
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setAdjustmentFormData({
-                                  accountId: acc.id,
-                                  type: 'increase',
-                                  amount: '',
-                                  date: new Date().toISOString().split('T')[0],
-                                  reason: '',
-                                  referenceNumber: '',
-                                  notes: '',
-                                });
-                                setIsAdjustmentModalOpen(true);
-                              }}
-                              className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-tertiary)] hover:bg-[var(--color-surface-container)] rounded-full transition-colors"
-                              title="Adjust Balance"
-                            >
-                              <SlidersHorizontal className="w-3.5 h-3.5" />
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => onDeleteAccount(acc.id)}
-                              className="p-1.5 text-[var(--color-outline)] hover:text-[var(--color-error)] hover:bg-[var(--color-error-container)]/30 rounded-full transition-colors"
-                              title="Delete Account"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </td>
                       </tr>
                     );
                   })}
@@ -1334,6 +1290,15 @@ export function CashBankView({
               </div>
 
               <button
+                onClick={() => openEditAccount(selectedAccount)}
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] rounded-full text-xs font-bold border border-[var(--color-outline-variant)]"
+                title="Edit account details"
+              >
+                <Edit2 className="w-3.5 h-3.5" />
+                Edit
+              </button>
+
+              <button
                 onClick={() => {
                   setAdjustmentFormData({
                     accountId: selectedAccount.id,
@@ -1426,12 +1391,17 @@ export function CashBankView({
             <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
               <div>
                 <h3 className="text-base font-extrabold text-[var(--color-on-surface)]">
-                  Add {accountFormData.type === 'bank' ? 'Bank' : 'Cash'} Account
+                  {editingAccountId ? 'Edit Account' : `Add ${accountFormData.type === 'bank' ? 'Bank' : 'Cash'} Account`}
                 </h3>
-                <p className="text-xs text-[var(--color-on-surface-variant)]">Configure account display name and opening balance</p>
+                <p className="text-xs text-[var(--color-on-surface-variant)]">
+                  {editingAccountId ? 'Update the account details below' : 'Configure account display name and opening balance'}
+                </p>
               </div>
               <button
-                onClick={() => setIsAddAccountModalOpen(false)}
+                onClick={() => {
+                  setIsAddAccountModalOpen(false);
+                  setEditingAccountId(null);
+                }}
                 className="p-1.5 text-[var(--color-outline)] hover:text-[var(--color-on-surface)] rounded-full hover:bg-[var(--color-surface-container-high)]"
               >
                 ✕
@@ -1446,7 +1416,8 @@ export function CashBankView({
                 </div>
               )}
 
-              {/* Type Switcher */}
+              {/* Type Switcher (hidden in edit mode — category is fixed after creation) */}
+              {!editingAccountId && (
               <div>
                 <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] uppercase tracking-wider mb-1.5">
                   Account Category *
@@ -1454,8 +1425,10 @@ export function CashBankView({
                 <div className="grid grid-cols-2 gap-3">
                   <button
                     type="button"
+                    disabled={!!editingAccountId}
+                    title={editingAccountId ? 'Account category is fixed after creation.' : undefined}
                     onClick={() => setAccountFormData((prev) => ({ ...prev, type: 'bank' }))}
-                    className={`flex items-center justify-center gap-2 py-2.5 px-4 rounded-full border text-xs font-bold transition-all ${
+                    className={`flex items-center justify-center gap-2 py-2.5 px-4 rounded-full border text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
                       accountFormData.type === 'bank'
                         ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] border-[var(--color-primary)]'
                         : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border-[var(--color-outline-variant)]'
@@ -1466,8 +1439,10 @@ export function CashBankView({
                   </button>
                   <button
                     type="button"
+                    disabled={!!editingAccountId}
+                    title={editingAccountId ? 'Account category is fixed after creation.' : undefined}
                     onClick={() => setAccountFormData((prev) => ({ ...prev, type: 'cash' }))}
-                    className={`flex items-center justify-center gap-2 py-2.5 px-4 rounded-full border text-xs font-bold transition-all ${
+                    className={`flex items-center justify-center gap-2 py-2.5 px-4 rounded-full border text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
                       accountFormData.type === 'cash'
                         ? 'bg-[var(--color-tertiary)] text-[var(--color-on-tertiary)] border-[var(--color-tertiary)]'
                         : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border-[var(--color-outline-variant)]'
@@ -1478,6 +1453,7 @@ export function CashBankView({
                   </button>
                 </div>
               </div>
+              )}
 
               {/* Display Name */}
               <div>
@@ -1537,7 +1513,9 @@ export function CashBankView({
                     placeholder="0.00"
                     value={accountFormData.openingBalance}
                     onChange={(e) => setAccountFormData({ ...accountFormData, openingBalance: e.target.value })}
-                    className="w-full px-4 py-2.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-sm font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                    disabled={!!editingAccountId}
+                    title={editingAccountId ? 'Opening Balance is fixed after account creation.' : undefined}
+                    className="w-full px-4 py-2.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-sm font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] disabled:opacity-50 disabled:cursor-not-allowed"
                     required
                   />
                 </div>
@@ -1550,7 +1528,9 @@ export function CashBankView({
                     type="date"
                     value={accountFormData.asOfDate}
                     onChange={(e) => setAccountFormData({ ...accountFormData, asOfDate: e.target.value })}
-                    className="w-full px-4 py-2.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                    disabled={!!editingAccountId}
+                    title={editingAccountId ? 'As-of date is fixed after account creation.' : undefined}
+                    className="w-full px-4 py-2.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] disabled:opacity-50 disabled:cursor-not-allowed"
                     required
                   />
                 </div>
@@ -1590,7 +1570,10 @@ export function CashBankView({
               <div className="pt-4 border-t border-[var(--color-outline-variant)] flex items-center justify-end gap-3">
                 <button
                   type="button"
-                  onClick={() => setIsAddAccountModalOpen(false)}
+                  onClick={() => {
+                    setIsAddAccountModalOpen(false);
+                    setEditingAccountId(null);
+                  }}
                   className="px-4 py-2 text-xs font-semibold text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container)] rounded-full"
                 >
                   Cancel

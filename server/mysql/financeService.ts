@@ -25,10 +25,10 @@ function mapTransactionRow(t: any): Transaction {
     voucherNumber: t.voucher_number,
     date: t.date,
     accountId: t.account_id || undefined,
-    accountName: t.account_name || undefined,
+    accountName: t.account_display || undefined,
     type: t.type,
     partyId: t.party_id,
-    partyName: t.party_name,
+    partyName: t.party_display,
     partyType: (t.party_type || 'customer') as any,
     amount: parseNum(t.amount),
     paymentMode: t.payment_mode || undefined,
@@ -101,23 +101,29 @@ export async function fetchTransactionsDirect(filter: { partyId?: string; type?:
     return serverDb.getTransactions(filter);
   }
 
-  let sql = 'SELECT * FROM transactions WHERE party_id IN (SELECT id FROM parties)';
+  // partyName AND accountName are LIVE VIEWS (Golden Rule §2): JOIN the
+  // parties / cash_bank_accounts masters at read time so renames update every
+  // voucher display. No name copies are stored on the row.
+  let sql = `SELECT t.*, p.name AS party_display, acc.name AS account_display
+             FROM transactions t
+             INNER JOIN parties p ON p.id = t.party_id
+             LEFT JOIN cash_bank_accounts acc ON acc.id = t.account_id`;
   const params: any[] = [];
 
   if (filter.partyId) {
-    sql += ' AND party_id = ?';
+    sql += ' AND t.party_id = ?';
     params.push(filter.partyId);
   }
   if (filter.type) {
-    sql += ' AND type = ?';
+    sql += ' AND t.type = ?';
     params.push(filter.type);
   }
   if (filter.status) {
-    sql += ' AND status = ?';
+    sql += ' AND t.status = ?';
     params.push(filter.status);
   }
 
-  sql += ' ORDER BY date DESC, created_at DESC';
+  sql += ' ORDER BY t.date DESC, t.created_at DESC';
 
   const rows = await executeMysqlQuery(sql, params);
   return rows.map(mapTransactionRow);
@@ -127,7 +133,15 @@ export async function fetchTransactionByIdDirect(id: string): Promise<Transactio
   if (!isMysqlConfigured()) {
     return serverDb.getTransactionById(id) || null;
   }
-  const row = await executeMysqlOne('SELECT * FROM transactions WHERE id = ?', [id]);
+  // JOIN-resolved read model (party/account names live via masters — §2)
+  const row = await executeMysqlOne(
+    `SELECT t.*, p.name AS party_display, acc.name AS account_display
+     FROM transactions t
+     LEFT JOIN parties p ON p.id = t.party_id
+     LEFT JOIN cash_bank_accounts acc ON acc.id = t.account_id
+     WHERE t.id = ?`,
+    [id]
+  );
   return row ? mapTransactionRow(row) : null;
 }
 
@@ -270,45 +284,56 @@ export async function createPartyDirect(partyData: any): Promise<Party> {
 }
 
 export async function updatePartyDirect(id: string, updates: any): Promise<Party> {
-  const updated = serverDb.updateParty(id, updates);
+  // serverDb.updateParty merges updates, recalculates the balance from the
+  // opening balance + all vouchers, and live-syncs the full row to MySQL.
+  const updated = await serverDb.updateParty(id, updates);
   if (!isMysqlConfigured()) {
     return updated;
   }
 
+  // FULL SET from the merged party (no COALESCE): every field on the form is
+  // authoritative, including values the user CLEARED (sent as ''/0) — and
+  // opening_balance / opening_balance_type / recalculated current_balance.
   await executeMysqlQuery(
     `UPDATE parties SET
-      name = COALESCE(?, name),
-      trade_name = COALESCE(?, trade_name),
-      type = COALESCE(?, type),
-      category = COALESCE(?, category),
-      gstin = COALESCE(?, gstin),
-      pan = COALESCE(?, pan),
-      contact_person = COALESCE(?, contact_person),
-      phone = COALESCE(?, phone),
-      email = COALESCE(?, email),
-      address = COALESCE(?, address),
-      payment_terms_days = COALESCE(?, payment_terms_days),
-      credit_limit = COALESCE(?, credit_limit),
-      notes = COALESCE(?, notes),
-      is_active = COALESCE(?, is_active),
+      name = ?,
+      trade_name = ?,
+      type = ?,
+      category = ?,
+      gstin = ?,
+      pan = ?,
+      contact_person = ?,
+      phone = ?,
+      email = ?,
+      address = ?,
+      payment_terms_days = ?,
+      credit_limit = ?,
+      opening_balance = ?,
+      opening_balance_type = ?,
+      current_balance = ?,
+      notes = ?,
+      is_active = ?,
       updated_at = ?
     WHERE id = ?`,
     [
-      updates.name || null,
-      updates.tradeName || null,
-      updates.type || null,
-      updates.category || null,
-      updates.gstin || null,
-      updates.pan || null,
-      updates.contactPerson || null,
-      updates.phone || null,
-      updates.email || null,
-      updates.address ? JSON.stringify(updates.address) : null,
-      updates.paymentTermsDays !== undefined ? updates.paymentTermsDays : null,
-      updates.creditLimit !== undefined ? updates.creditLimit : null,
-      updates.notes || null,
-      updates.isActive !== undefined ? updates.isActive : null,
-      new Date().toISOString(),
+      updated.name,
+      updated.tradeName || null,
+      updated.type,
+      updated.category,
+      updated.gstin || null,
+      updated.pan || null,
+      updated.contactPerson || null,
+      updated.phone || null,
+      updated.email || null,
+      JSON.stringify(updated.address || {}),
+      updated.paymentTermsDays || 30,
+      updated.creditLimit || 0,
+      updated.openingBalance || 0,
+      updated.openingBalanceType || 'to_receive',
+      updated.currentBalance || 0,
+      updated.notes || null,
+      updated.isActive ?? true,
+      updated.updatedAt || new Date().toISOString(),
       id,
     ]
   );
@@ -349,15 +374,23 @@ export async function fetchTransfersDirect(): Promise<InternalTransfer[]> {
   if (!isMysqlConfigured()) {
     return serverDb.getTransfers();
   }
-  const rows = await executeMysqlQuery('SELECT * FROM internal_transfers ORDER BY date DESC, created_at DESC');
+  // Account display names resolved with JOINs against the account master
+  // (Golden Rule §2) so account renames propagate to every transfer display.
+  const rows = await executeMysqlQuery(
+    `SELECT tr.*, fa.name AS from_account_display, ta.name AS to_account_display
+     FROM internal_transfers tr
+     LEFT JOIN cash_bank_accounts fa ON fa.id = tr.from_account_id
+     LEFT JOIN cash_bank_accounts ta ON ta.id = tr.to_account_id
+     ORDER BY tr.date DESC, tr.created_at DESC`
+  );
   return rows.map((r: any) => ({
     id: r.id,
     transferNumber: r.transfer_number,
     date: r.date,
     fromAccountId: r.from_account_id,
-    fromAccountName: r.from_account_name,
+    fromAccountName: r.from_account_display || undefined,
     toAccountId: r.to_account_id,
-    toAccountName: r.to_account_name,
+    toAccountName: r.to_account_display || undefined,
     transferType: r.transfer_type,
     amount: parseNum(r.amount),
     referenceNumber: r.reference_number || undefined,
@@ -370,13 +403,19 @@ export async function fetchAdjustmentsDirect(): Promise<AccountAdjustment[]> {
   if (!isMysqlConfigured()) {
     return serverDb.getAdjustments();
   }
-  const rows = await executeMysqlQuery('SELECT * FROM account_adjustments ORDER BY date DESC, created_at DESC');
+  // Account display name/type resolved with JOINs (Golden Rule §2).
+  const rows = await executeMysqlQuery(
+    `SELECT aj.*, acc.name AS account_display, acc.type AS account_type_display
+     FROM account_adjustments aj
+     LEFT JOIN cash_bank_accounts acc ON acc.id = aj.account_id
+     ORDER BY aj.date DESC, aj.created_at DESC`
+  );
   return rows.map((r: any) => ({
     id: r.id,
     adjustmentNumber: r.adjustment_number,
     accountId: r.account_id,
-    accountName: r.account_name,
-    accountType: r.account_type,
+    accountName: r.account_display || undefined,
+    accountType: r.account_type_display || undefined,
     date: r.date,
     type: r.type,
     amount: parseNum(r.amount),

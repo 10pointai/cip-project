@@ -215,11 +215,6 @@ function AppContent() {
     }
   };
 
-  const handleDeleteParty = (id: string) => {
-    db.deleteParty(id);
-    showToast('Party removed from directory.', 'info');
-  };
-
   const handleAddTransaction = (txData: any) => {
     db.addTransaction(txData);
     showToast(`Voucher ${txData.voucherNumber || ''} saved and ledger updated!`);
@@ -422,7 +417,6 @@ function AppContent() {
               onAddParty={handleAddParty}
               onAddPartiesBulk={handleAddPartiesBulk}
               onUpdateParty={handleUpdateParty}
-              onDeleteParty={handleDeleteParty}
               onAddTransaction={handleAddTransaction}
               onRecordPayment={handleRecordPayment}
             />
@@ -572,13 +566,8 @@ function AppContent() {
           setEditingParty(party);
           setIsAddPartyModalOpen(true);
         }}
-        onDelete={handleDeleteParty}
         onRecordPayment={(partyId, type) => {
           setPaymentModalState({ isOpen: true, partyId, type });
-        }}
-        onAddTransaction={(partyId) => {
-          setVoucherModalPartyId(partyId);
-          setIsVoucherModalOpen(true);
         }}
       />
 

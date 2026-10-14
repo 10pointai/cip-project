@@ -35,6 +35,8 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
   onEdit,
   onDelete,
 }) => {
+  // Live FIFO valuation rate from the ledger; catalog chain as fallback
+  // Item master's default cost rate (FIFO lots only drive the Stock Valuation card)
   const costPrice = item.openingStockPrice || item.purchasePrice || 0;
   const grossProfitPerUnit = costPrice > 0 ? item.salePrice - costPrice : 0;
   const grossProfitMarginPct =

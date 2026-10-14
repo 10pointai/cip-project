@@ -2,6 +2,161 @@ import { getMysqlPool, isMysqlConfigured } from './connection';
 import { serverDb } from '../db';
 
 /**
+ * Backfill of actual-cost valuation inputs onto historical stock_movements
+ * rows (rate, movement_value, valuation_rate_after) using FIFO LOT logic,
+ * matching the live valuation engine (server/inventoryValuation.ts):
+ *
+ * Rate resolution per row, in order:
+ *   1. adjustment vouchers: item_stock_adjustments.rate via reference_number
+ *   2. order movements: the order's items[] document snapshot (purchase inward
+ *      enters at the line rate; sale dispatch / reversal rows consume lots)
+ *   3. fallback: the item's catalog cost chain
+ * Inward rows create lots at their own rate; outward rows consume the OLDEST
+ * lots first and record the blended rate of what they actually consumed.
+ * Opening-type rows are skipped — opening stock is the first lot of the item.
+ * Rates/values are OVERWRITTEN so re-runs converge to the engine's logic.
+ */
+async function backfillStockMovementCosts(conn: any): Promise<void> {
+  try {
+    const [itemRows]: any = await conn.query(
+      'SELECT id, opening_stock, opening_stock_price, purchase_price, sale_price, current_stock FROM items'
+    );
+    const itemMap: Map<string, any> = new Map((itemRows || []).map((r: any) => [r.id, r]));
+    const items = new Set((itemRows || []).map((r: any) => r.id));
+    const fallbackRate = (id: string): number => {
+      const it: any = itemMap.get(id);
+      if (!it) return 0;
+      return Number(it.opening_stock_price) || Number(it.purchase_price) || Number(it.sale_price) || 0;
+    };
+
+    const [adjRows]: any = await conn.query('SELECT item_id, adjustment_number, rate FROM item_stock_adjustments');
+    const adjRate = new Map<string, number>();
+    for (const a of adjRows || []) {
+      const r = Number(a.rate) || 0;
+      if (r > 0) adjRate.set(a.adjustment_number, r);
+    }
+
+    const [orderRows]: any = await conn.query('SELECT order_number, items FROM orders');
+    const orderRates = new Map<string, number>(); // key: `${orderNumber}::${itemId}`
+    for (const o of orderRows || []) {
+      let lineItems: any[] = [];
+      try {
+        lineItems = typeof o.items === 'string' ? JSON.parse(o.items) : o.items;
+      } catch {
+        lineItems = [];
+      }
+      for (const li of lineItems || []) {
+        const r = Number(li?.rate) || 0;
+        if (r > 0 && li?.itemId) orderRates.set(`${o.order_number}::${li.itemId}`, r);
+      }
+    }
+
+    const [movRows]: any = await conn.query(
+      'SELECT id, item_id, movement_type, quantity, rate, reference_number, movement_date, created_at FROM stock_movements'
+    );
+    if (!movRows || movRows.length === 0) return;
+
+    // Chronological replay per item so lot consumption order is right
+    const byItem = new Map<string, any[]>();
+    for (const m of movRows) {
+      if (!byItem.has(m.item_id)) byItem.set(m.item_id, []);
+      byItem.get(m.item_id)!.push(m);
+    }
+
+    let updated = 0;
+    for (const [itemId, movs] of byItem) {
+      if (!items.has(itemId)) continue;
+
+      // Lots ledger: opening stock is the item's first lot (its own rate)
+      const it: any = itemMap.get(itemId);
+      const lots: { qty: number; rate: number }[] = [];
+      const openingStock = Number(it?.opening_stock) || 0;
+      if (openingStock > 0 && fallbackRate(itemId) > 0) {
+        lots.push({ qty: openingStock, rate: fallbackRate(itemId) });
+      }
+
+      movs.sort((a, b) =>
+        `${a.movement_date || ''}|${a.created_at || ''}`.localeCompare(
+          `${b.movement_date || ''}|${b.created_at || ''}`
+        )
+      );
+
+      for (const m of movs) {
+        const qty = Number(m.quantity) || 0;
+        const stockAfter = lots.reduce((s, l) => s + l.qty, 0);
+        let rateUsed = 0;
+        let consumedValue: number | null = null;
+
+        if (m.movement_type === 'opening') {
+          // Opening is the seed lot — snapshot only, don't replay again
+          rateUsed = fallbackRate(itemId);
+        } else if (qty > 0) {
+          // New lot at its own actual rate; existing lots are never re-priced
+          const adj = adjRate.get(m.reference_number || '');
+          const ord = orderRates.get(`${m.reference_number || ''}::${itemId}`);
+          rateUsed = rOr(adj) || rOr(ord) || rOr(m.rate) || fallbackRate(itemId);
+          if (rateUsed > 0) lots.push({ qty, rate: rateUsed });
+        } else if (qty < 0) {
+          // Consume quantity from the oldest lots first; rates stay intact.
+          // rateUsed = blended rate of the quantity actually consumed.
+          let need = -qty;
+          let consumed = 0;
+          let value = 0;
+          while (need > 0 && lots.length > 0) {
+            const lot = lots[0];
+            if (lot.qty <= need) {
+              need -= lot.qty;
+              consumed += lot.qty;
+              value += lot.qty * lot.rate;
+              lots.shift();
+            } else {
+              consumed += need;
+              value += need * lot.rate;
+              lot.qty -= need;
+              need = 0;
+            }
+          }
+          if (consumed > 0) {
+            rateUsed = value / consumed;
+            consumedValue = value;
+          }
+        }
+
+        const blendedAfter = stockAfter > 0
+          ? lots.reduce((s, l) => s + l.qty * l.rate, 0) / stockAfter
+          : 0;
+        try {
+          await conn.query(
+            `UPDATE stock_movements
+             SET rate = ?, movement_value = ?, valuation_rate_after = ?
+             WHERE id = ?`,
+            [
+              rateUsed > 0 ? rateUsed : null,
+              m.movement_type === 'opening'
+                ? (rateUsed > 0 ? Math.abs(qty) * rateUsed : null)
+                : consumedValue !== null ? consumedValue : (qty > 0 && rateUsed > 0 ? Math.abs(qty) * rateUsed : null),
+              blendedAfter > 0 ? blendedAfter : null,
+              m.id,
+            ]
+          );
+          updated++;
+        } catch (e: any) {
+          console.warn('[MySQL Migration] movement cost backfill notice:', e.message);
+        }
+      }
+    }
+    console.log(`[MySQL Migration] FIFO actual-cost backfill applied to ${updated} stock_movements rows.`);
+  } catch (e: any) {
+    console.warn('[MySQL Migration] stock movement cost backfill skipped:', e.message);
+  }
+}
+
+function rOr(v: any): number {
+  const n = Number(v);
+  return n > 0 && !isNaN(n) ? n : 0;
+}
+
+/**
  * Automatically provisions the MySQL database schema and runs initial migrations
  * if tables do not exist, ensuring zero downtime and immediate table availability.
  */
@@ -161,8 +316,7 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           code VARCHAR(64) NOT NULL,
           type VARCHAR(32) NOT NULL,
           category_id VARCHAR(64),
-          category_name VARCHAR(128),
-          unit VARCHAR(32) NOT NULL,
+          unit_id VARCHAR(64) COMMENT 'FK item_units — unit display JOINed at read, never a stored name',
           hsn_sac_code VARCHAR(32),
           tax_rate_gst DECIMAL(5,2) DEFAULT 18.00,
           sale_price DECIMAL(15,2) DEFAULT 0.00,
@@ -175,16 +329,14 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           opening_stock_price DECIMAL(15,2) DEFAULT NULL,
           opening_stock_date VARCHAR(32) DEFAULT NULL,
           min_stock_level DECIMAL(15,3) DEFAULT 0.000,
-          max_capacity DECIMAL(15,3) DEFAULT 0.000,
-          stock_location TEXT,
-          locations JSON,
-          stock_locations JSON,
+          max_capacity DECIMAL(15,3) DEFAULT 0.000 COMMENT 'Item-level aggregate; per-location capacity lives in item_location_mapping',
           last_stock_update VARCHAR(64),
-          movements JSON,
+          movements JSON COMMENT 'LEGACY-ONLY (NULL going forward; ledger is authoritative)',
           created_at VARCHAR(64) NOT NULL,
           updated_at VARCHAR(64),
           INDEX idx_item_code (code),
           INDEX idx_item_category (category_id),
+          INDEX idx_item_unit (unit_id),
           INDEX idx_item_type (type)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
@@ -219,11 +371,11 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
 
       // 5b. Item Location Mapping Table (Normalized Relational Inventory Allocation)
       await conn.query(`
-        CREATE TABLE IF NOT EXISTS item_location_mapping (
+                CREATE TABLE IF NOT EXISTS item_location_mapping (
           id VARCHAR(64) PRIMARY KEY,
           item_id VARCHAR(64) NOT NULL,
           location_id VARCHAR(64) NOT NULL,
-          location_name VARCHAR(128) NOT NULL,
+          max_capacity DECIMAL(15,3) COMMENT 'Per-location max stock capacity (from the item form)',
           opening_stock DECIMAL(15,3) NOT NULL DEFAULT 0.000,
           current_stock DECIMAL(15,3) NOT NULL DEFAULT 0.000,
           min_stock_level DECIMAL(15,3) NOT NULL DEFAULT 0.000,
@@ -253,13 +405,13 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
                 const mappingId = `ilm-${row.id}-${locId}`;
                 await conn.query(`
                   INSERT IGNORE INTO item_location_mapping
-                  (id, item_id, location_id, location_name, opening_stock, current_stock, min_stock_level, created_at, updated_at)
+                  (id, item_id, location_id, max_capacity, opening_stock, current_stock, min_stock_level, created_at, updated_at)
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 `, [
                   mappingId,
                   row.id,
                   locId,
-                  l.locationName || 'Main Storage',
+                  l.maxCapacity !== undefined && l.maxCapacity !== null ? Number(l.maxCapacity) : null,
                   Number(l.openingStock) || 0,
                   Number(l.currentStock) || 0,
                   Number(l.minStockLevel) || 0,
@@ -281,8 +433,10 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           voucher_number VARCHAR(64) NOT NULL,
           date VARCHAR(32) NOT NULL,
           type VARCHAR(32) NOT NULL,
+          -- FKs only (Golden Rule §2): party/account display names are JOINed
+          -- from parties / cash_bank_accounts at read time — stored nowhere.
           party_id VARCHAR(64) NOT NULL,
-          party_name VARCHAR(255) NOT NULL,
+          account_id VARCHAR(64),
           amount DECIMAL(15,2) NOT NULL,
           payment_mode VARCHAR(32),
           reference_number VARCHAR(128),
@@ -631,9 +785,7 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           transfer_number VARCHAR(64) NOT NULL,
           date VARCHAR(32) NOT NULL,
           from_account_id VARCHAR(64) NOT NULL,
-          from_account_name VARCHAR(255) NOT NULL,
           to_account_id VARCHAR(64) NOT NULL,
-          to_account_name VARCHAR(255) NOT NULL,
           transfer_type VARCHAR(64) NOT NULL,
           amount DECIMAL(15,2) NOT NULL,
           reference_number VARCHAR(128),
@@ -650,8 +802,6 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           id VARCHAR(64) PRIMARY KEY,
           adjustment_number VARCHAR(64) NOT NULL,
           account_id VARCHAR(64) NOT NULL,
-          account_name VARCHAR(255) NOT NULL,
-          account_type VARCHAR(32) NOT NULL,
           date VARCHAR(32) NOT NULL,
           type VARCHAR(32) NOT NULL,
           amount DECIMAL(15,2) NOT NULL,
@@ -666,6 +816,75 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
+      // Cash & Bank FK normalization: transfers/adjustments referenced accounts
+      // by name copies. Backfill any missing account ids from the copies via the
+      // account master, then drop the denormalized columns (Golden Rule, §2).
+      try {
+        // internal_transfers
+        const [trfCols]: any = await conn.query('SHOW COLUMNS FROM internal_transfers');
+        const trfColNames = (trfCols || []).map((c: any) => c.Field);
+        if (trfColNames.length > 0) {
+          if (!trfColNames.includes('from_account_id')) {
+            await conn.query('ALTER TABLE internal_transfers ADD COLUMN from_account_id VARCHAR(64) NULL AFTER date');
+          }
+          if (!trfColNames.includes('to_account_id')) {
+            await conn.query('ALTER TABLE internal_transfers ADD COLUMN to_account_id VARCHAR(64) NULL AFTER from_account_name');
+          }
+          const hadFromName = trfColNames.includes('from_account_name');
+          const hadToName = trfColNames.includes('to_account_name');
+          if (hadFromName || hadToName) {
+            if (hadFromName) {
+              await conn.query(`
+                UPDATE internal_transfers trf
+                LEFT JOIN cash_bank_accounts fa
+                  ON LOWER(TRIM(fa.name)) = LOWER(TRIM(trf.from_account_name))
+                SET trf.from_account_id = fa.id
+                WHERE (trf.from_account_id IS NULL OR trf.from_account_id = '') AND fa.id IS NOT NULL
+              `);
+              await conn.query('ALTER TABLE internal_transfers DROP COLUMN from_account_name');
+            }
+            if (hadToName) {
+              await conn.query(`
+                UPDATE internal_transfers trf
+                LEFT JOIN cash_bank_accounts ta
+                  ON LOWER(TRIM(ta.name)) = LOWER(TRIM(trf.to_account_name))
+                SET trf.to_account_id = ta.id
+                WHERE (trf.to_account_id IS NULL OR trf.to_account_id = '') AND ta.id IS NOT NULL
+              `);
+              await conn.query('ALTER TABLE internal_transfers DROP COLUMN to_account_name');
+            }
+            console.log('[MySQL Migration] internal_transfers normalized to account FKs (name columns dropped).');
+          }
+        }
+        // account_adjustments
+        const [adjCols]: any = await conn.query('SHOW COLUMNS FROM account_adjustments');
+        const adjColNames = (adjCols || []).map((c: any) => c.Field);
+        if (adjColNames.length > 0) {
+          if (!adjColNames.includes('account_id')) {
+            await conn.query('ALTER TABLE account_adjustments ADD COLUMN account_id VARCHAR(64) NULL AFTER adjustment_number');
+          }
+          const hadAdjName = adjColNames.includes('account_name');
+          if (hadAdjName) {
+            await conn.query(`
+              UPDATE account_adjustments aj
+              LEFT JOIN cash_bank_accounts acc
+                ON LOWER(TRIM(acc.name)) = LOWER(TRIM(aj.account_name))
+              SET aj.account_id = acc.id
+              WHERE (aj.account_id IS NULL OR aj.account_id = '') AND acc.id IS NOT NULL
+            `);
+            await conn.query('ALTER TABLE account_adjustments DROP COLUMN account_name');
+          }
+          if (adjColNames.includes('account_type')) {
+            await conn.query('ALTER TABLE account_adjustments DROP COLUMN account_type');
+          }
+          if (hadAdjName || adjColNames.includes('account_type')) {
+            console.log('[MySQL Migration] account_adjustments normalized to account FK (name/type columns dropped).');
+          }
+        }
+      } catch (cnfkMigErr: any) {
+        console.warn('[MySQL Migration] Cash/Bank FK normalization notice:', cnfkMigErr.message);
+      }
+
       // Ensure backward-compatibility for transactions table account columns
       try {
         const [txCols]: any = await conn.query('SHOW COLUMNS FROM transactions');
@@ -674,12 +893,25 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           await conn.query('ALTER TABLE transactions ADD COLUMN account_id VARCHAR(64) NULL AFTER date');
           console.log('[MySQL Migration] Added account_id column to transactions table.');
         }
-        if (!txColNames.includes('account_name')) {
-          await conn.query('ALTER TABLE transactions ADD COLUMN account_name VARCHAR(255) NULL AFTER account_id');
-          console.log('[MySQL Migration] Added account_name column to transactions table.');
-        }
+        // account_name is NO LONGER added (§2): the account display name is
+        // JOINed from cash_bank_accounts at read time.
       } catch (txAlterErr: any) {
         console.warn('[MySQL Migration] Transactions column alter check notice:', txAlterErr.message);
+      }
+
+      // transactions FK normalization: DROP the denormalized party_name /
+      // account_name columns (display names JOIN from the masters at read
+      // time — Golden Rule §2). Safe: ids are already populated.
+      try {
+        const [txCols2]: any = await conn.query('SHOW COLUMNS FROM transactions');
+        const txColNames2 = (txCols2 || []).map((c: any) => c.Field);
+        const txDrops = ['party_name', 'account_name'].filter((c) => txColNames2.includes(c));
+        if (txDrops.length > 0) {
+          await conn.query(`ALTER TABLE transactions DROP COLUMN ${txDrops.join(', DROP COLUMN ')}`);
+          console.log('[MySQL Migration] transactions normalized to FKs: dropped', txDrops.join(', '));
+        }
+      } catch (txNormErr: any) {
+        console.warn('[MySQL Migration] transactions FK normalization notice:', txNormErr.message);
       }
 
       // 13. Audit Logs
@@ -723,6 +955,8 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
 
       // 15. Stock Movements Ledger (append-only: one row per stock change, never rewritten)
       // FK store: item_id / location_id / party_id; display names resolved by JOINs at read time.
+      // rate / movement_value / valuation_rate_after are NUMERIC SNAPSHOTS (facts-as-of-event,
+      // documented exception) — the actual-cost (weighted average) valuation inputs.
       await conn.query(`
         CREATE TABLE IF NOT EXISTS stock_movements (
           id VARCHAR(64) PRIMARY KEY,
@@ -731,6 +965,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           movement_type VARCHAR(32) NOT NULL,
           quantity DECIMAL(15,3) NOT NULL,
           balance_after DECIMAL(15,3),
+          rate DECIMAL(15,4),
+          movement_value DECIMAL(15,2),
+          valuation_rate_after DECIMAL(15,4),
           reference_type VARCHAR(32),
           reference_number VARCHAR(64),
           party_id VARCHAR(64),
@@ -773,11 +1010,39 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         const [smCols]: any = await conn.query('SHOW COLUMNS FROM stock_movements');
         const smColNames = (smCols || []).map((c: any) => c.Field);
         if (smColNames.length > 0) {
-          if (smColNames.includes('location_name') && !smColNames.includes('location_id')) {
+          // Add FK columns whenever they are missing — regardless of whether the
+          // legacy name columns are present (deployments may sit at any shape).
+          if (!smColNames.includes('location_id')) {
             await conn.query('ALTER TABLE stock_movements ADD COLUMN location_id VARCHAR(64) NULL AFTER item_id');
           }
-          if (smColNames.includes('party_name') && !smColNames.includes('party_id')) {
+          if (!smColNames.includes('party_id')) {
             await conn.query('ALTER TABLE stock_movements ADD COLUMN party_id VARCHAR(64) NULL AFTER reference_number');
+          }
+          // Actual-cost valuation columns (FIFO lot replay inputs — numeric
+          // snapshots: facts-as-of-event, per documentation §2)
+          if (!smColNames.includes('rate')) {
+            await conn.query('ALTER TABLE stock_movements ADD COLUMN rate DECIMAL(15,4) NULL AFTER balance_after');
+          }
+          if (!smColNames.includes('movement_value')) {
+            await conn.query('ALTER TABLE stock_movements ADD COLUMN movement_value DECIMAL(15,2) NULL AFTER rate');
+          }
+          // Deployments that received the earlier avg_cost_after column are
+          // renamed to valuation_rate_after (valuation is FIFO, not averaged)
+          let renamedValuationColumn = false;
+          if (smColNames.includes('avg_cost_after') && !smColNames.includes('valuation_rate_after')) {
+            await conn.query(
+              'ALTER TABLE stock_movements CHANGE COLUMN avg_cost_after valuation_rate_after DECIMAL(15,4) NULL'
+            );
+            renamedValuationColumn = true;
+          }
+          if (!smColNames.includes('valuation_rate_after')) {
+            await conn.query('ALTER TABLE stock_movements ADD COLUMN valuation_rate_after DECIMAL(15,4) NULL AFTER movement_value');
+          }
+          // One-time (per column introduction) FIFO cost backfill: resolve each
+          // historical movement's actual cost rate, value, and blended-rate
+          // snapshot. OVERWRITES prior values so re-runs converge to engine logic.
+          if (!smColNames.includes('movement_value') || renamedValuationColumn) {
+            await backfillStockMovementCosts(conn);
           }
           if (smColNames.includes('location_name')) {
             // Backfill location_id from the old name column via the item's location mapping
@@ -821,7 +1086,7 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
                 await conn.query(
                   `INSERT IGNORE INTO stock_movements (
                     id, item_id, movement_type, quantity, balance_after, reference_number, notes, movement_date, created_at
-                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                   [
                     m.id || `stk-bf-${row.id}-${backfilled}`,
                     row.id,
@@ -844,6 +1109,87 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         }
       } catch (backfillErr: any) {
         console.warn('[MySQL Migration] stock_movements backfill notice:', backfillErr.message);
+      }
+
+      // =====================================================================
+      // ITEMS FK NORMALIZATION (Golden Rule §2, migrated 2026-10-14):
+      //   - add unit_id FK and backfill it from the legacy unit code column
+      //   - report any items whose unit code matched no master unit
+      //   - drop the denormalized name/structure columns:
+      //     category_name, unit, stock_location, stock_locations, locations
+      // Per-location stock lives ONLY in item_location_mapping (see the next
+      // block) — location names are JOINed from the item_locations master.
+      // =====================================================================
+      try {
+        const [imCols]: any = await conn.query('SHOW COLUMNS FROM items');
+        const imColNames = (imCols || []).map((c: any) => c.Field);
+        if (imColNames.length > 0) {
+          if (!imColNames.includes('unit_id')) {
+            await conn.query('ALTER TABLE items ADD COLUMN unit_id VARCHAR(64) NULL AFTER category_id');
+          }
+          const hadUnitName = imColNames.includes('unit');
+          if (hadUnitName) {
+            // Backfill unit_id from the legacy unit code match
+            await conn.query(`
+              UPDATE items it
+              LEFT JOIN item_units u1 ON LOWER(TRIM(u1.code)) = LOWER(TRIM(it.unit))
+              SET it.unit_id = u1.id
+              WHERE it.unit_id IS NULL AND it.unit IS NOT NULL AND it.unit <> ''
+            `);
+            // Name-based fallback match for rows still unresolved
+            await conn.query(`
+              UPDATE items it
+              LEFT JOIN item_units u ON LOWER(TRIM(u.name)) = LOWER(TRIM(it.unit))
+              SET it.unit_id = u.id
+              WHERE it.unit_id IS NULL AND it.unit IS NOT NULL AND it.unit <> ''
+            `);
+            // Report unmatched units (value-free of secrets — item names only)
+            const [unmatched]: any = await conn.query(
+              'SELECT name, code, unit FROM items WHERE unit_id IS NULL'
+            );
+            if ((unmatched || []).length > 0) {
+              console.warn('[MySQL Migration] WARNING: items whose unit matched NO master item_units row (their unit display will be blank until assigned):');
+              for (const r of unmatched) console.warn(`   - ${r.name} (${r.code}) unit="${r.unit}"`);
+            } else {
+              console.log('[MySQL Migration] Unit FK backfill matched all items to master units.');
+            }
+            await conn.query('ALTER TABLE items DROP COLUMN unit');
+          }
+          const imDrops = ['category_name', 'stock_location', 'stock_locations', 'locations']
+            .filter((c) => imColNames.includes(c));
+          if (imDrops.length > 0) {
+            await conn.query(`ALTER TABLE items DROP COLUMN ${imDrops.join(', DROP COLUMN ')}`);
+            console.log('[MySQL Migration] items normalized to FKs: dropped', imDrops.join(', '));
+          }
+        }
+      } catch (itemNormErr: any) {
+        console.warn('[MySQL Migration] items FK normalization notice:', itemNormErr.message);
+      }
+
+      // =====================================================================
+      // ITEM_LOCATION_MAPPING normalization: FKs only + per-location max capacity.
+      // The location NAME column is dropped — names resolve via JOIN against
+      // item_locations so location renames propagate to every display.
+      // Runs AFTER the stock_movements blocks above (they used the legacy
+      // location_name column as a backfill source).
+      // =====================================================================
+      try {
+        const [ilmCols]: any = await conn.query('SHOW COLUMNS FROM item_location_mapping');
+        const ilmColNames = (ilmCols || []).map((c: any) => c.Field);
+        if (ilmColNames.length > 0) {
+          if (!ilmColNames.includes('max_capacity')) {
+            await conn.query(
+              'ALTER TABLE item_location_mapping ADD COLUMN max_capacity DECIMAL(15,3) NULL AFTER location_id'
+            );
+            console.log('[MySQL Migration] Added per-location max_capacity to item_location_mapping.');
+          }
+          if (ilmColNames.includes('location_name')) {
+            await conn.query('ALTER TABLE item_location_mapping DROP COLUMN location_name');
+            console.log('[MySQL Migration] item_location_mapping normalized: location_name dropped (JOIN resolves names).');
+          }
+        }
+      } catch (ilmNormErr: any) {
+        console.warn('[MySQL Migration] item_location_mapping normalization notice:', ilmNormErr.message);
       }
 
       console.log('[MySQL Migration] All tables verified successfully.');
@@ -960,16 +1306,18 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
       // Seed items
       for (const it of snapshot.items || []) {
         await conn.query(
-          `REPLACE INTO items (id, name, code, type, category_id, category_name, unit, hsn_sac_code, tax_rate_gst, sale_price, purchase_price, technical_specs, remarks, is_active, current_stock, min_stock_level, max_capacity, stock_location, last_stock_update, movements, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          // FK store (Golden Rule §2): category name / unit string / location
+          // names are NEVER saved on the items row; unit_id resolved from the
+          // snapshot (falling back to a master lookup by the unit code).
+          `REPLACE INTO items (id, name, code, type, category_id, unit_id, hsn_sac_code, tax_rate_gst, sale_price, purchase_price, technical_specs, remarks, is_active, current_stock, min_stock_level, max_capacity, last_stock_update, movements, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             it.id,
             it.name,
             it.code,
             it.type,
             it.categoryId,
-            it.categoryName || null,
-            it.unit,
+            it.unitId || null,
             it.hsnSacCode || null,
             it.taxRateGst || 18,
             it.salePrice || 0,
@@ -980,7 +1328,6 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
             it.currentStock || 0,
             it.minStockLevel || 0,
             it.maxCapacity || 0,
-            it.stockLocation || null,
             it.lastStockUpdate || null,
             JSON.stringify(it.movements || []),
             it.createdAt,
@@ -992,15 +1339,15 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
       // Seed transactions
       for (const t of snapshot.transactions || []) {
         await conn.query(
-          `REPLACE INTO transactions (id, voucher_number, date, type, party_id, party_name, amount, payment_mode, reference_number, material_or_service, quantity_tonnes, description, status, due_date, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          // FKs only (§2): no name copies stored.
+          `REPLACE INTO transactions (id, voucher_number, date, type, party_id, amount, payment_mode, reference_number, material_or_service, quantity_tonnes, description, status, due_date, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             t.id,
             t.voucherNumber,
             t.date,
             t.type,
             t.partyId,
-            t.partyName,
             t.amount,
             t.paymentMode || null,
             t.referenceNumber || null,
@@ -1334,16 +1681,14 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
       // Seed internal transfers
       for (const trf of (snapshot.transfers || []) as any[]) {
         await conn.query(
-          `REPLACE INTO internal_transfers (id, transfer_number, date, from_account_id, from_account_name, to_account_id, to_account_name, transfer_type, amount, reference_number, notes, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `REPLACE INTO internal_transfers (id, transfer_number, date, from_account_id, to_account_id, transfer_type, amount, reference_number, notes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             trf.id,
             trf.transferNumber,
             trf.date,
             trf.fromAccountId,
-            trf.fromAccountName,
             trf.toAccountId,
-            trf.toAccountName,
             trf.transferType,
             trf.amount || 0,
             trf.referenceNumber || null,
@@ -1356,14 +1701,12 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
       // Seed account adjustments
       for (const adj of (snapshot.adjustments || []) as any[]) {
         await conn.query(
-          `REPLACE INTO account_adjustments (id, adjustment_number, account_id, account_name, account_type, date, type, amount, previous_balance, new_balance, reason, reference_number, notes, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `REPLACE INTO account_adjustments (id, adjustment_number, account_id, date, type, amount, previous_balance, new_balance, reason, reference_number, notes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             adj.id,
             adj.adjustmentNumber,
             adj.accountId,
-            adj.accountName,
-            adj.accountType,
             adj.date,
             adj.type,
             adj.amount || 0,
@@ -1421,7 +1764,7 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
           if (!mov || typeof mov !== 'object') continue;
           await conn.query(
             `INSERT IGNORE INTO stock_movements (id, item_id, movement_type, quantity, balance_after, reference_number, notes, movement_date, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               mov.id,
               item.id,
@@ -1439,8 +1782,8 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
       // Seed movements from the sandbox stockMovements collection (ledger records with FKs)
       for (const mov of (snapshot.stockMovements || []) as any[]) {
         await conn.query(
-          `INSERT IGNORE INTO stock_movements (id, item_id, location_id, movement_type, quantity, balance_after, reference_type, reference_number, party_id, notes, movement_date, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT IGNORE INTO stock_movements (id, item_id, location_id, movement_type, quantity, balance_after, rate, movement_value, valuation_rate_after, reference_type, reference_number, party_id, notes, movement_date, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             mov.id,
             mov.itemId,
@@ -1448,6 +1791,9 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
             mov.type || 'opening',
             mov.quantity || 0,
             mov.balanceAfter !== undefined && mov.balanceAfter !== null ? mov.balanceAfter : null,
+            mov.rate || null,
+            mov.movementValue || null,
+            mov.valuationRateAfter || null,
             mov.referenceType || null,
             mov.referenceNumber || null,
             mov.partyId || null,

@@ -13,7 +13,6 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   Edit2,
-  Trash2,
   FileText,
   Clock,
   ShieldCheck,
@@ -33,9 +32,7 @@ interface PartyDetailModalProps {
   orders?: Order[];
   settings: CompanySettings;
   onEdit: (party: Party) => void;
-  onDelete: (partyId: string) => void;
   onRecordPayment: (partyId: string, type: 'payment_in' | 'payment_out') => void;
-  onAddTransaction: (partyId: string) => void;
 }
 
 export function PartyDetailModal({
@@ -46,9 +43,7 @@ export function PartyDetailModal({
   orders,
   settings,
   onEdit,
-  onDelete,
   onRecordPayment,
-  onAddTransaction,
 }: PartyDetailModalProps) {
   const { hasPermission } = useAuth();
   const canManageParties = hasPermission('manage_parties');
@@ -121,19 +116,6 @@ export function PartyDetailModal({
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <h1 className="text-xl font-bold text-[var(--color-on-surface)]">{party.name}</h1>
-                  <span
-                    className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider ${
-                      party.type === 'customer'
-                        ? 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
-                        : party.type === 'vendor'
-                        ? 'bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]'
-                        : party.type === 'transporter'
-                        ? 'bg-[var(--color-tertiary-container)] text-[var(--color-on-tertiary-container)]'
-                        : 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-                    }`}
-                  >
-                    {party.type}
-                  </span>
                   <span className="text-[11px] font-medium px-2.5 py-0.5 rounded-full bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border border-[var(--color-outline-variant)]">
                     {party.category}
                   </span>
@@ -156,18 +138,6 @@ export function PartyDetailModal({
                     title="Edit Party Details"
                   >
                     <Edit2 className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (confirm(`Are you sure you want to delete ${party.name}?`)) {
-                        onDelete(party.id);
-                        onClose();
-                      }
-                    }}
-                    className="p-2 text-[var(--color-outline)] hover:text-[var(--color-error)] rounded-xl hover:bg-[var(--color-error-container)] transition-colors"
-                    title="Delete Party"
-                  >
-                    <Trash2 className="w-4 h-4" />
                   </button>
                 </>
               )}
@@ -352,15 +322,6 @@ export function PartyDetailModal({
                         Record Payment Made
                       </button>
                     </>
-                  )}
-                  {canManageParties && (
-                    <button
-                      onClick={() => onAddTransaction(party.id)}
-                      className="flex items-center gap-1.5 px-3.5 py-2 bg-[var(--color-surface-container-highest)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] font-semibold text-xs rounded-full shadow-xs transition-colors"
-                    >
-                      <PlusCircle className="w-4 h-4" />
-                      New Voucher / Bill
-                    </button>
                   )}
                 </div>
               </div>

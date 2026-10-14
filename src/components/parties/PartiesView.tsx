@@ -11,7 +11,6 @@ import {
   ChevronRight,
   LayoutGrid,
   List,
-  FileSpreadsheet,
   Download,
   AlertCircle,
   Clock,
@@ -25,7 +24,6 @@ import { PartyFormModal } from './PartyFormModal';
 import { BulkPartyEntryModal } from './BulkPartyEntryModal';
 import { PartyDetailView } from './PartyDetailView';
 import { RecordPaymentModal } from './RecordPaymentModal';
-import { TransactionFormModal } from './TransactionFormModal';
 import { useToast } from '../common/Toast';
 import { useAuth } from '../../context/AuthContext';
 
@@ -38,7 +36,6 @@ interface PartiesViewProps {
   onAddParty: (partyData: any) => void;
   onAddPartiesBulk?: (parties: any[]) => void;
   onUpdateParty: (id: string, updates: any) => void;
-  onDeleteParty: (id: string) => void;
   onAddTransaction: (txData: any) => void;
   onRecordPayment?: (paymentData: any) => void;
 }
@@ -52,7 +49,6 @@ export function PartiesView({
   onAddParty,
   onAddPartiesBulk,
   onUpdateParty,
-  onDeleteParty,
   onAddTransaction,
   onRecordPayment,
 }: PartiesViewProps) {
@@ -63,7 +59,6 @@ export function PartiesView({
   const canViewFinancialMetrics = hasPermission('view_financial_metrics');
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedType, setSelectedType] = useState<string>('all');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [selectedBalanceFilter, setSelectedBalanceFilter] = useState<string>('all');
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('table');
@@ -78,8 +73,6 @@ export function PartiesView({
     partyId?: string;
     type: 'payment_in' | 'payment_out';
   }>({ isOpen: false, type: 'payment_in' });
-  const [isVoucherModalOpen, setIsVoucherModalOpen] = useState(false);
-  const [voucherModalPartyId, setVoucherModalPartyId] = useState<string | undefined>();
 
   // Filtered Parties
   const filteredParties = useMemo(() => {
@@ -92,15 +85,6 @@ export function PartiesView({
         p.contactPerson.toLowerCase().includes(searchQuery.toLowerCase()) ||
         p.address.city.toLowerCase().includes(searchQuery.toLowerCase());
 
-      const matchesType =
-        selectedType === 'all'
-          ? true
-          : selectedType === 'customer'
-          ? p.type === 'customer' || p.type === 'both'
-          : selectedType === 'vendor'
-          ? p.type === 'vendor' || p.type === 'both'
-          : p.type === selectedType;
-
       const matchesCategory = selectedCategory === 'all' ? true : p.category === selectedCategory;
 
       const matchesBalance =
@@ -112,9 +96,9 @@ export function PartiesView({
           ? p.currentBalance < 0
           : p.currentBalance === 0;
 
-      return matchesSearch && matchesType && matchesCategory && matchesBalance;
+      return matchesSearch && matchesCategory && matchesBalance;
     });
-  }, [parties, searchQuery, selectedType, selectedCategory, selectedBalanceFilter]);
+  }, [parties, searchQuery, selectedCategory, selectedBalanceFilter]);
 
   // Key KPI totals
   const totalReceivables = useMemo(() => {
@@ -154,11 +138,6 @@ export function PartiesView({
     }
   };
 
-  const handleDelete = (partyId: string) => {
-    onDeleteParty(partyId);
-    showToast('Party removed from directory.', 'info');
-  };
-
   const handleRecordPaymentSubmit = (data: any) => {
     if (onRecordPayment) {
       onRecordPayment(data);
@@ -176,11 +155,6 @@ export function PartiesView({
     }
   };
 
-  const handleVoucherSubmit = (data: any) => {
-    onAddTransaction(data);
-    showToast(`Voucher ${data.voucherNumber} recorded successfully!`);
-  };
-
   // If a specific party is selected, render the dedicated full detail screen
   const selectedParty = parties.find((p) => p.id === selectedPartyId);
   if (selectedParty) {
@@ -196,16 +170,8 @@ export function PartiesView({
             setEditingParty(party);
             setIsPartyFormOpen(true);
           }}
-          onDelete={(id) => {
-            handleDelete(id);
-            setSelectedPartyId(null);
-          }}
           onRecordPayment={(partyId, type) => {
             setPaymentModalState({ isOpen: true, partyId, type });
-          }}
-          onAddTransaction={(partyId) => {
-            setVoucherModalPartyId(partyId);
-            setIsVoucherModalOpen(true);
           }}
         />
 
@@ -229,15 +195,6 @@ export function PartiesView({
           currencySymbol={settings.currency.symbol}
         />
 
-        <TransactionFormModal
-          isOpen={isVoucherModalOpen}
-          onClose={() => setIsVoucherModalOpen(false)}
-          parties={parties}
-          defaultPartyId={voucherModalPartyId}
-          onSave={handleVoucherSubmit}
-          currencySymbol={settings.currency.symbol}
-          prefixes={settings.prefixes}
-        />
       </div>
     );
   }
@@ -247,7 +204,6 @@ export function PartiesView({
     const headers = [
       'Name',
       'Trade Name',
-      'Type',
       'Category',
       'GSTIN',
       'PAN',
@@ -263,7 +219,6 @@ export function PartiesView({
     const rows = parties.map((p) => [
       `"${p.name}"`,
       `"${p.tradeName || ''}"`,
-      `"${p.type}"`,
       `"${p.category}"`,
       `"${p.gstin || ''}"`,
       `"${p.pan || ''}"`,
@@ -376,16 +331,6 @@ export function PartiesView({
             {canManageParties && (
               <>
                 <button
-                  id="bulk-party-entry-open-btn"
-                  onClick={() => setIsBulkEntryOpen(true)}
-                  className="flex items-center gap-1.5 px-3.5 py-2 bg-[var(--color-surface-container-lowest)] hover:bg-[var(--color-primary-container)]/30 text-[var(--color-primary)] border border-[var(--color-primary)]/40 font-semibold text-xs rounded-full shadow-2xs transition-all hover:scale-[1.01] active:scale-[0.99]"
-                  title="Spreadsheet Bulk Entry & Paste from Excel"
-                >
-                  <FileSpreadsheet className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-                  <span className="hidden sm:inline">Bulk Entry</span>
-                </button>
-
-                <button
                   onClick={() => {
                     setEditingParty(null);
                     setIsPartyFormOpen(true);
@@ -423,28 +368,6 @@ export function PartiesView({
 
         {/* Filter Pills */}
         <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--color-outline-variant)] text-xs">
-          {/* Type Filter */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-            {[
-              { id: 'all', label: 'All Parties' },
-              { id: 'customer', label: 'Customers (Buyers)' },
-              { id: 'vendor', label: 'Suppliers (Vendors)' },
-              { id: 'transporter', label: 'Transporters' },
-            ].map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setSelectedType(tab.id)}
-                className={`px-3.5 py-1.5 rounded-full font-medium transition-all ${
-                  selectedType === tab.id
-                    ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] shadow-xs'
-                    : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)]'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-
           {/* Category and Balance Dropdowns */}
           <div className="flex items-center gap-2 flex-wrap">
             <select
@@ -495,13 +418,6 @@ export function PartiesView({
               <Plus className="w-4 h-4" />
               Add First Party
             </button>
-            <button
-              onClick={() => setIsBulkEntryOpen(true)}
-              className="inline-flex items-center gap-2 px-5 py-2.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-primary)] text-[var(--color-primary)] hover:bg-[var(--color-primary-container)]/30 font-semibold text-xs rounded-full shadow-2xs transition-colors"
-            >
-              <FileSpreadsheet className="w-4 h-4" />
-              Bulk Import Parties
-            </button>
           </div>
         </div>
       ) : viewMode === 'grid' ? (
@@ -535,19 +451,6 @@ export function PartiesView({
                           <p className="text-[11px] text-[var(--color-on-surface-variant)] line-clamp-1">{party.tradeName}</p>
                         )}
                         <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                          <span
-                            className={`text-[10px] font-semibold px-2.5 py-0.5 rounded-full uppercase tracking-wider ${
-                              party.type === 'customer'
-                                ? 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
-                                : party.type === 'vendor'
-                                ? 'bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]'
-                                : party.type === 'transporter'
-                                ? 'bg-[var(--color-tertiary-container)] text-[var(--color-on-tertiary-container)]'
-                                : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
-                            }`}
-                          >
-                            {party.type}
-                          </span>
                           <span className="text-[10px] font-medium px-2.5 py-0.5 rounded-full bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border border-[var(--color-outline-variant)]">
                             {party.category}
                           </span>
@@ -624,20 +527,6 @@ export function PartiesView({
                     >
                       <MessageSquare className="w-3.5 h-3.5" />
                     </a>
-                    {canRecordPayments && (
-                      <button
-                        onClick={() => {
-                          setPaymentModalState({
-                            isOpen: true,
-                            partyId: party.id,
-                            type: party.type === 'customer' ? 'payment_in' : 'payment_out',
-                          });
-                        }}
-                        className="px-3 py-1.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-[var(--color-on-surface)] font-medium hover:bg-[var(--color-surface-container)] transition-colors text-[11px]"
-                      >
-                        Pay / Settle
-                      </button>
-                    )}
                   </div>
 
                   <button
@@ -660,7 +549,6 @@ export function PartiesView({
               <thead>
                 <tr className="bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] font-semibold uppercase tracking-wider text-[11px]">
                   <th className="py-3 px-4">Party Name & Category</th>
-                  <th className="py-3 px-3">Type</th>
                   <th className="py-3 px-3">GSTIN / PAN</th>
                   <th className="py-3 px-3">Contact & City</th>
                   <th className="py-3 px-3">Credit Terms</th>
@@ -689,21 +577,13 @@ export function PartiesView({
                           className="font-bold text-[var(--color-on-surface)] hover:text-[var(--color-primary)] cursor-pointer"
                         >
                           {party.name}
+                          {party.tradeName && (
+                            <span className="block text-[10px] font-medium italic text-[var(--color-outline)]">
+                              ({party.tradeName})
+                            </span>
+                          )}
                         </div>
                         <div className="text-[11px] text-[var(--color-on-surface-variant)]">{party.category}</div>
-                      </td>
-                      <td className="py-3.5 px-3">
-                        <span
-                          className={`text-[10px] font-semibold px-2.5 py-0.5 rounded-full uppercase tracking-wider ${
-                            party.type === 'customer'
-                              ? 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
-                              : party.type === 'vendor'
-                              ? 'bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]'
-                              : 'bg-[var(--color-tertiary-container)] text-[var(--color-on-tertiary-container)]'
-                          }`}
-                        >
-                          {party.type}
-                        </span>
                       </td>
                       <td className="py-3.5 px-3 font-mono font-medium text-[var(--color-on-surface)]">
                         {party.gstin || 'Unregistered'}
@@ -724,28 +604,7 @@ export function PartiesView({
                         <span className="text-[10px] uppercase">{isReceivable ? '(Dr)' : isPayable ? '(Cr)' : ''}</span>
                       </td>
                       <td className="py-3.5 px-4 text-center">
-                        <div className="flex items-center justify-center gap-1.5">
-                          <button
-                            onClick={() => setSelectedPartyId(party.id)}
-                            className="px-3 py-1 bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] font-medium rounded-full text-xs transition-colors"
-                          >
-                            Ledger
-                          </button>
-                          {canRecordPayments && (
-                            <button
-                              onClick={() => {
-                                setPaymentModalState({
-                                  isOpen: true,
-                                  partyId: party.id,
-                                  type: party.type === 'customer' ? 'payment_in' : 'payment_out',
-                                });
-                              }}
-                              className="px-3 py-1 bg-[var(--color-primary-container)] hover:opacity-90 text-[var(--color-on-primary-container)] font-semibold rounded-full text-xs transition-colors"
-                            >
-                              Pay
-                            </button>
-                          )}
-                          {canManageParties && (
+                        <div className="flex items-center justify-center gap-1.5">                          {canManageParties && (
                             <button
                               onClick={() => {
                                 setEditingParty(party);
@@ -794,16 +653,6 @@ export function PartiesView({
         accounts={accounts}
         onSave={handleRecordPaymentSubmit}
         currencySymbol={settings.currency.symbol}
-      />
-
-      <TransactionFormModal
-        isOpen={isVoucherModalOpen}
-        onClose={() => setIsVoucherModalOpen(false)}
-        parties={parties}
-        defaultPartyId={voucherModalPartyId}
-        onSave={handleVoucherSubmit}
-        currencySymbol={settings.currency.symbol}
-        prefixes={settings.prefixes}
       />
     </div>
   );

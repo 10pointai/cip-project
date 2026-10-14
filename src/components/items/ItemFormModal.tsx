@@ -147,7 +147,8 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
     }
     const usedNames = new Set(formLocations.map((l) => l.locationName.toLowerCase().trim()));
     const nextAvailable = locations.find((l) => !usedNames.has(l.name.toLowerCase().trim()));
-    const newLoc = nextAvailable || locations[0];
+    if (!nextAvailable) return; // every master location is already assigned in the list
+    const newLoc = nextAvailable;
     setFormLocations([
       ...formLocations,
       {
@@ -624,15 +625,25 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                               className={`w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-semibold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${initialItem && !locRow.isNewRow ? 'opacity-50 cursor-not-allowed' : ''}`}
                             >
                               <option value="">-- Choose Storage Location --</option>
-                              {locations.map((loc) => (
-                                <option key={loc.id} value={loc.name}>
-                                  {loc.name} {loc.capacity ? `(${loc.capacity})` : ''}
-                                </option>
-                              ))}
+                              {locations
+                                .filter(
+                                  (loc) =>
+                                    loc.name === locRow.locationName ||
+                                    !formLocations.some(
+                                      (other, otherIdx) =>
+                                        otherIdx !== idx &&
+                                        (other.locationName || '').trim().toLowerCase() === loc.name.trim().toLowerCase()
+                                    )
+                                )
+                                .map((loc) => (
+                                  <option key={loc.id} value={loc.name}>
+                                    {loc.name} {loc.capacity ? `(${loc.capacity})` : ''}
+                                  </option>
+                                ))}
                             </select>
                           </div>
 
-                          {/* Opening Stock at this Location (fixed after creation) */}
+                          {/* Opening Stock (rows from DB are fixed; new rows editable) */}
                           <div className="w-full sm:w-28 space-y-1">
                             <label className="block text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
                               Opening Stock ({unit || 'Unit'})
@@ -644,9 +655,9 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                               placeholder="0.00"
                               value={locRow.openingStock}
                               onChange={(e) => handleLocationChange(idx, 'openingStock', e.target.value)}
-                              disabled={!!initialItem}
-                              title={initialItem ? 'Opening stock is fixed after item creation. Use Stock Adjustments to modify stock.' : undefined}
-                              className={`w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${initialItem ? 'opacity-50 cursor-not-allowed' : ''}`}
+                              disabled={!!initialItem && !locRow.isNewRow}
+                              title={initialItem && !locRow.isNewRow ? 'Opening stock is fixed for locations saved with this item. Use Stock Adjustments to modify stock.' : undefined}
+                              className={`w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${initialItem && !locRow.isNewRow ? 'opacity-50 cursor-not-allowed' : ''}`}
                             />
                           </div>
 
@@ -692,18 +703,20 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                             </div>
                           )}
 
-                          {/* Remove Location Button */}
-                          <div className="flex sm:items-center sm:self-end pt-1 sm:pt-0">
-                            <button
-                              type="button"
-                              disabled={formLocations.length <= 1}
-                              onClick={() => handleRemoveLocationRow(idx)}
-                              className="p-2 text-[var(--color-outline)] hover:text-[var(--color-error)] hover:bg-[var(--color-error-container)]/30 rounded-full transition-colors disabled:opacity-30 disabled:hover:text-[var(--color-outline)] disabled:hover:bg-transparent"
-                              title="Remove this location"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
+                          {/* Remove Location Button (DB-saved locations are protected while editing) */}
+                          {!(initialItem && !locRow.isNewRow) && (
+                            <div className="flex sm:items-center sm:self-end pt-1 sm:pt-0">
+                              <button
+                                type="button"
+                                disabled={formLocations.length <= 1}
+                                onClick={() => handleRemoveLocationRow(idx)}
+                                className="p-2 text-[var(--color-outline)] hover:text-[var(--color-error)] hover:bg-[var(--color-error-container)]/30 rounded-full transition-colors disabled:opacity-30 disabled:hover:text-[var(--color-outline)] disabled:hover:bg-transparent"
+                                title="Remove this location"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -713,7 +726,15 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                       <button
                         type="button"
                         onClick={handleAddLocationRow}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-[var(--color-surface-container-high)] hover:bg-[var(--color-surface-container-highest)] text-[var(--color-primary)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold transition-all shadow-2xs"
+                        disabled={
+                          locations.filter(
+                            (loc) => !formLocations.some(
+                              (l) => (l.locationName || '').trim().toLowerCase() === loc.name.trim().toLowerCase()
+                            )
+                          ).length === 0
+                        }
+                        title={formLocations.length >= locations.length ? 'All master locations are already assigned' : undefined}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-[var(--color-surface-container-high)] text-[var(--color-primary)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold transition-all shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed hover:bg-[var(--color-surface-container-highest)]"
                       >
                         <Plus className="w-3.5 h-3.5" />
                         <span>Add Another Location</span>

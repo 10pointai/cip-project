@@ -87,6 +87,14 @@ export interface StockMovementLog {
   type: 'purchase_inward' | 'production_output' | 'production_consumed' | 'sale_dispatch' | 'opening' | 'reconciliation_in' | 'reconciliation_out' | 'adjustment_increase' | 'adjustment_decrease';
   quantity: number; // positive for additions, negative for deductions
   balanceAfter: number;
+  // Actual-cost snapshots (facts-as-of-event; numeric snapshots per documentation §2):
+  // rate = actual cost per unit of THIS movement (inward = the rate it entered
+  // at; outward = the blended FIFO rate of what it actually consumed),
+  // movementValue = the value of the quantity moved at that rate,
+  // valuationRateAfter = the item's blended valuation rate after this movement.
+  rate?: number;
+  movementValue?: number;
+  valuationRateAfter?: number;
   referenceNumber?: string;
   sourcePartyOrBatch?: string;
   notes?: string;
@@ -107,12 +115,22 @@ export interface Item {
   code: string; // SKU or item code
   type: ItemType;
   categoryId: string;
+  // FK to item_units (resolved at write time from the master; the display
+  // unit string is JOINed at read time — no unit name saving on the row)
+  unitId?: string;
   categoryName?: string;
   unit: string; // e.g. MT, LTR, CUM, BRASS, HR, TRIP, NOS
   hsnSacCode?: string; // HSN for goods, SAC for services
   taxRateGst: number; // e.g. 0, 5, 12, 18, 28
   salePrice: number; // Default selling rate
   purchasePrice?: number; // Legacy or computed procurement rate
+
+  // FIFO actual-cost valuation, computed server-side from the stock
+  // movements ledger at read time (never persisted on the items row).
+  // Each entered quantity keeps its own rate forever; valuationRate is the
+  // blended rate of the remaining lots (display only).
+  valuationRate?: number; // Blended rate of remaining FIFO lots
+  stockValue?: number; // currentStock x valuationRate
   
   // Opening stock & procurement cost tracking
   openingStock?: number; // Quantity of opening stock
@@ -265,14 +283,18 @@ export interface Order {
 export interface Transaction {
   id: string;
   voucherNumber: string;
+  // FKs only (Golden Rule §2): partyId + accountId are authoritative; the
+  // party/account display names are resolved via JOINs at read time
+  // (transactions stores NO name copies).
   partyId: string;
-  partyName: string;
   partyType: PartyType;
+  // Hydrated read-time view fields (never persisted)
+  partyName?: string;
+  accountName?: string;
   type: VoucherType;
   amount: number;
   date: string;
-  accountId?: string; // Links transaction directly to Bank or Cash Account
-  accountName?: string;
+  accountId?: string; // Links transaction directly to Bank or Cash Account (FK)
   paymentMode?: 'bank_transfer' | 'cheque' | 'cash' | 'upi' | 'neft_rtgs';
   referenceNumber?: string;
   itemId?: string; // Associated product/service catalog item ID
@@ -311,15 +333,19 @@ export interface InternalTransfer {
   id: string;
   transferNumber: string;
   date: string; // YYYY-MM-DD
+  // FKs only (Golden Rule, documentation §2): from/to account NAME and every
+  // other display field are resolved with JOINs against cash_bank_accounts at
+  // read time, so account renames propagate to all transfer displays.
   fromAccountId: string;
-  fromAccountName: string;
   toAccountId: string;
-  toAccountName: string;
   transferType: TransferType;
   amount: number;
   referenceNumber?: string; // UTR / Cheque / Slip No.
   notes?: string;
   createdAt: string;
+  // Hydrated read-time fields (never persisted)
+  fromAccountName?: string;
+  toAccountName?: string;
 }
 
 export type AdjustmentType = 'increase' | 'decrease';
@@ -327,9 +353,9 @@ export type AdjustmentType = 'increase' | 'decrease';
 export interface AccountAdjustment {
   id: string;
   adjustmentNumber: string;
+  // FK only (Golden Rule, documentation §2): account display name/type are
+  // resolved with JOINs against cash_bank_accounts at read time.
   accountId: string;
-  accountName: string;
-  accountType: AccountType;
   date: string; // YYYY-MM-DD
   type: AdjustmentType; // 'increase' (Add Money) or 'decrease' (Reduce Money)
   amount: number;
@@ -339,6 +365,9 @@ export interface AccountAdjustment {
   referenceNumber?: string;
   notes?: string;
   createdAt: string;
+  // Hydrated read-time fields (never persisted)
+  accountName?: string;
+  accountType?: AccountType;
 }
 
 export interface BankDetails {

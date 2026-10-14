@@ -9,11 +9,9 @@ import {
   Calendar,
   CreditCard,
   Printer,
-  PlusCircle,
   ArrowDownLeft,
   ArrowUpRight,
   Edit2,
-  Trash2,
   FileText,
   Clock,
   ShieldCheck,
@@ -44,9 +42,7 @@ interface PartyDetailViewProps {
   settings: CompanySettings;
   onBack: () => void;
   onEdit: (party: Party) => void;
-  onDelete: (partyId: string) => void;
   onRecordPayment: (partyId: string, type: 'payment_in' | 'payment_out') => void;
-  onAddTransaction: (partyId: string) => void;
 }
 
 export function PartyDetailView({
@@ -56,9 +52,7 @@ export function PartyDetailView({
   settings,
   onBack,
   onEdit,
-  onDelete,
   onRecordPayment,
-  onAddTransaction,
 }: PartyDetailViewProps) {
   const { hasPermission } = useAuth();
   const canManageParties = hasPermission('manage_parties');
@@ -308,19 +302,6 @@ export function PartyDetailView({
               <h1 className="text-xl sm:text-2xl font-black text-[var(--color-on-surface)] tracking-tight">
                 {party.name}
               </h1>
-              <span
-                className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider ${
-                  party.type === 'customer'
-                    ? 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
-                    : party.type === 'vendor'
-                    ? 'bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]'
-                    : party.type === 'transporter'
-                    ? 'bg-[var(--color-tertiary-container)] text-[var(--color-on-tertiary-container)]'
-                    : 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-                }`}
-              >
-                {party.type}
-              </span>
               <span className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border border-[var(--color-outline-variant)]">
                 {party.category}
               </span>
@@ -366,19 +347,6 @@ export function PartyDetailView({
                 <span>Edit Profile</span>
               </button>
 
-              <button
-                type="button"
-                onClick={() => {
-                  if (confirm(`Are you sure you want to delete ${party.name}? This will remove the party from your records.`)) {
-                    onDelete(party.id);
-                    onBack();
-                  }
-                }}
-                className="p-2 text-[var(--color-outline)] hover:text-[var(--color-error)] hover:bg-[var(--color-error-container)]/30 border border-[var(--color-outline-variant)] rounded-full transition-colors"
-                title="Delete Party"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
             </>
           )}
         </div>
@@ -431,6 +399,7 @@ export function PartyDetailView({
           <div className="flex items-center gap-1.5">
             <MapPin className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
             <span>
+              {party.address.street ? `${party.address.street}, ` : ''}
               {party.address.city}, {party.address.state} {party.address.pincode ? `- ${party.address.pincode}` : ''}
             </span>
           </div>
@@ -590,35 +559,16 @@ export function PartyDetailView({
 
           <div className="flex items-center gap-2 flex-wrap">
             {canRecordPayments && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => onRecordPayment(party.id, 'payment_in')}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-xs transition-all hover:scale-[1.01] active:scale-[0.99]"
-                >
-                  <ArrowDownLeft className="w-3.5 h-3.5" />
-                  <span>Record Payment Received</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => onRecordPayment(party.id, 'payment_out')}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-secondary)] hover:opacity-90 text-[var(--color-on-secondary)] font-bold text-xs rounded-full shadow-xs transition-all hover:scale-[1.01] active:scale-[0.99]"
-                >
-                  <ArrowUpRight className="w-3.5 h-3.5" />
-                  <span>Record Payment Made</span>
-                </button>
-              </>
+              <button
+                type="button"
+                onClick={() => onRecordPayment(party.id, party.type === 'customer' ? 'payment_in' : 'payment_out')}
+                className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-xs transition-all hover:scale-[1.01] active:scale-[0.99]"
+                title="Record a payment for this party — switch between Received / Paid in the modal"
+              >
+                <CreditCard className="w-3.5 h-3.5" />
+                <span>Record Payment</span>
+              </button>
             )}
-
-            <button
-              type="button"
-              onClick={() => onAddTransaction(party.id)}
-              className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] font-bold text-xs rounded-full shadow-xs transition-colors"
-            >
-              <PlusCircle className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-              <span>New Voucher / Bill</span>
-            </button>
           </div>
         </div>
       )}

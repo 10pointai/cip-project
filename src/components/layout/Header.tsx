@@ -294,19 +294,6 @@ export function Header({
           </button>
         )}
 
-        {/* Azure MySQL & Enterprise Cloud Status Button */}
-        {onOpenBackendStatus && (
-          <button
-            onClick={onOpenBackendStatus}
-            className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full bg-[var(--color-surface-container-high)] hover:bg-[var(--color-surface-container-highest)] border border-[var(--color-outline-variant)] text-[11px] font-semibold text-[var(--color-on-surface)] transition-all shadow-2xs hover:scale-[1.02] active:scale-95"
-            title={`Azure Database for MySQL Flexible Server • Single Source of Truth • ${isBackendOnline ? 'Online' : 'Standby'}`}
-          >
-            <span className={`w-2 h-2 rounded-full shrink-0 ${isBackendOnline ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
-            <Database className="w-3.5 h-3.5 text-[var(--color-primary)] shrink-0" />
-            <span className="font-mono text-[10px] hidden sm:inline">Azure MySQL</span>
-          </button>
-        )}
-
         {/* Theme Mode & Contrast Controls (Only shown on Settings & Design System pages) */}
         {(activeTab === 'settings' || activeTab === 'design-system') && (
           <div className="flex items-center gap-1 bg-[var(--color-surface-container-high)] p-1 rounded-full border border-[var(--color-outline-variant)]">

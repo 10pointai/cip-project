@@ -36,16 +36,16 @@ export async function writeTransactionACID(txnData: any) {
     const createdAt = txnData.createdAt || new Date().toISOString();
 
     await conn.query(
-      `INSERT INTO transactions (id, voucher_number, date, account_id, account_name, type, party_id, party_name, amount, payment_mode, reference_number, material_or_service, quantity_tonnes, description, status, due_date, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      // FKs only (Golden Rule §2): no party_name/account_name copies stored;
+      // display names JOIN from the masters at read time.
+      `INSERT INTO transactions (id, voucher_number, date, account_id, type, party_id, amount, payment_mode, reference_number, material_or_service, quantity_tonnes, description, status, due_date, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
        voucher_number = VALUES(voucher_number),
        date = VALUES(date),
        account_id = VALUES(account_id),
-       account_name = VALUES(account_name),
        type = VALUES(type),
        party_id = VALUES(party_id),
-       party_name = VALUES(party_name),
        amount = VALUES(amount),
        payment_mode = VALUES(payment_mode),
        reference_number = VALUES(reference_number),
@@ -54,7 +54,7 @@ export async function writeTransactionACID(txnData: any) {
        description = VALUES(description),
        status = VALUES(status),
        due_date = VALUES(due_date)`,
-      [id, voucherNumber, date, accountId, accountName, type, partyId, partyName, amount, paymentMode, referenceNumber, materialOrService, quantityTonnes, description, status, dueDate, createdAt]
+      [id, voucherNumber, date, accountId, type, partyId, amount, paymentMode, referenceNumber, materialOrService, quantityTonnes, description, status, dueDate, createdAt]
     );
 
     if (partyId) {

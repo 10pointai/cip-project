@@ -158,14 +158,14 @@ export function PartyFormModal({
 
     onSave({
       name: name.trim(),
-      tradeName: tradeName.trim() || undefined,
+      tradeName: tradeName.trim(),
       type,
       category,
-      gstin: gstin.trim() || undefined,
-      pan: pan.trim() || undefined,
+      gstin: gstin.trim(),
+      pan: pan.trim(),
       contactPerson: contactPerson.trim() || name.trim(),
       phone: phone.trim(),
-      email: email.trim() || undefined,
+      email: email.trim(),
       address: {
         street: street.trim(),
         city: city.trim(),
@@ -177,7 +177,7 @@ export function PartyFormModal({
       creditLimit: parseFloat(creditLimit) || 0,
       openingBalance: parseFloat(openingBalance) || 0,
       openingBalanceType,
-      notes: notes.trim() || undefined,
+      notes: notes.trim(),
       isActive,
     });
 
@@ -218,35 +218,6 @@ export function PartyFormModal({
               <span>{error}</span>
             </div>
           )}
-
-          {/* 1. Party Type Selector Cards */}
-          <div>
-            <label className="block text-xs font-semibold text-[var(--color-on-surface)] uppercase tracking-wider mb-2">
-              Party Relationship Type *
-            </label>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-              {[
-                { id: 'customer', label: 'Customer / Buyer', desc: 'We sell materials to them' },
-                { id: 'vendor', label: 'Supplier / Vendor', desc: 'We buy materials from them' },
-                { id: 'transporter', label: 'Transporter Fleet', desc: 'Hauling & tipper service' },
-                { id: 'both', label: 'Both (Buy & Sell)', desc: 'Dual business partner' },
-              ].map((item) => (
-                <button
-                  type="button"
-                  key={item.id}
-                  onClick={() => setType(item.id as PartyType)}
-                  className={`p-3 text-left rounded-2xl border transition-all ${
-                    type === item.id
-                      ? 'border-[var(--color-primary)] bg-[var(--color-primary-container)] shadow-xs text-[var(--color-on-primary-container)]'
-                      : 'border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
-                  }`}
-                >
-                  <p className="text-xs font-bold text-[var(--color-on-surface)]">{item.label}</p>
-                  <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">{item.desc}</p>
-                </button>
-              ))}
-            </div>
-          </div>
 
           {/* 2. Basic Identification */}
           <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-4">
@@ -530,7 +501,9 @@ export function PartyFormModal({
                     placeholder="0.00"
                     value={openingBalance}
                     onChange={(e) => setOpeningBalance(e.target.value)}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                    disabled={!!initialParty}
+                    title={initialParty ? 'Opening Balance is fixed after party creation.' : undefined}
+                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] disabled:opacity-50 disabled:cursor-not-allowed"
                   />
                 </div>
 
@@ -542,22 +515,26 @@ export function PartyFormModal({
                     <button
                       type="button"
                       onClick={() => setOpeningBalanceType('to_receive')}
+                      disabled={!!initialParty}
+                      title={initialParty ? 'Balance Nature is fixed after party creation.' : undefined}
                       className={`flex-1 py-1.5 text-xs font-bold rounded-full transition-colors ${
                         openingBalanceType === 'to_receive'
                           ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] shadow-2xs'
                           : 'bg-transparent text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container)]'
-                      }`}
+                      } disabled:opacity-50 disabled:cursor-not-allowed`}
                     >
                       To Receive (Dr)
                     </button>
                     <button
                       type="button"
                       onClick={() => setOpeningBalanceType('to_pay')}
+                      disabled={!!initialParty}
+                      title={initialParty ? 'Balance Nature is fixed after party creation.' : undefined}
                       className={`flex-1 py-1.5 text-xs font-bold rounded-full transition-colors ${
                         openingBalanceType === 'to_pay'
                           ? 'bg-[var(--color-error)] text-[var(--color-on-error)] shadow-2xs'
                           : 'bg-transparent text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container)]'
-                      }`}
+                      } disabled:opacity-50 disabled:cursor-not-allowed`}
                     >
                       To Pay (Cr)
                     </button>

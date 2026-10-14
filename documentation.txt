@@ -148,6 +148,10 @@ STOCK MOVEMENTS LEDGER — `stock_movements` (append-only)
   One row per stock change. Rows are INSERTed and never updated or rewritten.
     id, item_id (FK), location_id (FK, nullable), movement_type, quantity
       (signed: + inward, − outward), balance_after (item-level snapshot),
+      rate (actual cost per unit of THIS event; outward = blended FIFO rate
+      consumed), movement_value (the value of the quantity moved at that
+      rate), valuation_rate_after (blended valuation rate after the event —
+      numeric snapshots, per §2 exception 3),
       reference_type (order | stock_adjustment | production_batch | opening |
       manual), reference_number (order number / STK-ADJ voucher no. / batch no.),
       party_id (FK, nullable), notes, movement_date, created_at.
@@ -171,6 +175,34 @@ STOCK ADJUSTMENT VOUCHERS — `item_stock_adjustments`
   master / the item's location mapping) at fetch time — never from stored
   copies. Renaming an item (or a location) therefore updates every stock
   adjustment voucher display everywhere, with no backfill.
+
+ACTUAL-COST (FIFO LOT) STOCK VALUATION — server/inventoryValuation.ts
+  The Stock Valuation card values stock at ACTUAL cost. NO AVERAGING: every
+  quantity keeps the rate it entered at, forever (user directive). Method
+  (FIFO lot replay of the ledger, server-side):
+    - Every INWARD movement (purchase inward at the line rate of the order
+      document snapshot, production output, +adjustment at the voucher rate)
+      creates a cost LOT {quantity, rate} at its own rate. Existing lots are
+      NEVER re-priced — an adjustment at a new rate changes nothing but its
+      own quantity's cost.
+    - Every OUTWARD movement (sale dispatch, production consumption, decrease
+      adjustments, reversals) consumes quantity from the OLDEST lots first
+      (FIFO) and records on its ledger row the blended rate of what it
+      actually consumed (consumed value / qty) — never a voucher's typed rate.
+    - Opening stock is the item's FIRST lot (item.openingStock x
+      openingStockPrice); 'opening' ledger rows are skipped during replay.
+    - Movement rows without a recorded rate fall back to the item's catalog
+      cost chain so legacy rows never distort lot costs.
+  valuationRate (blended rate of remaining lots, display only) and stockValue
+  are computed at READ time (hydration: db.ts hydrateItemWithMovements,
+  loadAllFromMysql, attachMovementsToItems), attached to the item, and never
+  persisted on the items row. Every write also snapshots valuation_rate_after
+  on the new ledger row — the audit trail shows the blended valuation rate
+  after each event, while each lot keeps its own rate inside the replay. The
+  Procured Cost Rate on the item master stays as the DEFAULT rate entry in new
+  vouchers only — it no longer drives valuation.
+  Example: 100 MT @ 2 opening + 10 MT @ 3 adjustment -> total value 230.
+  Dispatch of 10 consumes the 2-lot -> remaining 90@2 + 10@3 = 210.
 
 HOW STOCK CHANGES ARE APPLIED — single funnel serverDb.adjustItemStock():
   1. Mutates the in-memory item aggregate (currentStock recomputed from the
@@ -226,6 +258,23 @@ stock_movements once, in chronological order, only while the ledger is empty.
   Transfers are contra entries touching both accounts; account adjustments
   carry increase/decrease with previous/new balance snapshots.
 
+  FK + JOIN STANDARD for Cash & Bank vouchers (documentation §2): internal_transfers
+  and account_adjustments reference accounts ONLY by primary key (from_account_id /
+  to_account_id, account_id). The account display name (and the adjustment's
+  account type) are resolved with LEFT JOINs against cash_bank_accounts at read
+  time — renaming an account updates every transfer/adjustment display with no
+  backfill. Deleting an account keeps the voucher rows alive (name joins empty).
+  TRANSACTIONS store NO name copies at all (migrated 2026-10-14, user
+  directive — the only child table where a name copy exists is orders.items
+  JSON + trip_slips, pending the Sales/Logistics module migration):
+    - transaction rows keep party_id (FK) + account_id (FK) ONLY
+    - partyName AND accountName are LIVE VIEWS: JOIN parties + cash_bank_accounts
+      at read time (azureSync snapshot query, fetchTransactionsDirect,
+      fetchTransactionByIdDirect, sandbox hydrateTransactionParty) so renames
+      propagate to every voucher display with no backfill
+    - historical vouchers therefore always display the party/account's CURRENT
+      name
+
 --------------------------------------------------------------------------------
 5. AUTH & PERMISSIONS
 --------------------------------------------------------------------------------
@@ -248,7 +297,9 @@ KNOWN SECURITY TODO (must fix before external deployment):
 --------------------------------------------------------------------------------
 
   npm install
-  npm run dev        # Express API + Vite dev server on port 3000
+  npm run dev        # Express API + Vite dev server on port 3000 (override with PORT env)
+                     # NOTE: always fully restart after server-side changes — a stale
+                     # long-running process silently serves old persistence logic.
   npm run lint       # TypeScript check (tsc --noEmit)
   npm run build      # vite build + esbuild server bundle -> dist/
 
@@ -271,22 +322,11 @@ KNOWN SECURITY TODO (must fix before external deployment):
                            payment_out, debit_note, credit_note) — party_id FK
                            + account_id FK; keeps party_name snapshot (statutory)
   item_categories / item_units / item_locations    Catalog masters
-  items                    Product/service catalog; per-location stock cached in
-                           item_location_mapping; movements JSON column LEGACY-
-                           ONLY (NULL going forward; ledger is authoritative)
-  item_location_mapping    Normalized per-item x per-location stock
-  stock_movements          APPEND-ONLY stock ledger (FKs only; see §3)
-  item_stock_adjustments   STK-ADJ vouchers (FKs only; see §3)
-  orders                   Sales/purchase orders; items[] JSON = document
-                           snapshot (statutory); party_id FK
-  production_batches       Batching runs (raw consumption + output)
-  vehicles / drivers / trip_slips / tyres    Fleet operations
-  employees / attendance / leaves / employee_payments    HR
-  cash_bank_accounts / internal_transfers / account_adjustments
-                           Cash & bank module (account names copied into
-                           transfer/adjustment rows are to be migrated to FK +
-                           JOIN when that module is completed in Phase 1)
-  audit_logs               Action audit trail
+  items                    Product/service catalog — NAMES NEVER STORED (§2):
+                           category_id FK + unit_id FK only; the categoryName /
+                           unit display strings are JOINed at read time from the
+                           masters (renames propagate everywhere). movements
+                           JSON column LEGACY-ONLY (NULL going forward)
 
 If you created the inventory tables BEFORE this documentation (from the first
 DDL), the migration at startup normalizes them automatically. The equivalent
@@ -313,6 +353,47 @@ manual SQL, should you prefer to run it yourself:
   ALTER TABLE item_stock_adjustments
     DROP COLUMN item_name, DROP COLUMN item_code, DROP COLUMN unit, DROP COLUMN location;
 
+  -- stock_movements: actual-cost (FIFO lot) valuation snapshots
+  -- (the startup migration adds these AND backfills historical rows from
+  -- adjustment vouchers / order document snapshots / opening stock; run these
+  -- manually only if you prefer to apply them yourself before a restart)
+  ALTER TABLE stock_movements
+    ADD COLUMN rate DECIMAL(15,4) NULL AFTER balance_after,
+    ADD COLUMN movement_value DECIMAL(15,2) NULL AFTER rate,
+    ADD COLUMN valuation_rate_after DECIMAL(15,4) NULL AFTER movement_value;
+  -- Deployments that received the earlier avg_cost_after column:
+  ALTER TABLE stock_movements CHANGE COLUMN avg_cost_after valuation_rate_after DECIMAL(15,4) NULL;
+
+  -- Cash & Bank FK normalization (the startup migration backfills the account
+  -- ids from the name copies and drops the columns automatically; manually:)
+  UPDATE internal_transfers trf LEFT JOIN cash_bank_accounts fa ON LOWER(TRIM(fa.name)) = LOWER(TRIM(trf.from_account_name))
+    SET trf.from_account_id = fa.id WHERE (trf.from_account_id IS NULL OR trf.from_account_id = '') AND fa.id IS NOT NULL;
+  UPDATE internal_transfers trf LEFT JOIN cash_bank_accounts ta ON LOWER(TRIM(ta.name)) = LOWER(TRIM(trf.to_account_name))
+    SET trf.to_account_id = ta.id WHERE (trf.to_account_id IS NULL OR trf.to_account_id = '') AND ta.id IS NOT NULL;
+  UPDATE account_adjustments aj LEFT JOIN cash_bank_accounts acc ON LOWER(TRIM(acc.name)) = LOWER(TRIM(aj.account_name))
+    SET aj.account_id = acc.id WHERE (aj.account_id IS NULL OR aj.account_id = '') AND acc.id IS NOT NULL;
+  ALTER TABLE internal_transfers DROP COLUMN from_account_name, DROP COLUMN to_account_name;
+  ALTER TABLE account_adjustments DROP COLUMN account_name, DROP COLUMN account_type;
+
+  -- Items FK normalization (the startup migration ADDs unit_id + backfills it,
+  -- REPORTS any item whose unit matches no master unit, then drops the columns;
+  -- run manually only if you prefer):
+  ALTER TABLE items ADD COLUMN unit_id VARCHAR(64) NULL AFTER category_id;
+  UPDATE items it LEFT JOIN item_units u ON LOWER(TRIM(u.code)) = LOWER(TRIM(it.unit))
+    SET it.unit_id = u.id WHERE it.unit_id IS NULL AND it.unit IS NOT NULL AND it.unit <> '';
+  UPDATE items it LEFT JOIN item_units u ON LOWER(TRIM(u.name)) = LOWER(TRIM(it.unit))
+    SET it.unit_id = u.id WHERE it.unit_id IS NULL AND it.unit IS NOT NULL AND it.unit <> '';
+  ALTER TABLE items
+    DROP COLUMN category_name, DROP COLUMN unit, DROP COLUMN stock_location,
+    DROP COLUMN stock_locations, DROP COLUMN locations;
+  -- item_location_mapping: per-location max capacity + drop the name copy
+  ALTER TABLE item_location_mapping ADD COLUMN max_capacity DECIMAL(15,3) NULL AFTER location_id;
+  ALTER TABLE item_location_mapping DROP COLUMN location_name;
+
+  -- transactions FK normalization (startup migration drops these columns
+  -- automatically; run manually only if you prefer):
+  ALTER TABLE transactions DROP COLUMN party_name, DROP COLUMN account_name;
+
 --------------------------------------------------------------------------------
 8. PHASE 1 REMAINING WORK (as of this documentation)
 --------------------------------------------------------------------------------
@@ -321,14 +402,24 @@ manual SQL, should you prefer to run it yourself:
     receiptDetails to MySQL (columns + mapping + update path); wire orders to
     the voucher/party-balance system; compute partially_delivered; migrate
     orders/transactions account references to the FK + JOIN standard.
-  - Cash & Bank: account-name references in transfers/adjustments -> FK + JOIN;
-    Edit-account UI; real reconciliation.
+  - Cash & Bank: ~~account-name references in transfers/adjustments -> FK + JOIN~~
+    DONE 2026-10-14 (FKs only + LEFT JOIN reads; account_type copy dropped);
+    ~~Edit-account UI~~ DONE (add-account modal is add/edit dual-mode). Remaining:
+    real bank reconciliation; voucher edit UI; unify balance recalc voucher types.
   - Parties: bulk entry to use POST /api/parties/bulk; voucher edit/delete UI;
-    unify client-side balance delta with server logic; capture server-minted
-    IDs on create instead of fabricating optimistic IDs.
+    unify client-side balance delta with server logic.
+    ~~capture server-minted IDs on create~~ DONE 2026-10-14 (cloudStore captures
+    the POST response and swaps the optimistic party).
   - Cross-cutting: authenticate /api/sync + /api/health; env-based JWT secret;
     client resync/ID-capture discipline for optimistic writes.
 
 ================================================================================
 END OF DOCUMENTATION — keep this file updated as modules are completed.
-================================================================================
+===============================================================================  item_location_mapping    Normalized per-item x per-location stock:
+                           location_id FK ONLY (location_name DROPPED — names
+                           JOINed from item_locations at read time, so location
+                           renames propagate); opening/current/min stock +
+                           max_capacity stored per location  transactions              Vouchers (sale_invoice, purchase_bill, payment_in,
+                           payment_out, debit_note, credit_note) — FKs ONLY:
+                           party_id + account_id; NO name columns dropped/stored;
+                           partyName/accountName resolved via JOINs (see §4)=

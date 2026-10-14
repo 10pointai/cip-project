@@ -22,7 +22,7 @@ import { runMysqlMigrations } from './server/mysql/migrations';
 import { getStorageStatus } from './server/services/storage';
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 // Body Parsers & Request Logging
 app.use(express.json({ limit: '50mb' }));
