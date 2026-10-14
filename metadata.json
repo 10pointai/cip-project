@@ -1,0 +1,6 @@
+{
+  "name": "Operations Management System",
+  "description": "Streamlined operations management software for road construction, asphalt plants, and materials production businesses in India, featuring Party Management, Products & Services Catalog, Stockyard & Inventory Management, Units & Categories Management, Vouchers & Ledgers, and Company Settings.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

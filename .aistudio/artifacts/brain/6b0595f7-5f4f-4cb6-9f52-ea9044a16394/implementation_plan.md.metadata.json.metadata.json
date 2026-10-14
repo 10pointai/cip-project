@@ -1,0 +1,5 @@
+{
+  "summary": "Architectural plan and granular 6-task roadmap to consolidate the dual database architecture into a single authoritative Azure Database for MySQL Flexible Server backend with direct ACID REST transactions and reactive Material Design 3 frontend state.",
+  "updatedAt": "2026-10-13T06:56:14.070874712Z",
+  "userFacing": true
+}

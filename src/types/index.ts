@@ -1,0 +1,624 @@
+export type PartyType = 'vendor' | 'customer' | 'transporter' | 'both';
+
+export type PartyCategory = 
+  | 'Bitumen & Emulsion'
+  | 'Stone Aggregates & GSB'
+  | 'Cement & Flyash'
+  | 'Fuel, Diesel & Oils'
+  | 'Machinery, Spares & Maintenance'
+  | 'Road Contracting Client'
+  | 'Govt Dept (NHAI/PWD/MSRDC)'
+  | 'Private Developer'
+  | 'Transporter & Logistics'
+  | 'General Supplies';
+
+export interface Address {
+  street: string;
+  city: string;
+  state: string;
+  stateCode: string;
+  pincode: string;
+}
+
+export interface Party {
+  id: string;
+  name: string;
+  tradeName?: string;
+  type: PartyType;
+  category: PartyCategory;
+  gstin?: string;
+  pan?: string;
+  contactPerson: string;
+  phone: string;
+  email?: string;
+  address: Address;
+  paymentTermsDays: number;
+  creditLimit: number;
+  openingBalance: number;
+  openingBalanceType: 'to_pay' | 'to_receive'; // 'to_pay' = Payable (credit), 'to_receive' = Receivable (debit)
+  currentBalance: number; // positive = we will receive (Receivable), negative = we have to pay (Payable)
+  notes?: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type VoucherType = 
+  | 'sale_invoice'
+  | 'purchase_bill'
+  | 'payment_in'   // Received from Customer
+  | 'payment_out'  // Paid to Vendor/Transporter
+  | 'debit_note'
+  | 'credit_note';
+
+export type ItemType = 'product' | 'service';
+
+export interface ItemCategory {
+  id: string;
+  name: string;
+  description?: string;
+  type: 'product' | 'service' | 'both';
+  color?: string;
+  createdAt: string;
+}
+
+export interface ItemUnit {
+  id: string;
+  code: string;
+  name: string;
+  allowDecimal: boolean;
+  isStandard?: boolean;
+}
+
+export interface ItemLocation {
+  id: string;
+  name: string;
+  code?: string;
+  description?: string;
+  capacity?: string;
+  type?: 'silo' | 'tank' | 'stockpile' | 'warehouse' | 'bin' | 'yard' | 'other';
+  isStandard?: boolean;
+  createdAt: string;
+}
+
+export interface StockMovementLog {
+  id: string;
+  date: string;
+  type: 'purchase_inward' | 'production_output' | 'production_consumed' | 'sale_dispatch' | 'opening' | 'reconciliation_in' | 'reconciliation_out';
+  quantity: number; // positive for additions, negative for deductions
+  balanceAfter: number;
+  referenceNumber?: string;
+  sourcePartyOrBatch?: string;
+  notes?: string;
+}
+
+export interface ItemLocationStock {
+  locationId?: string;
+  locationName: string;
+  currentStock: number;
+  openingStock?: number;
+  minStockLevel?: number;
+  maxCapacity?: number;
+}
+
+export interface Item {
+  id: string;
+  name: string;
+  code: string; // SKU or item code
+  type: ItemType;
+  categoryId: string;
+  categoryName?: string;
+  unit: string; // e.g. MT, LTR, CUM, BRASS, HR, TRIP, NOS
+  hsnSacCode?: string; // HSN for goods, SAC for services
+  taxRateGst: number; // e.g. 0, 5, 12, 18, 28
+  salePrice: number; // Default selling rate
+  purchasePrice?: number; // Legacy or computed procurement rate
+  
+  // Opening stock & procurement cost tracking
+  openingStock?: number; // Quantity of opening stock
+  openingStockPrice?: number; // Procurement cost per unit of opening stock
+  openingStockDate?: string; // Date of opening stock entry
+  
+  technicalSpecs?: string; // Specifications / mix formula notes
+  remarks?: string; // Remarks and delivery / handling notes
+  isActive: boolean;
+  
+  // Stockyard Inventory Attributes (applicable for physical products)
+  currentStock?: number;
+  minStockLevel?: number; // Safety / Reorder threshold
+  maxCapacity?: number; // Silo / Tank / Stockpile capacity limit
+  stockLocation?: string; // e.g. "Batching Silo Tower A", "Insulated Bitumen Tank 1"
+  stockLocations?: string[]; // Multiple storage location names
+  locations?: ItemLocationStock[]; // Detailed per-location stock breakdown
+  lastStockUpdate?: string;
+  movements?: StockMovementLog[];
+
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type StockAdjustmentType = 'increase' | 'decrease';
+
+export interface ItemStockAdjustment {
+  id: string;
+  adjustmentNumber: string; // e.g. "STK-ADJ-26/001"
+  itemId: string;
+  itemName: string;
+  itemCode: string;
+  unit: string;
+  date: string; // YYYY-MM-DD
+  type: StockAdjustmentType; // 'increase' (Add Stock) | 'decrease' (Reduce Stock)
+  quantity: number;
+  rate: number; // Procurement / valuation cost per unit at adjustment
+  totalValue: number; // quantity * rate
+  previousStock: number;
+  newStock: number;
+  reason: string; // e.g. "Physical Stock Audit / Reconciliation", "Damaged / Waste", "Opening Stock Correction", etc.
+  location?: string;
+  referenceNumber?: string;
+  notes?: string;
+  createdAt: string;
+}
+
+export interface ProductionBatchRun {
+  id: string;
+  batchNumber: string;
+  date: string;
+  plantUnit: string; // e.g. "Asphalt Batching Plant #1 (160 TPH)"
+  targetItemId: string;
+  targetItemName: string;
+  targetQuantity: number; // e.g. 200 MT
+  unit: string;
+  rawMaterialsConsumed: Array<{
+    itemId: string;
+    itemName: string;
+    quantity: number;
+    unit: string;
+  }>;
+  supervisorName: string;
+  mixTemperatureCelsius?: number; // e.g. 165°C
+  notes?: string;
+  createdAt: string;
+}
+
+export type OrderType = 'sales' | 'purchase';
+export type OrderStatus = 'pending' | 'partially_delivered' | 'completed' | 'cancelled';
+export type SalesStage = 'quotation' | 'sales_order' | 'proforma_invoice' | 'delivery_note' | 'sales_invoice';
+export type PurchaseStage = 'rfq' | 'purchase_order' | 'goods_receipt';
+
+export interface OrderItem {
+  itemId: string;
+  itemName: string;
+  quantity: number;
+  unit: string;
+  rate: number;
+  amount: number;
+  location?: string; // Location dispatched from (Sales) or received into (Purchase)
+  receivedQuantity?: number; // Actual received quantity in goods receipt
+  shortageQuantity?: number; // Discrepancy (quantity - receivedQuantity)
+  overageQuantity?: number; // Excess quantity if received > ordered
+  itemNotes?: string;
+}
+
+export type PaymentMode = 'bank_transfer' | 'cheque' | 'cash' | 'upi' | 'neft_rtgs';
+
+export interface RfqStageDetails {
+  rfqNumber?: string;
+  rfqDate?: string;
+  quotationRef?: string;
+  quotationDate?: string;
+  validityDate?: string;
+  expectedDeliveryDate?: string;
+  notes?: string;
+}
+
+export interface PoStageDetails {
+  poNumber?: string;
+  poDate?: string;
+  expectedDeliveryDate?: string;
+  paymentTerms?: string;
+  vendorContact?: string;
+  notes?: string;
+}
+
+export interface ReceiptStageDetails {
+  grnNumber?: string;
+  receiptDate?: string;
+  challanNumber?: string;
+  vendorInvoiceNumber?: string;
+  receivedBy?: string;
+  inspectionStatus?: 'accepted' | 'accepted_with_shortage' | 'rejected';
+  reconciliationNotes?: string;
+  notes?: string;
+}
+
+export interface Order {
+  id: string;
+  orderNumber: string;
+  type: OrderType;
+  partyId: string;
+  partyName: string;
+  date: string;
+  status: OrderStatus;
+  stage?: SalesStage;
+  purchaseStage?: PurchaseStage;
+  rfqDetails?: RfqStageDetails;
+  poDetails?: PoStageDetails;
+  receiptDetails?: ReceiptStageDetails;
+  items: OrderItem[];
+  taxRateGst: number; // e.g. 18
+  taxAmount: number;
+  totalAmount: number;
+  notes?: string;
+  vehicleNo?: string;
+  driverName?: string;
+  transportCharges?: number;
+  paymentMode: PaymentMode;
+  accountId: string; // Account where money is added (Sales) or deducted (Purchase)
+  accountName?: string;
+  paymentStatus?: 'paid' | 'pending' | 'partially_paid' | 'settled';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Transaction {
+  id: string;
+  voucherNumber: string;
+  partyId: string;
+  partyName: string;
+  partyType: PartyType;
+  type: VoucherType;
+  amount: number;
+  date: string;
+  accountId?: string; // Links transaction directly to Bank or Cash Account
+  accountName?: string;
+  paymentMode?: 'bank_transfer' | 'cheque' | 'cash' | 'upi' | 'neft_rtgs';
+  referenceNumber?: string;
+  itemId?: string; // Associated product/service catalog item ID
+  materialOrService?: string;
+  quantityTonnes?: number;
+  location?: string; // Location dispatched from (sale invoice) or received into (purchase bill)
+  description: string;
+  status: 'paid' | 'pending' | 'partially_paid' | 'settled' | 'cancelled';
+  dueDate?: string;
+  attachments?: EvidenceFile[];
+  createdAt: string;
+}
+
+export type AccountType = 'bank' | 'cash';
+
+export interface CashBankAccount {
+  id: string;
+  name: string; // Display Name (e.g. "SBI Current A/c", "Main Plant Cash Drawer")
+  type: AccountType; // 'bank' or 'cash'
+  accountNumber?: string; // Optional for bank accounts
+  ifscCode?: string; // Optional IFSC / Branch
+  bankName?: string;
+  openingBalance: number;
+  currentBalance: number;
+  asOfDate: string; // YYYY-MM-DD
+  notes?: string;
+  isDefault?: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type TransferType = 'bank_to_bank' | 'cash_to_bank' | 'bank_to_cash' | 'cash_to_cash';
+
+export interface InternalTransfer {
+  id: string;
+  transferNumber: string;
+  date: string; // YYYY-MM-DD
+  fromAccountId: string;
+  fromAccountName: string;
+  toAccountId: string;
+  toAccountName: string;
+  transferType: TransferType;
+  amount: number;
+  referenceNumber?: string; // UTR / Cheque / Slip No.
+  notes?: string;
+  createdAt: string;
+}
+
+export type AdjustmentType = 'increase' | 'decrease';
+
+export interface AccountAdjustment {
+  id: string;
+  adjustmentNumber: string;
+  accountId: string;
+  accountName: string;
+  accountType: AccountType;
+  date: string; // YYYY-MM-DD
+  type: AdjustmentType; // 'increase' (Add Money) or 'decrease' (Reduce Money)
+  amount: number;
+  previousBalance: number;
+  newBalance: number;
+  reason: string;
+  referenceNumber?: string;
+  notes?: string;
+  createdAt: string;
+}
+
+export interface BankDetails {
+  bankName: string;
+  accountName: string;
+  accountNumber: string;
+  ifscCode: string;
+  branchName: string;
+  upiId?: string;
+}
+
+export interface CompanySettings {
+  companyName: string;
+  tradeName: string;
+  tagline: string;
+  gstin: string;
+  pan: string;
+  cin?: string;
+  registeredAddress: Address;
+  phone: string;
+  email: string;
+  website?: string;
+  currency: {
+    code: string;
+    symbol: string;
+    name: string;
+    format: 'indian' | 'international';
+  };
+  defaultPaymentTermsDays: number;
+  prefixes: {
+    salesInvoice: string;
+    purchaseBill: string;
+    dispatchChallan: string;
+    paymentReceipt: string;
+  };
+  themeColor: 'amber' | 'blue' | 'emerald' | 'slate';
+  authorizedSignatoryName: string;
+  authorizedSignatoryDesignation: string;
+  invoiceNotes: string;
+}
+
+export type VehicleType = 'tipper' | 'tanker' | 'mixer' | 'loader' | 'other';
+export type VehicleStatus = 'available' | 'on_trip' | 'maintenance' | 'out_of_service';
+export type VehicleOwnership = 'owned' | 'contractor' | 'market';
+
+export interface VehicleEmiDetails {
+  hasEmi: boolean;
+  financierName?: string; // e.g. "HDFC Bank Commercial", "Tata Capital", "ICICI Bank", "Sundaram Finance"
+  loanAccountNumber?: string; // e.g. "LN-CV-89210"
+  monthlyEmiAmount?: number; // e.g. 42500
+  emiDueDay?: number; // Day of month 1 - 31 (e.g. 10)
+  loanStartDate?: string; // YYYY-MM-DD
+  loanEndDate?: string; // YYYY-MM-DD
+  totalLoanAmount?: number; // e.g. 2400000
+  interestRate?: number; // e.g. 8.75%
+  totalTenureMonths?: number; // e.g. 48
+  paidEmisCount?: number; // e.g. 18
+  autoDebitAccount?: string; // Bank account name
+  status?: 'active' | 'closed' | 'defaulted';
+  lastPaymentDate?: string;
+  notes?: string;
+}
+
+export interface Vehicle {
+  id: string;
+  vehicleNo: string;
+  type: VehicleType;
+  capacityTonnes: number;
+  ownership: VehicleOwnership;
+  status: VehicleStatus;
+  currentDriverId?: string;
+  currentDriverName?: string;
+  insuranceExpiry?: string;
+  fitnessExpiry?: string;
+  emiDetails?: VehicleEmiDetails;
+  notes?: string;
+  createdAt: string;
+}
+
+export interface Driver {
+  id: string;
+  name: string;
+  licenseNo: string;
+  phone: string;
+  status: 'available' | 'on_duty' | 'leave';
+  createdAt: string;
+}
+
+export interface TripSlip {
+  id: string;
+  slipNumber: string;
+  date: string;
+  time: string;
+  vehicleId: string;
+  vehicleNo: string;
+  driverId: string;
+  driverName: string;
+  tripType: 'outward' | 'inward' | 'internal';
+  orderId?: string;
+  orderNumber?: string;
+  partyName?: string;
+  materialName: string;
+  netWeightTonnes: number;
+  destination: string;
+  status: 'loading' | 'transit' | 'delivered' | 'closed';
+  fuelIssuedLiters: number;
+  cashAdvanceRupees: number;
+  notes?: string;
+  createdAt: string;
+}
+
+export interface Tyre {
+  id: string;
+  serialNumber: string;
+  brand: string;
+  size: string;
+  type: 'radial' | 'tubeless' | 'bias';
+  status: 'mounted' | 'available' | 'retreading' | 'scrapped';
+  vehicleId?: string;
+  vehicleNo?: string;
+  position?: string;
+  purchaseDate: string;
+  purchaseCost: number;
+  installOdometer?: number;
+  currentOdometer?: number;
+  lastInspectionDate?: string;
+  lastInspectionCondition?: 'excellent' | 'good' | 'worn' | 'damaged';
+  threadDepthMm?: number;
+  notes?: string;
+  createdAt: string;
+}
+
+export interface Employee {
+  id: string;
+  name: string;
+  role: 'driver' | 'supervisor' | 'operator' | 'accountant' | 'manager' | 'helper' | 'other';
+  phone: string;
+  email?: string;
+  aadhaarNo?: string;
+  panNo?: string;
+  joiningDate: string;
+  salaryBase: number;
+  salaryType: 'monthly' | 'daily';
+  status: 'active' | 'inactive';
+  licenseNo?: string; // primarily for drivers
+  bankAccountNo?: string;
+  bankIFSC?: string;
+  createdAt: string;
+}
+
+export interface AttendancePunchLog {
+  id: string;
+  type: 'IN' | 'OUT';
+  time: string; // HH:mm or HH:mm:ss
+  source?: 'manual' | 'kiosk' | 'web' | 'biometric';
+  note?: string;
+}
+
+export interface EmployeeAttendance {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  date: string; // YYYY-MM-DD
+  status: 'present' | 'absent' | 'half_day' | 'leave' | 'late' | 'holiday';
+  checkInTime?: string; // HH:mm
+  checkOutTime?: string; // HH:mm
+  totalHoursWorked?: number; // e.g. 9.25
+  shiftName?: string; // e.g. "Day Shift (08:30 - 17:30)"
+  punchLogs?: AttendancePunchLog[];
+  notes?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface EmployeeLeave {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  leaveType: 'casual' | 'sick' | 'earned' | 'maternity' | 'unpaid';
+  startDate: string; // YYYY-MM-DD
+  endDate: string; // YYYY-MM-DD
+  totalDays: number;
+  reason: string;
+  status: 'pending' | 'approved' | 'rejected';
+  createdAt: string;
+}
+
+export interface EmployeePayment {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  date: string; // YYYY-MM-DD
+  type: 'salary' | 'advance' | 'bonus' | 'reimbursement';
+  amount: number;
+  paymentMode: 'bank_transfer' | 'cash' | 'upi' | 'cheque';
+  referenceNo?: string;
+  notes?: string;
+  monthYear?: string; // e.g. "August 2026"
+}
+
+export type EvidenceEntityType = 'party' | 'vehicle' | 'employee' | 'production' | 'general';
+
+export interface EvidenceFolder {
+  id: string;
+  name: string;
+  entityType: EvidenceEntityType;
+  entityId?: string; // e.g. party.id, vehicle.id, employee.id, or null/undefined for general
+  entityName?: string; // display name for quick lookup (e.g. "UltraTech Cement")
+  parentId?: string | null; // For nested user folders (null = root level of entity)
+  isSystemGenerated?: boolean;
+  color?: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EvidenceFile {
+  id: string;
+  folderId: string;
+  name: string;
+  size: number; // in bytes
+  type: string; // MIME type (e.g. "image/jpeg", "image/png", "application/pdf")
+  dataUrl?: string; // Data URL / Base64 / SVG or simulated asset URL for preview
+  entityType: EvidenceEntityType;
+  entityId?: string;
+  entityName?: string;
+  linkedEntryType?: string; // e.g. "sale_invoice", "purchase_bill", "payment_in", "payment_out", "trip_slip", "weighbridge", "fuel_slip", "salary_slip", "rc_document", "insurance"
+  linkedEntryId?: string; // e.g. voucherNumber or transactionId or slipNumber
+  uploadedBy?: string;
+  description?: string;
+  tags?: string[];
+  createdAt: string;
+}
+
+// ==========================================
+// USER MANAGEMENT & JWT AUTH TYPES
+// ==========================================
+
+export type UserRole = 'super_admin' | 'admin' | 'manager' | 'operator';
+
+export type UserStatus = 'pending_setup' | 'active' | 'suspended';
+
+export interface UserPermissions {
+  view_dashboard: boolean;
+  view_financial_metrics: boolean;
+  manage_parties: boolean;
+  record_payments: boolean;
+  manage_cash_bank: boolean;
+  manage_inventory: boolean;
+  manage_production: boolean;
+  manage_sales: boolean;
+  manage_purchases: boolean;
+  manage_fleet: boolean;
+  manage_emi: boolean;
+  dispatch_trips: boolean;
+  manage_employees: boolean;
+  process_payroll: boolean;
+  manage_evidence: boolean;
+  manage_users: boolean;
+  manage_settings: boolean;
+}
+
+export interface AppUser {
+  id: string;
+  fullName: string;
+  email: string;
+  phone?: string;
+  username: string; // Unique system-generated username (e.g., rahul.adm942)
+  passwordHash?: string; // Stored securely on server
+  role: UserRole;
+  status: UserStatus;
+  permissions: UserPermissions;
+  activationCode?: string; // One-time verification token for first-time password setup
+  createdAt: string;
+  lastLoginAt?: string;
+  notes?: string;
+}
+
+export interface AuthSession {
+  token: string;
+  user: AppUser;
+}
+
+

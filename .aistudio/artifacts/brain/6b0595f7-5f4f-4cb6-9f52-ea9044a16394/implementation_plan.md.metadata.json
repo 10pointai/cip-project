@@ -1,0 +1,6 @@
+{
+  "summary": "Revised plan to completely remove the transaction table from the dashboard, purge orphaned transactions left behind after party deletion, cascade transaction deletions when parties are removed, and ensure the dashboard only displays genuine operational data.",
+  "updatedAt": "2026-10-13T09:55:48.231697931Z",
+  "requestFeedback": true,
+  "userFacing": true
+}
