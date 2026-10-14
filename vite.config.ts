@@ -6,6 +6,9 @@ import {defineConfig} from 'vite';
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
+    // node_modules was installed as root and is not writable by the current
+    // user, so keep Vite's dependency cache outside of it.
+    cacheDir: path.resolve(__dirname, '.vite-cache'),
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

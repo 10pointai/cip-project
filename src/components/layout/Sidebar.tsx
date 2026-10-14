@@ -170,7 +170,7 @@ export function Sidebar({
     },
     {
       id: 'design-system',
-      label: 'Design System',
+      label: 'Design Systems',
       icon: Sparkles,
       badge: 'M3',
       permissionCheck: (has) => has('manage_settings'),
