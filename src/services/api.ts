@@ -8,6 +8,8 @@ import {
   ItemLocation,
   ProductionBatchRun,
   Order,
+  Sale,
+  Purchase,
   Vehicle,
   Driver,
   TripSlip,
@@ -79,6 +81,8 @@ export interface SyncPayload {
   locations: ItemLocation[];
   productionBatches: ProductionBatchRun[];
   orders: Order[];
+  sales: Sale[];
+  purchases: Purchase[];
   vehicles: Vehicle[];
   drivers: Driver[];
   tripSlips: TripSlip[];
@@ -491,27 +495,65 @@ class ApiClient {
     });
   }
 
-  // Orders
-  public async getOrders(): Promise<{ success: boolean; data: Order[] }> {
-    return this.request<{ success: boolean; data: Order[] }>('/orders');
+  // Sales & Purchases — relational order model (masters + items + stages)
+  public async getSales(): Promise<{ success: boolean; data: Sale[] }> {
+    return this.request<{ success: boolean; data: Sale[] }>('/sales');
   }
 
-  public async createOrder(order: Partial<Order>): Promise<{ success: boolean; data: Order }> {
-    return this.request<{ success: boolean; data: Order }>('/orders', {
+  public async createSale(payload: any): Promise<{ success: boolean; data: Sale }> {
+    return this.request<{ success: boolean; data: Sale }>('/sales', {
       method: 'POST',
-      body: JSON.stringify(order),
+      body: JSON.stringify(payload),
     });
   }
 
-  public async updateOrder(id: string, updates: Partial<Order>): Promise<{ success: boolean; data: Order }> {
-    return this.request<{ success: boolean; data: Order }>(`/orders/${id}`, {
+  public async updateSale(id: string, updates: any): Promise<{ success: boolean; data: Sale }> {
+    return this.request<{ success: boolean; data: Sale }>(`/sales/${id}`, {
       method: 'PUT',
       body: JSON.stringify(updates),
     });
   }
 
-  public async deleteOrder(id: string): Promise<{ success: boolean }> {
-    return this.request<{ success: boolean }>(`/orders/${id}`, {
+  public async addSaleStage(id: string, stageInput: any): Promise<{ success: boolean; data: Sale }> {
+    return this.request<{ success: boolean; data: Sale }>(`/sales/${id}/stages`, {
+      method: 'POST',
+      body: JSON.stringify(stageInput),
+    });
+  }
+
+  public async deleteSale(id: string): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(`/sales/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  public async getPurchases(): Promise<{ success: boolean; data: Purchase[] }> {
+    return this.request<{ success: boolean; data: Purchase[] }>('/purchases');
+  }
+
+  public async createPurchase(payload: any): Promise<{ success: boolean; data: Purchase }> {
+    return this.request<{ success: boolean; data: Purchase }>('/purchases', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async updatePurchase(id: string, updates: any): Promise<{ success: boolean; data: Purchase }> {
+    return this.request<{ success: boolean; data: Purchase }>(`/purchases/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  }
+
+  public async addPurchaseStage(id: string, stageInput: any): Promise<{ success: boolean; data: Purchase }> {
+    return this.request<{ success: boolean; data: Purchase }>(`/purchases/${id}/stages`, {
+      method: 'POST',
+      body: JSON.stringify(stageInput),
+    });
+  }
+
+  public async deletePurchase(id: string): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(`/purchases/${id}`, {
       method: 'DELETE',
     });
   }

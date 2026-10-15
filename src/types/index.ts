@@ -84,7 +84,7 @@ export interface ItemLocation {
 export interface StockMovementLog {
   id: string;
   date: string;
-  type: 'purchase_inward' | 'production_output' | 'production_consumed' | 'sale_dispatch' | 'opening' | 'reconciliation_in' | 'reconciliation_out' | 'adjustment_increase' | 'adjustment_decrease';
+  type: 'purchase_inward' | 'production_output' | 'production_consumed' | 'sale_dispatch' | 'opening' | 'reconciliation_in' | 'reconciliation_out' | 'adjustment_increase' | 'adjustment_decrease' | 'dispatch_reversal' | 'inward_reversal';
   quantity: number; // positive for additions, negative for deductions
   balanceAfter: number;
   // Actual-cost snapshots (facts-as-of-event; numeric snapshots per documentation §2):
@@ -96,6 +96,7 @@ export interface StockMovementLog {
   movementValue?: number;
   valuationRateAfter?: number;
   referenceNumber?: string;
+  referenceId?: string; // FK to the source document master (sale/purchase id)
   sourcePartyOrBatch?: string;
   notes?: string;
 }
@@ -208,10 +209,12 @@ export type PurchaseStage = 'rfq' | 'purchase_order' | 'goods_receipt';
 export interface OrderItem {
   itemId: string;
   itemName: string;
+  itemCode?: string; // hydrated read-time from the items master
   quantity: number;
   unit: string;
   rate: number;
   amount: number;
+  gstRate?: number; // GST slab % for this line (each item can carry its own slab)
   location?: string; // Location dispatched from (Sales) or received into (Purchase)
   receivedQuantity?: number; // Actual received quantity in goods receipt
   shortageQuantity?: number; // Discrepancy (quantity - receivedQuantity)
@@ -252,13 +255,14 @@ export interface ReceiptStageDetails {
 }
 
 export interface Order {
+  /** @deprecated Split into Sale / Purchase (relational stage model). Kept only for legacy-row reads. */
   id: string;
   orderNumber: string;
   type: OrderType;
   partyId: string;
   partyName: string;
   date: string;
-  status: OrderStatus;
+  status?: OrderStatus;
   stage?: SalesStage;
   purchaseStage?: PurchaseStage;
   rfqDetails?: RfqStageDetails;
@@ -649,6 +653,198 @@ export interface AppUser {
 export interface AuthSession {
   token: string;
   user: AppUser;
+}
+
+// ==========================================
+// SALES & PURCHASE — RELATIONAL ORDER MODEL
+// (Phase 1 redesign: the legacy `orders` JSON-blob table is split into
+//  sale/purchase MASTERS + items child tables + stage-history child tables.
+//  A "sale"/"purchase" is created once; stage documents (quotation, sales
+//  order, proforma, delivery note, invoice — or RFQ, PO, GRN) are separate
+//  rows saved against the master, keeping the full document history.)
+// Golden Rule §2: child tables store FKs (item_id, unit_id, location_id,
+// party_id). The document numbers + stage totals rows are the §2 exception-1
+// statutory snapshots.
+// ==========================================
+
+export interface SalesOrderItem {
+  id: string;
+  saleId: string;
+  /** FK to sales_order_stages — items are scoped PER STAGE: a quotation keeps
+   *  its own line set; editing a sales order touches only that stage's rows. */
+  stageId?: string;
+  itemId: string;
+  unitId?: string; // FK item_units — unit display JOINed at read
+  // Hydrated read-time view fields (never persisted)
+  itemName?: string;
+  itemCode?: string;
+  unit?: string;
+  location?: string;
+  quantity: number;
+  rate: number;
+  amount?: number; // convenience: quantity * rate
+  gstRate?: number; // GST slab % for this line
+  locationId?: string; // FK item_locations — dispatched from
+  itemNotes?: string;
+}
+
+export interface SalesOrderStage {
+  id: string;
+  saleId: string;
+  stageType: SalesStage; // quotation | sales_order | proforma_invoice | delivery_note | sales_invoice
+  stageNumber: string; // document number as issued (SO-2026-0004, INV-26/…)
+  date: string; // YYYY-MM-DD
+  // Document totals snapshot (§2 exception 1 — figures as printed at issue)
+  subtotal: number;
+  taxAmount: number;
+  totalAmount: number;
+  // Line items captured for THIS stage document (quotation lines are frozen
+  // once the sale advances; invoice issuance locks the sale)
+  items?: SalesOrderItem[];
+  notes?: string;
+  createdAt: string;
+}
+
+export interface Sale {
+  id: string;
+  saleNumber: string;
+  partyId: string;
+  partyName?: string; // hydrated read-time (JOIN parties)
+  date: string; // YYYY-MM-DD (master creation date)
+  status: OrderStatus; // computed server-side from stage history + flags
+  notes?: string;
+  vehicleNo?: string;
+  driverName?: string;
+  transportCharges?: number;
+  // One-shot application flags — stock / cash may post at most ONCE per sale;
+  // the user decides WHERE (which stage save) via the toggle in the UI.
+  inventoryApplied: boolean;
+  cashApplied: boolean;
+  // Cash & Bank wiring (FKs per Golden Rule §2 — names JOINed at read time;
+  // settled_amount is the §2 exception statutory snapshot of the settled total)
+  settlementAccountId?: string;
+  settlementAccountName?: string; // hydrated read-time (JOIN cash_bank_accounts)
+  paymentMode?: 'bank_transfer' | 'cheque' | 'cash' | 'upi' | 'neft_rtgs';
+  invoiceVoucherId?: string; // FK transactions — the sale_invoice journal voucher
+  settlementVoucherId?: string; // FK transactions — the payment_in receipt voucher
+  invoiceVoucherNumber?: string; // hydrated read-time (JOIN transactions)
+  settlementVoucherNumber?: string; // hydrated read-time (JOIN transactions)
+  settledAmount?: number;
+  settledDate?: string;
+  // Attached child rows (hydrated at read)
+  items: SalesOrderItem[];
+  stages: SalesOrderStage[]; // chronological (oldest first)
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PurchaseOrderItem {
+  id: string;
+  purchaseId: string;
+  itemId: string;
+  unitId?: string;
+  // Hydrated read-time view fields (never persisted)
+  itemName?: string;
+  itemCode?: string;
+  unit?: string;
+  location?: string;
+  quantity: number;
+  rate: number;
+  amount?: number;
+  gstRate?: number;
+  locationId?: string; // FK item_locations — received into
+  receivedQuantity?: number; // actual received at goods receipt (GRN stage)
+  shortageQuantity?: number;
+  overageQuantity?: number;
+  itemNotes?: string;
+}
+
+export interface PurchaseOrderStage {
+  id: string;
+  purchaseId: string;
+  stageType: PurchaseStage; // rfq | purchase_order | goods_receipt (one each per purchase)
+  stageNumber: string; // RFQ-…/PO-…/GRN-… document number as issued
+  date: string; // YYYY-MM-DD
+  subtotal: number;
+  taxAmount: number;
+  totalAmount: number;
+  // Stage-specific document details (statutory snapshot of what was recorded)
+  rfqDetails?: RfqStageDetails;
+  poDetails?: PoStageDetails;
+  receiptDetails?: ReceiptStageDetails;
+  notes?: string;
+  createdAt: string;
+}
+
+export interface Purchase {
+  id: string;
+  purchaseNumber: string;
+  partyId?: string; // nullable: RFQ ingestion may have no vendor yet
+  partyName?: string; // hydrated read-time (JOIN parties)
+  date: string;
+  status: OrderStatus;
+  notes?: string;
+  inventoryApplied: boolean;
+  cashApplied: boolean;
+  settlementAccountId?: string;
+  settlementAccountName?: string; // hydrated read-time (JOIN cash_bank_accounts)
+  paymentMode?: 'bank_transfer' | 'cheque' | 'cash' | 'upi' | 'neft_rtgs';
+  invoiceVoucherId?: string; // FK transactions — the purchase_bill journal voucher
+  settlementVoucherId?: string; // FK transactions — the payment_out payout voucher
+  invoiceVoucherNumber?: string; // hydrated read-time (JOIN transactions)
+  settlementVoucherNumber?: string; // hydrated read-time (JOIN transactions)
+  settledAmount?: number;
+  settledDate?: string;
+  items: PurchaseOrderItem[];
+  stages: PurchaseOrderStage[]; // chronological (oldest first)
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Stage-save request payloads — `updateInventory` is the user's per-stage
+ *  "update stockyard inventory?" toggle (applies the stock movement at most
+ *  once per order: guards on the master's inventory_applied flag). */
+export interface SalesOrderStageInput {
+  stageType: SalesStage;
+  stageNumber: string;
+  date: string;
+  notes?: string;
+  updateInventory?: boolean;
+  updateCash?: boolean;
+  // "Settle Payment Now" — post the receipt voucher when settling (cash
+  // applied); required whenever updateCash is true.
+  settlementAccountId?: string;
+  paymentMode?: 'bank_transfer' | 'cheque' | 'cash' | 'upi' | 'neft_rtgs';
+}
+
+export interface PurchaseOrderStageInput {
+  stageType: PurchaseStage;
+  stageNumber: string;
+  date: string;
+  notes?: string;
+  rfqDetails?: RfqStageDetails;
+  poDetails?: PoStageDetails;
+  receiptDetails?: ReceiptStageDetails;
+  updateInventory?: boolean;
+  updateCash?: boolean;
+  settlementAccountId?: string;
+  paymentMode?: 'bank_transfer' | 'cheque' | 'cash' | 'upi' | 'neft_rtgs';
+}
+
+/** Line-item input shape sent from the forms (ids may arrive as FKs or display
+ *  fallbacks; the server resolves/authoritatively stores FKs only). */
+export interface SalesOrderItemInput {
+  itemId: string;
+  quantity: number;
+  rate: number;
+  gstRate?: number;
+  locationName?: string;
+  locationId?: string;
+  itemNotes?: string;
+}
+
+export interface PurchaseOrderItemInput extends SalesOrderItemInput {
+  receivedQuantity?: number;
 }
 
 

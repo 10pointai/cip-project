@@ -24,6 +24,12 @@ import {
   AccountAdjustment,
   ItemStockAdjustment,
   StockMovementLog,
+  Sale,
+  Purchase,
+  SalesOrderItem,
+  SalesOrderStage,
+  PurchaseOrderItem,
+  PurchaseOrderStage,
 } from '../../src/types';
 import { DatabaseSchema, AuditLog, StockMovementRecord } from '../db';
 import {
@@ -236,6 +242,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
             movementValue: m.movement_value !== null && m.movement_value !== undefined ? parseNum(m.movement_value) : undefined,
             valuationRateAfter: m.valuation_rate_after !== null && m.valuation_rate_after !== undefined ? parseNum(m.valuation_rate_after) : undefined,
             referenceNumber: m.reference_number || undefined,
+            referenceId: m.reference_id || undefined,
             sourcePartyOrBatch: m.party_display || undefined,
             notes: m.notes || undefined,
             referenceType: m.reference_type || undefined,
@@ -387,6 +394,221 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
       // Orders seed disabled for production
       if (!hasCheckedOrdersSeed) {
         hasCheckedOrdersSeed = true;
+      }
+
+      // 8b. SALES & PURCHASE — relational order model (Phase 1 redesign).
+      // Masters JOIN the party master for the live display name; items and
+      // stage-history rows are attached to each master (FKs only in storage).
+      let sales: Sale[] = [];
+      let purchases: Purchase[] = [];
+      try {
+        // --- SALES ---
+        const [saleMasterRows]: [any[], any] = await conn.query(
+          `SELECT so.*, p.name AS party_display,
+                  acc.name AS settlement_account_display,
+                  iv.voucher_number AS invoice_voucher_display,
+                  sv.voucher_number AS settlement_voucher_display
+           FROM sales_orders so
+           LEFT JOIN parties p ON p.id = so.party_id
+           LEFT JOIN cash_bank_accounts acc ON acc.id = so.settlement_account_id
+           LEFT JOIN transactions iv ON iv.id = so.invoice_voucher_id
+           LEFT JOIN transactions sv ON sv.id = so.settlement_voucher_id
+           ORDER BY so.date DESC, so.created_at DESC`
+        );
+        const [saleItemRows]: [any[], any] = await conn.query(
+          `SELECT soi.*, i.name AS item_name, i.code AS item_code,
+                  u.code AS unit_display, loc.name AS location_display
+           FROM sales_order_items soi
+           LEFT JOIN items i ON i.id = soi.item_id
+           LEFT JOIN item_units u ON u.id = soi.unit_id
+           LEFT JOIN item_locations loc ON loc.id = soi.location_id`
+        );
+        const [saleStageRows]: [any[], any] = await conn.query(
+          `SELECT * FROM sales_order_stages ORDER BY date ASC, created_at ASC`
+        );
+        // Stage-scoped items: bucket key = saleId::stageId ('master' for
+        // legacy rows without stage linkage). Each stage row carries its own
+        // items; the sale master view = the effective (latest) stage's set.
+        const saleItemsByBucket = new Map<string, SalesOrderItem[]>();
+        for (const li of saleItemRows || []) {
+          const key = `${li.sale_id}::${li.sales_order_stage_id || 'master'}`;
+          const list = saleItemsByBucket.get(key) || [];
+          list.push({
+            id: li.id,
+            saleId: li.sale_id,
+            stageId: li.sales_order_stage_id || undefined,
+            itemId: li.item_id,
+            unitId: li.unit_id || undefined,
+            itemName: li.item_name || undefined,
+            itemCode: li.item_code || undefined,
+            unit: li.unit_display || undefined,
+            location: li.location_display || undefined,
+            quantity: numOr(li.quantity),
+            rate: numOr(li.rate),
+            amount: numOr(li.quantity) * numOr(li.rate),
+            gstRate: li.gst_rate !== null && li.gst_rate !== undefined ? numOr(li.gst_rate) : undefined,
+            locationId: li.location_id || undefined,
+            itemNotes: li.item_notes || undefined,
+          });
+          saleItemsByBucket.set(key, list);
+        }
+        const saleBucket = (saleId: string, stageId?: string) =>
+          saleItemsByBucket.get(`${saleId}::${stageId || 'master'}`) || [];
+        const saleStagesByMaster = new Map<string, SalesOrderStage[]>();
+        for (const st of saleStageRows || []) {
+          const list = saleStagesByMaster.get(st.sale_id) || [];
+          list.push({
+            id: st.id,
+            saleId: st.sale_id,
+            stageType: st.stage_type,
+            stageNumber: st.stage_number,
+            date: st.date,
+            subtotal: numOr(st.subtotal),
+            taxAmount: numOr(st.tax_amount),
+            totalAmount: numOr(st.total_amount),
+            notes: st.notes || undefined,
+            createdAt: st.created_at,
+          });
+          saleStagesByMaster.set(st.sale_id, list);
+        }
+        sales = (saleMasterRows || []).map((so) => {
+          const stages = (saleStagesByMaster.get(so.id) || []).map((st) => ({
+            ...st,
+            items: saleBucket(so.id, st.id),
+          }));
+          // Sale.items = effective (latest) stage's rows; legacy rows without
+          // stage linkage fall back to the master bucket.
+          const latestWithRows = [...stages].reverse().find((st) => (st.items || []).length > 0);
+          const items = latestWithRows ? (latestWithRows.items as SalesOrderItem[]) : saleBucket(so.id);
+          return {
+            id: so.id,
+            saleNumber: so.sale_number,
+            partyId: so.party_id,
+            partyName: so.party_display || undefined, // live view (§2)
+            date: so.date,
+            status: so.status || 'pending',
+            notes: so.notes || undefined,
+            vehicleNo: so.vehicle_no || undefined,
+            driverName: so.driver_name || undefined,
+            transportCharges: numOr(so.transport_charges),
+            inventoryApplied: Boolean(so.inventory_applied),
+            cashApplied: Boolean(so.cash_applied),
+            settlementAccountId: so.settlement_account_id || undefined,
+            settlementAccountName: so.settlement_account_display || undefined, // live view (§2)
+            paymentMode: so.payment_mode || undefined,
+            invoiceVoucherId: so.invoice_voucher_id || undefined,
+            invoiceVoucherNumber: so.invoice_voucher_display || undefined, // live view (§2)
+            settlementVoucherId: so.settlement_voucher_id || undefined,
+            settlementVoucherNumber: so.settlement_voucher_display || undefined, // live view (§2)
+            settledAmount: so.settled_amount !== null && so.settled_amount !== undefined ? numOr(so.settled_amount) : undefined,
+            settledDate: so.settled_date || undefined,
+            items,
+            stages,
+            createdAt: so.created_at,
+            updatedAt: so.updated_at || so.created_at,
+          };
+        });
+
+        // --- PURCHASES ---
+        const [purMasterRows]: [any[], any] = await conn.query(
+          `SELECT po.*, p.name AS party_display,
+                  acc.name AS settlement_account_display,
+                  iv.voucher_number AS invoice_voucher_display,
+                  sv.voucher_number AS settlement_voucher_display
+           FROM purchase_orders po
+           LEFT JOIN parties p ON p.id = po.party_id
+           LEFT JOIN cash_bank_accounts acc ON acc.id = po.settlement_account_id
+           LEFT JOIN transactions iv ON iv.id = po.invoice_voucher_id
+           LEFT JOIN transactions sv ON sv.id = po.settlement_voucher_id
+           ORDER BY po.date DESC, po.created_at DESC`
+        );
+        const [purItemRows]: [any[], any] = await conn.query(
+          `SELECT poi.*, i.name AS item_name, i.code AS item_code,
+                  u.code AS unit_display, loc.name AS location_display
+           FROM purchase_order_items poi
+           LEFT JOIN items i ON i.id = poi.item_id
+           LEFT JOIN item_units u ON u.id = poi.unit_id
+           LEFT JOIN item_locations loc ON loc.id = poi.location_id`
+        );
+        const [purStageRows]: [any[], any] = await conn.query(
+          `SELECT * FROM purchase_order_stages ORDER BY date ASC, created_at ASC`
+        );
+        const purItemsByMaster = new Map<string, PurchaseOrderItem[]>();
+        for (const li of purItemRows || []) {
+          const list = purItemsByMaster.get(li.purchase_id) || [];
+          list.push({
+            id: li.id,
+            purchaseId: li.purchase_id,
+            itemId: li.item_id,
+            unitId: li.unit_id || undefined,
+            itemName: li.item_name || undefined,
+            itemCode: li.item_code || undefined,
+            unit: li.unit_display || undefined,
+            location: li.location_display || undefined,
+            quantity: numOr(li.quantity),
+            rate: numOr(li.rate),
+            amount: numOr(li.quantity) * numOr(li.rate),
+            gstRate: li.gst_rate !== null && li.gst_rate !== undefined ? numOr(li.gst_rate) : undefined,
+            locationId: li.location_id || undefined,
+            receivedQuantity: li.received_quantity !== null && li.received_quantity !== undefined ? numOr(li.received_quantity) : undefined,
+            shortageQuantity: li.shortage_quantity !== null && li.shortage_quantity !== undefined ? numOr(li.shortage_quantity) : undefined,
+            overageQuantity: li.overage_quantity !== null && li.overage_quantity !== undefined ? numOr(li.overage_quantity) : undefined,
+            itemNotes: li.item_notes || undefined,
+          });
+          purItemsByMaster.set(li.purchase_id, list);
+        }
+        const purStagesByMaster = new Map<string, PurchaseOrderStage[]>();
+        for (const st of purStageRows || []) {
+          const list = purStagesByMaster.get(st.purchase_id) || [];
+          let details: any = null;
+          try {
+            details = typeof st.stage_details === 'string' ? JSON.parse(st.stage_details) : st.stage_details;
+          } catch {
+            details = null;
+          }
+          list.push({
+            id: st.id,
+            purchaseId: st.purchase_id,
+            stageType: st.stage_type,
+            stageNumber: st.stage_number,
+            date: st.date,
+            subtotal: numOr(st.subtotal),
+            taxAmount: numOr(st.tax_amount),
+            totalAmount: numOr(st.total_amount),
+            rfqDetails: st.stage_type === 'rfq' ? details : undefined,
+            poDetails: st.stage_type === 'purchase_order' ? details : undefined,
+            receiptDetails: st.stage_type === 'goods_receipt' ? details : undefined,
+            notes: st.notes || undefined,
+            createdAt: st.created_at,
+          });
+          purStagesByMaster.set(st.purchase_id, list);
+        }
+        purchases = (purMasterRows || []).map((po) => ({
+          id: po.id,
+          purchaseNumber: po.purchase_number,
+          partyId: po.party_id || undefined,
+          partyName: po.party_display || undefined, // live view (§2)
+          date: po.date,
+          status: po.status || 'pending',
+          notes: po.notes || undefined,
+          inventoryApplied: Boolean(po.inventory_applied),
+          cashApplied: Boolean(po.cash_applied),
+          settlementAccountId: po.settlement_account_id || undefined,
+          settlementAccountName: po.settlement_account_display || undefined, // live view (§2)
+          paymentMode: po.payment_mode || undefined,
+          invoiceVoucherId: po.invoice_voucher_id || undefined,
+          invoiceVoucherNumber: po.invoice_voucher_display || undefined, // live view (§2)
+          settlementVoucherId: po.settlement_voucher_id || undefined,
+          settlementVoucherNumber: po.settlement_voucher_display || undefined, // live view (§2)
+          settledAmount: po.settled_amount !== null && po.settled_amount !== undefined ? numOr(po.settled_amount) : undefined,
+          settledDate: po.settled_date || undefined,
+          items: purItemsByMaster.get(po.id) || [],
+          stages: purStagesByMaster.get(po.id) || [],
+          createdAt: po.created_at,
+          updatedAt: po.updated_at || po.created_at,
+        }));
+      } catch (spErr: any) {
+        console.warn('[Azure MySQL] Notice loading sales/purchase relational tables:', spErr.message);
       }
 
       // 9. Vehicles & Drivers
@@ -653,7 +875,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         return null;
       }
 
-      console.log(`[Azure MySQL] Loaded live data from Azure: ${parties.length} parties, ${items.length} items, ${transactions.length} transactions, ${accounts.length} accounts, ${orders.length} orders.`);
+      console.log(`[Azure MySQL] Loaded live data from Azure: ${parties.length} parties, ${items.length} items, ${transactions.length} transactions, ${accounts.length} accounts, ${sales.length} sales, ${purchases.length} purchases, ${orders.length} legacy orders.`);
 
       return {
         version: '1.0.0',
@@ -668,6 +890,8 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         locations,
         productionBatches,
         orders,
+        sales,
+        purchases,
         vehicles,
         drivers,
         tripSlips,
@@ -919,6 +1143,238 @@ export async function liveSyncOrder(order: Order, isDelete = false) {
     }
   } catch (e: any) {
     console.error('[Azure MySQL LiveSync] Failed to sync order:', e.message);
+  }
+}
+
+// -------------------------------------------------------------
+// SALES & PURCHASE — RELATIONAL ORDER MODEL (Phase 1 redesign).
+// Masters + items + stage-history child tables; FKs only (Golden Rule §2) —
+// party / item / unit / location display names are JOINed at read time.
+// -------------------------------------------------------------
+
+function numOr(v: any, fallback = 0): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+export async function liveSyncSale(sale: Sale, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    await pool.query(
+      `REPLACE INTO sales_orders (id, sale_number, party_id, date, status, notes, vehicle_no, driver_name, transport_charges, inventory_applied, cash_applied, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        sale.id,
+        sale.saleNumber,
+        sale.partyId,
+        sale.date,
+        sale.status || 'pending',
+        sale.notes || null,
+        sale.vehicleNo || null,
+        sale.driverName || null,
+        numOr(sale.transportCharges),
+        sale.inventoryApplied ? 1 : 0,
+        sale.cashApplied ? 1 : 0,
+        sale.settlementAccountId || null,
+        sale.paymentMode || null,
+        sale.invoiceVoucherId || null,
+        sale.settlementVoucherId || null,
+        sale.settledAmount !== undefined && sale.settledAmount !== null ? sale.settledAmount : null,
+        sale.settledDate || null,
+        sale.createdAt || new Date().toISOString(),
+        sale.updatedAt || new Date().toISOString(),
+      ]
+    );
+    if (isDelete) {
+      await pool.query('DELETE FROM sales_order_items WHERE sale_id = ?', [sale.id]);
+      await pool.query('DELETE FROM sales_order_stages WHERE sale_id = ?', [sale.id]);
+      await pool.query('DELETE FROM sales_orders WHERE id = ?', [sale.id]);
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync sale:', e.message);
+  }
+}
+
+export async function liveSyncSaleItems(saleId: string, items: SalesOrderItem[], isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM sales_order_items WHERE sale_id = ?', [saleId]);
+      return;
+    }
+    // Master edits regenerate line ids — remove child rows that are no longer
+    // part of the current line set before replacing (no stale dup rows).
+    const ids = (items || []).map((li) => li.id);
+    if (ids.length === 0) {
+      await pool.query('DELETE FROM sales_order_items WHERE sale_id = ?', [saleId]);
+    } else {
+      const ph = ids.map(() => '?').join(',');
+      await pool.query(`DELETE FROM sales_order_items WHERE sale_id = ? AND id NOT IN (${ph})`, [saleId, ...ids]);
+    }
+    for (const li of items || []) {
+      await pool.query(
+        `REPLACE INTO sales_order_items (id, sale_id, sales_order_stage_id, item_id, unit_id, quantity, rate, gst_rate, location_id, item_notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          li.id,
+          saleId,
+          li.stageId || null,
+          li.itemId,
+          li.unitId || null,
+          numOr(li.quantity),
+          numOr(li.rate),
+          li.gstRate ?? null,
+          li.locationId || null,
+          li.itemNotes || null,
+        ]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync sale items:', e.message);
+  }
+}
+
+export async function liveSyncSaleStages(saleId: string, stages: SalesOrderStage[], isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM sales_order_stages WHERE sale_id = ?', [saleId]);
+      return;
+    }
+    for (const st of stages || []) {
+      await pool.query(
+        `REPLACE INTO sales_order_stages (id, sale_id, stage_type, stage_number, date, subtotal, tax_amount, total_amount, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          st.id,
+          saleId,
+          st.stageType,
+          st.stageNumber,
+          st.date,
+          numOr(st.subtotal),
+          numOr(st.taxAmount),
+          numOr(st.totalAmount),
+          st.notes || null,
+          st.createdAt || new Date().toISOString(),
+        ]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync sale stages:', e.message);
+  }
+}
+
+export async function liveSyncPurchase(purchase: Purchase, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    await pool.query(
+      `REPLACE INTO purchase_orders (id, purchase_number, party_id, date, status, notes, inventory_applied, cash_applied, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        purchase.id,
+        purchase.purchaseNumber,
+        purchase.partyId || null,
+        purchase.date,
+        purchase.status || 'pending',
+        purchase.notes || null,
+        purchase.inventoryApplied ? 1 : 0,
+        purchase.cashApplied ? 1 : 0,
+        purchase.settlementAccountId || null,
+        purchase.paymentMode || null,
+        purchase.invoiceVoucherId || null,
+        purchase.settlementVoucherId || null,
+        purchase.settledAmount !== undefined && purchase.settledAmount !== null ? purchase.settledAmount : null,
+        purchase.settledDate || null,
+        purchase.createdAt || new Date().toISOString(),
+        purchase.updatedAt || new Date().toISOString(),
+      ]
+    );
+    if (isDelete) {
+      await pool.query('DELETE FROM purchase_order_items WHERE purchase_id = ?', [purchase.id]);
+      await pool.query('DELETE FROM purchase_order_stages WHERE purchase_id = ?', [purchase.id]);
+      await pool.query('DELETE FROM purchase_orders WHERE id = ?', [purchase.id]);
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync purchase:', e.message);
+  }
+}
+
+export async function liveSyncPurchaseItems(purchaseId: string, items: PurchaseOrderItem[], isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM purchase_order_items WHERE purchase_id = ?', [purchaseId]);
+      return;
+    }
+    // Master edits regenerate line ids — remove child rows that are no longer
+    // part of the current line set before replacing (no stale dup rows).
+    const ids = (items || []).map((li) => li.id);
+    if (ids.length === 0) {
+      await pool.query('DELETE FROM purchase_order_items WHERE purchase_id = ?', [purchaseId]);
+    } else {
+      const ph = ids.map(() => '?').join(',');
+      await pool.query(`DELETE FROM purchase_order_items WHERE purchase_id = ? AND id NOT IN (${ph})`, [purchaseId, ...ids]);
+    }
+    for (const li of items || []) {
+      await pool.query(
+        `REPLACE INTO purchase_order_items (id, purchase_id, item_id, unit_id, quantity, rate, gst_rate, location_id, received_quantity, shortage_quantity, overage_quantity, item_notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          li.id,
+          purchaseId,
+          li.itemId,
+          li.unitId || null,
+          numOr(li.quantity),
+          numOr(li.rate),
+          li.gstRate ?? null,
+          li.locationId || null,
+          li.receivedQuantity ?? null,
+          li.shortageQuantity ?? null,
+          li.overageQuantity ?? null,
+          li.itemNotes || null,
+        ]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync purchase items:', e.message);
+  }
+}
+
+export async function liveSyncPurchaseStages(purchaseId: string, stages: PurchaseOrderStage[], isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM purchase_order_stages WHERE purchase_id = ?', [purchaseId]);
+      return;
+    }
+    for (const st of stages || []) {
+      const details = st.rfqDetails || st.poDetails || st.receiptDetails || null;
+      await pool.query(
+        `REPLACE INTO purchase_order_stages (id, purchase_id, stage_type, stage_number, date, subtotal, tax_amount, total_amount, stage_details, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          st.id,
+          purchaseId,
+          st.stageType,
+          st.stageNumber,
+          st.date,
+          numOr(st.subtotal),
+          numOr(st.taxAmount),
+          numOr(st.totalAmount),
+          details ? JSON.stringify(details) : null,
+          st.notes || null,
+          st.createdAt || new Date().toISOString(),
+        ]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync purchase stages:', e.message);
   }
 }
 
@@ -1527,8 +1983,8 @@ export async function liveSyncStockMovement(item: Item, movement: StockMovementR
       `INSERT INTO stock_movements (
         id, item_id, location_id, movement_type, quantity,
         balance_after, rate, movement_value, valuation_rate_after,
-        reference_type, reference_number, party_id, notes, movement_date, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        reference_type, reference_number, reference_id, party_id, notes, movement_date, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         movement.id,
         item.id,
@@ -1541,6 +1997,7 @@ export async function liveSyncStockMovement(item: Item, movement: StockMovementR
         movement.valuationRateAfter !== undefined && movement.valuationRateAfter !== null ? Number(movement.valuationRateAfter) : null,
         movement.referenceType || null,
         movement.referenceNumber || null,
+        movement.referenceId || null,
         movement.partyId || null,
         movement.notes || null,
         movement.date,

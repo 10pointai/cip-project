@@ -10,6 +10,8 @@ import {
   ItemLocation,
   ProductionBatchRun,
   Order,
+  Sale,
+  Purchase,
   Employee,
   EmployeeAttendance,
   EmployeeLeave,
@@ -36,7 +38,9 @@ export function useDatabase() {
   const [units, setUnits] = useState<ItemUnit[]>(() => cloudStore.getUnits());
   const [locations, setLocations] = useState<ItemLocation[]>(() => cloudStore.getLocations());
   const [productionBatches, setProductionBatches] = useState<ProductionBatchRun[]>(() => cloudStore.getProductionBatches());
-  const [orders, setOrders] = useState<Order[]>(() => cloudStore.getOrders());
+  const [orders, setOrders] = useState<Order[]>(() => cloudStore.getOrders()); // legacy rows
+  const [sales, setSales] = useState<Sale[]>(() => cloudStore.getSales());
+  const [purchases, setPurchases] = useState<Purchase[]>(() => cloudStore.getPurchases());
   const [vehicles, setVehicles] = useState<Vehicle[]>(() => cloudStore.getVehicles());
   const [drivers, setDrivers] = useState<Driver[]>(() => cloudStore.getDrivers());
   const [tripSlips, setTripSlips] = useState<TripSlip[]>(() => cloudStore.getTripSlips());
@@ -65,6 +69,8 @@ export function useDatabase() {
     setLocations(cloudStore.getLocations());
     setProductionBatches(cloudStore.getProductionBatches());
     setOrders(cloudStore.getOrders());
+    setSales(cloudStore.getSales());
+    setPurchases(cloudStore.getPurchases());
     setVehicles(cloudStore.getVehicles());
     setDrivers(cloudStore.getDrivers());
     setTripSlips(cloudStore.getTripSlips());
@@ -109,6 +115,8 @@ export function useDatabase() {
     locations,
     productionBatches,
     orders,
+    sales,
+    purchases,
     vehicles,
     drivers,
     tripSlips,

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Warehouse, MapPin, Plus, Edit2, Trash2, Check, AlertCircle, Lock } from 'lucide-react';
+import { X, Warehouse, MapPin, Plus, Edit2, Check, AlertCircle, Lock } from 'lucide-react';
 import { ItemLocation, Item } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 
@@ -98,29 +98,6 @@ export const LocationManagerModal: React.FC<LocationManagerModalProps> = ({
       setError('');
     } catch (err: any) {
       setError(err.message || 'Failed to save location.');
-    }
-  };
-
-  const handleDelete = (loc: ItemLocation) => {
-    const linkedCount = items.filter(
-      (i) => (i.stockLocation && i.stockLocation.toLowerCase().includes(loc.name.toLowerCase())) ||
-             (i.locations && i.locations.some((l) => l.locationName.toLowerCase() === loc.name.toLowerCase()))
-    ).length;
-
-    const confirmMsg = linkedCount > 0
-      ? `Location "${loc.name}" is referenced by ${linkedCount} inventory item(s). Deleting it will reassign these items to your primary location. Are you sure you want to proceed?`
-      : `Are you sure you want to delete location "${loc.name}"?`;
-
-    if (window.confirm(confirmMsg)) {
-      try {
-        localDb.deleteLocation(loc.id);
-        if (editingId === loc.id) {
-          setEditingId(null);
-        }
-        setError('');
-      } catch (err: any) {
-        setError(err.message || 'Failed to delete location.');
-      }
     }
   };
 
@@ -331,14 +308,6 @@ export const LocationManagerModal: React.FC<LocationManagerModalProps> = ({
                       title="Edit Location"
                     >
                       <Edit2 className="w-4 h-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDelete(loc)}
-                      className="p-2 text-[var(--color-error)] hover:bg-[var(--color-error-container)] rounded-xl transition-colors"
-                      title="Delete Location"
-                    >
-                      <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
                 </div>

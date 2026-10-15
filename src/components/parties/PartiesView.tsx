@@ -249,7 +249,7 @@ export function PartiesView({
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="p-5 bg-[var(--color-primary-container)] border border-[var(--color-primary)]/20 rounded-[24px] shadow-2xs space-y-2 relative overflow-hidden">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold text-[var(--color-on-primary-container)]/80 uppercase tracking-wider">Total Receivables (Dues from Buyers)</span>
+              <span className="text-[11px] font-bold text-[var(--color-on-primary-container)]/80 uppercase tracking-wider">Total Receivable</span>
               <div className="w-9 h-9 rounded-2xl bg-[var(--color-primary)] text-[var(--color-on-primary)] flex items-center justify-center shadow-xs">
                 <ArrowDownLeft className="w-4 h-4" />
               </div>
@@ -257,14 +257,12 @@ export function PartiesView({
             <p className="text-2xl sm:text-3xl font-extrabold text-[var(--color-on-primary-container)]">
               {formatCurrency(totalReceivables, settings.currency.symbol)}
             </p>
-            <p className="text-xs text-[var(--color-on-primary-container)]/80 font-medium pt-1 border-t border-[var(--color-primary)]/15">
-              Owed by clients for delivered asphalt & materials
-            </p>
+            
           </div>
 
           <div className="p-5 bg-[var(--color-secondary-container)] border border-[var(--color-secondary)]/20 rounded-[24px] shadow-2xs space-y-2 relative overflow-hidden">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold text-[var(--color-on-secondary-container)]/80 uppercase tracking-wider">Total Payables (Dues to Suppliers)</span>
+              <span className="text-[11px] font-bold text-[var(--color-on-secondary-container)]/80 uppercase tracking-wider">Total Payable</span>
               <div className="w-9 h-9 rounded-2xl bg-[var(--color-secondary)] text-[var(--color-on-secondary)] flex items-center justify-center shadow-xs">
                 <ArrowUpRight className="w-4 h-4" />
               </div>
@@ -272,24 +270,20 @@ export function PartiesView({
             <p className="text-2xl sm:text-3xl font-extrabold text-[var(--color-on-secondary-container)]">
               {formatCurrency(totalPayables, settings.currency.symbol)}
             </p>
-            <p className="text-xs text-[var(--color-on-secondary-container)]/80 font-medium pt-1 border-t border-[var(--color-secondary)]/15">
-              Pending payments for bitumen, aggregates & fuel
-            </p>
+            
           </div>
 
           <div className="p-5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-[24px] shadow-2xs space-y-2 relative overflow-hidden">
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Total Active Parties</span>
               <div className="w-9 h-9 rounded-2xl bg-[var(--color-primary)] text-[var(--color-on-primary)] flex items-center justify-center font-bold text-xs shadow-xs">
-                {parties.length}
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-users w-4 h-4 shrink-0 text-[var(--color-on-primary)]" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><path d="M16 3.128a4 4 0 0 1 0 7.744"></path><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><circle cx="9" cy="7" r="4"></circle></svg>
               </div>
             </div>
             <p className="text-2xl sm:text-3xl font-extrabold text-[var(--color-on-surface)]">
-              {formatCurrency(netBalance, settings.currency.symbol)}
+              {parties.length}
             </p>
-            <p className="text-xs text-[var(--color-on-surface-variant)] font-medium pt-1 border-t border-[var(--color-outline-variant)]">
-              Net working balance position
-            </p>
+            
           </div>
         </div>
       )}
@@ -403,22 +397,35 @@ export function PartiesView({
           <div className="w-12 h-12 rounded-2xl bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)] flex items-center justify-center mx-auto mb-3">
             <Building2 className="w-6 h-6" />
           </div>
-          <h3 className="text-base font-bold text-[var(--color-on-surface)]">No parties found</h3>
-          <p className="text-xs text-[var(--color-on-surface-variant)] max-w-sm mx-auto mt-1">
-            Try adjusting your search criteria or add a new party to start tracking their ledger.
-          </p>
-          <div className="mt-4 flex items-center justify-center flex-wrap gap-3">
-            <button
-              onClick={() => {
-                setEditingParty(null);
-                setIsPartyFormOpen(true);
-              }}
-              className="inline-flex items-center gap-2 px-5 py-2.5 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-semibold text-xs rounded-full shadow-xs transition-colors"
-            >
-              <Plus className="w-4 h-4" />
-              Add First Party
-            </button>
-          </div>
+          {parties.length === 0 ? (
+            <>
+              <h3 className="text-base font-bold text-[var(--color-on-surface)]">No parties yet</h3>
+              <p className="text-xs text-[var(--color-on-surface-variant)] max-w-sm mx-auto mt-1">
+                Add your first party to start tracking their ledger, payments and credit terms.
+              </p>
+              {canManageParties && (
+                <div className="mt-4 flex items-center justify-center flex-wrap gap-3">
+                  <button
+                    onClick={() => {
+                      setEditingParty(null);
+                      setIsPartyFormOpen(true);
+                    }}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-semibold text-xs rounded-full shadow-xs transition-colors"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Add First Party
+                  </button>
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <h3 className="text-base font-bold text-[var(--color-on-surface)]">No parties found</h3>
+              <p className="text-xs text-[var(--color-on-surface-variant)] max-w-sm mx-auto mt-1">
+                No parties match your current search or filters. Try adjusting them to see more results.
+              </p>
+            </>
+          )}
         </div>
       ) : viewMode === 'grid' ? (
         /* Grid Cards View */

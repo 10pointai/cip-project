@@ -1,14 +1,15 @@
 import React, { useState, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import {
+  Lock,
+  MoreVertical,
   FileText,
   Plus,
   Search,
-  Filter,
   ArrowUpRight,
   ArrowDownLeft,
   Trash2,
   Edit3,
-  Eye,
   X,
   CheckCircle2,
   Clock,
@@ -21,10 +22,10 @@ import {
   Truck,
   Building,
   User,
-  Percent,
   Printer,
   Download,
   Check,
+  ChevronRight,
   FileCheck,
   FileSpreadsheet,
   Receipt,
@@ -35,7 +36,7 @@ import {
   CreditCard,
   Wallet,
 } from 'lucide-react';
-import { Order, OrderItem, OrderStatus, OrderType, SalesStage, PurchaseStage, Party, Item, CompanySettings, Vehicle, Driver, PaymentMode, CashBankAccount } from '../../types';
+import { Order, OrderItem, OrderType, SalesStage, PurchaseStage, Party, Item, CompanySettings, Sale, Purchase, PaymentMode } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { AddPurchaseModal } from './AddPurchaseModal';
 
@@ -67,60 +68,337 @@ function numberToWords(num: number): string {
   }
 }
 
+/**
+ * Adapter: shapes the relational Sale/Purchase models (masters + items +
+ * stage-history child tables) into the Order-shaped view used by the card
+ * list, the detail panel and the print preview. The LATEST stage drives the
+ * displayed document stage; totals fall back to per-line math when a stage
+ * has no figures (RFQ).
+ */
+// Sales stage document meta (labels + icons for tabs/cards)
+const SALES_STAGE_META: Record<string, { label: string; icon: any; tone: string }> = {
+  quotation: { label: 'Quotation', icon: FileText, tone: 'text-[var(--color-secondary)]' },
+  sales_order: { label: 'Sales Order', icon: ClipboardList, tone: 'text-[var(--color-success)]' },
+  proforma_invoice: { label: 'Proforma Invoice (legacy)', icon: Receipt, tone: 'text-[var(--color-primary)]' },
+  delivery_note: { label: 'Delivery Note (legacy)', icon: Truck, tone: 'text-[var(--color-warning)]' },
+  sales_invoice: { label: 'GST Tax Invoice', icon: FileCheck, tone: 'text-[var(--color-success)]' },
+};
+
+interface StageDocDisplay {
+  stageType: SalesStage;
+  stageNumber: string;
+  date: string;
+  notes?: string;
+  subtotal: number;
+  taxAmount: number;
+  totalAmount: number;
+  items: OrderItem[];
+}
+
+interface OrderDisplay extends Order {
+  inventoryApplied: boolean;
+  cashApplied: boolean;
+  // Cash & Bank settlement (hydrated sale/purchase master fields)
+  settlementAccountId?: string;
+  settlementAccountName?: string;
+  invoiceVoucherNumber?: string;
+  settlementVoucherNumber?: string;
+  settledAmount?: number;
+  settledDate?: string;
+  /** paymentMode: inherited from Order (kept for the settlement record) */
+  /** Stage document numbers as issued (chronological) */
+  stageNumbers?: Array<{ type: string; number: string; date: string }>;
+  /** Full stage documents with their OWN line values (quotation vs order...) */
+  stageDocs?: StageDocDisplay[];
+}
+
+function saleToDisplay(s: Sale): OrderDisplay {
+  const items: OrderItem[] = (s.items || []).map((li) => ({
+    itemId: li.itemId,
+    itemName: li.itemName || '',
+    itemCode: (li as any).itemCode,
+    quantity: li.quantity,
+    unit: li.unit || '',
+    rate: li.rate,
+    amount: (li.amount ?? li.quantity * li.rate),
+    gstRate: li.gstRate,
+    location: li.location,
+  }));
+  const subtotal = items.reduce((sum, i) => sum + i.quantity * i.rate, 0);
+  const taxAmount = items.reduce((sum, i) => sum + (i.quantity * i.rate * (i.gstRate || 0)) / 100, 0);
+  const transportCharges = s.transportCharges || 0;
+  const latestStage = (s.stages || []).length > 0 ? s.stages[s.stages.length - 1] : undefined;
+  const stageDocs: StageDocDisplay[] = (s.stages || []).map((st) => ({
+    stageType: st.stageType,
+    stageNumber: st.stageNumber,
+    date: st.date,
+    notes: st.notes,
+    subtotal: st.subtotal,
+    taxAmount: st.taxAmount,
+    totalAmount: st.totalAmount,
+    items: (st.items || []).map((li) => ({
+      itemId: li.itemId,
+      itemName: li.itemName || '',
+      itemCode: (li as any).itemCode,
+      quantity: li.quantity,
+      unit: li.unit || '',
+      rate: li.rate,
+      amount: li.amount ?? li.quantity * li.rate,
+      gstRate: li.gstRate,
+      location: li.location,
+    }) as OrderItem),
+  }));
+  return {
+    id: s.id,
+    orderNumber: s.saleNumber,
+    type: 'sales',
+    partyId: s.partyId,
+    partyName: s.partyName,
+    date: s.date,
+    status: s.status,
+    stage: latestStage?.stageType || 'sales_order',
+    accountId: '',
+    items,
+    taxRateGst: subtotal > 0 ? Math.round((taxAmount / subtotal) * 100) / 100 : 0,
+    taxAmount: latestStage?.taxAmount ?? taxAmount,
+    totalAmount: latestStage?.totalAmount ?? subtotal + taxAmount + transportCharges,
+    notes: s.notes,
+    vehicleNo: s.vehicleNo,
+    driverName: s.driverName,
+    transportCharges,
+    inventoryApplied: s.inventoryApplied,
+    cashApplied: s.cashApplied,
+    settlementAccountId: (s as any).settlementAccountId || undefined,
+    settlementAccountName: (s as any).settlementAccountName || undefined,
+    paymentMode: (s as any).paymentMode,
+    invoiceVoucherNumber: (s as any).invoiceVoucherNumber,
+    settlementVoucherNumber: (s as any).settlementVoucherNumber,
+    settledAmount: (s as any).settledAmount,
+    settledDate: (s as any).settledDate,
+    stageNumbers: (s.stages || []).map((st) => ({ type: st.stageType, number: st.stageNumber, date: st.date })),
+    stageDocs,
+    createdAt: s.createdAt,
+    updatedAt: s.updatedAt,
+  } as OrderDisplay;
+}
+
+function purchaseToDisplay(p: Purchase): OrderDisplay {
+  const items: OrderItem[] = (p.items || []).map((li) => ({
+    itemId: li.itemId,
+    itemName: li.itemName || '',
+    itemCode: (li as any).itemCode,
+    quantity: li.quantity,
+    unit: li.unit || '',
+    rate: li.rate,
+    amount: li.amount ?? li.quantity * li.rate,
+    gstRate: li.gstRate,
+    location: li.location,
+    receivedQuantity: li.receivedQuantity,
+    shortageQuantity: li.shortageQuantity,
+    overageQuantity: li.overageQuantity,
+  }));
+  const isRfqOnly = !(p.stages || []).some((st) => st.stageType !== 'rfq');
+  const subtotal = items.reduce((sum, i) => sum + i.quantity * i.rate, 0);
+  const taxAmount = items.reduce((sum, i) => sum + (i.quantity * i.rate * (i.gstRate || 0)) / 100, 0);
+  const latestStage = (p.stages || []).length > 0 ? p.stages[p.stages.length - 1] : undefined;
+  const byType = (t: string) => (p.stages || []).find((st) => st.stageType === t);
+  return {
+    id: p.id,
+    orderNumber: p.purchaseNumber,
+    type: 'purchase',
+    partyId: p.partyId || 'unassigned',
+    partyName: p.partyName || (p.partyId ? undefined : 'Unassigned (RFQ Ingestion)'),
+    date: p.date,
+    status: p.status,
+    purchaseStage: latestStage?.stageType,
+    rfqDetails: byType('rfq') ? { rfqNumber: byType('rfq')!.stageNumber, ...((byType('rfq') as any).rfqDetails || {}) } as any : undefined,
+    poDetails: byType('purchase_order') ? { poNumber: byType('purchase_order')!.stageNumber, ...((byType('purchase_order') as any).poDetails || {}) } as any : undefined,
+    receiptDetails: byType('goods_receipt') ? { grnNumber: byType('goods_receipt')!.stageNumber, ...((byType('goods_receipt') as any).receiptDetails || {}) } as any : undefined,
+    items,
+    taxRateGst: subtotal > 0 ? Math.round((taxAmount / subtotal) * 100) / 100 : 0,
+    taxAmount: isRfqOnly ? 0 : (latestStage?.taxAmount ?? taxAmount),
+    totalAmount: isRfqOnly ? 0 : (latestStage?.totalAmount ?? subtotal + taxAmount),
+    notes: p.notes,
+    inventoryApplied: p.inventoryApplied,
+    cashApplied: p.cashApplied,
+    settlementAccountId: (p as any).settlementAccountId || undefined,
+    settlementAccountName: (p as any).settlementAccountName || undefined,
+    paymentMode: (p as any).paymentMode,
+    invoiceVoucherNumber: (p as any).invoiceVoucherNumber,
+    settlementVoucherNumber: (p as any).settlementVoucherNumber,
+    settledAmount: (p as any).settledAmount,
+    settledDate: (p as any).settledDate,
+    stageNumbers: (p.stages || []).map((st) => ({ type: st.stageType, number: st.stageNumber, date: st.date })),
+    createdAt: p.createdAt,
+    updatedAt: p.updatedAt,
+  } as OrderDisplay;
+}
+
 interface OrdersViewProps {
-  orders: Order[];
+  sales: Sale[];
+  /** @deprecated legacy `orders` rows — shown alongside for continuity */
+  purchaseOrders: Purchase[];
   parties: Party[];
   items: Item[];
   settings: CompanySettings;
-  onAddOrder: (order: Omit<Order, 'id' | 'createdAt' | 'updatedAt'>) => Order;
-  onUpdateOrder: (id: string, updates: Partial<Order>) => Order;
-  onDeleteOrder: (id: string) => boolean;
+  onAddSale: (payload: any) => any;
+  onUpdateSale: (id: string, updates: any) => any;
+  onAddSaleStage: (id: string, stageInput: any) => any;
+  onDeleteSale: (id: string) => boolean;
+  onAddPurchase: (payload: any) => any;
+  onUpdatePurchase: (id: string, updates: any) => any;
+  onAddPurchaseStage: (id: string, stageInput: any) => any;
+  onDeletePurchase: (id: string) => boolean;
   fixedType?: OrderType;
 }
 
+// Typable, searchable picker used by every <select> inside the line-item rows,
+// so all columns feel the same (type-to-filter, option list, escaped dropdown).
+// Renders as a non-interactive text when `disabledText` is given.
+function SearchableSelect({
+  options,
+  value,
+  onChange,
+  closedDisplay,
+  placeholder = 'Type to search...',
+  disabledText,
+}: {
+  options?: Array<{ value: string; label: string; sub?: string }>;
+  value: string;
+  onChange: (value: string) => void;
+  /** What to show in the closed input; defaults to the selected option's label. */
+  closedDisplay?: string;
+  placeholder?: string;
+  /** When set, renders a dimmed non-interactive placeholder instead of the picker. */
+  disabledText?: string;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [query, setQuery] = React.useState('');
+  const lowerQuery = query.trim().toLowerCase();
+  const matches = (
+    lowerQuery
+      ? (options ?? []).filter(
+          (o) =>
+            o.label.toLowerCase().includes(lowerQuery) ||
+            (o.sub ?? '').toLowerCase().includes(lowerQuery)
+        )
+      : options ?? []
+  ).slice(0, 50);
+
+  if (disabledText !== undefined) {
+    return (
+      <div className="w-full text-xs font-medium text-[var(--color-outline)] cursor-not-allowed select-none truncate">
+        {disabledText}
+      </div>
+    );
+  }
+
+  const display = closedDisplay ?? options.find((o) => o.value === value)?.label ?? '';
+
+  return (
+    <div className="relative">
+      <input
+        type="text"
+        value={open ? query : display}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => {
+          setQuery('');
+          setOpen(true);
+        }}
+        onBlur={() => setOpen(false)}
+        placeholder={placeholder}
+        className="w-full bg-transparent text-xs font-medium text-[var(--color-on-surface)] placeholder:text-[var(--color-on-surface-variant)] focus:outline-none"
+      />
+      {open && (
+        <div className="absolute left-0 top-full z-30 mt-1 w-max min-w-[200px] max-w-[280px] max-h-56 overflow-y-auto rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] shadow-lg">
+          {matches.length === 0 ? (
+            <p className="px-3 py-2.5 text-[10px] text-[var(--color-on-surface-variant)]">
+              No matches for "{query}"
+            </p>
+          ) : (
+            matches.map((o) => (
+              <button
+                key={o.value}
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  onChange(o.value);
+                  setOpen(false);
+                  setQuery('');
+                }}
+                className={`w-full px-3 py-2 text-left text-[11px] hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50 first:border-t-0 ${
+                  o.value === value ? 'bg-[var(--color-primary-container)]/60' : ''
+                }`}
+              >
+                <span className="font-bold text-[var(--color-on-surface)]">{o.label}</span>
+                {o.sub && (
+                  <span className="block text-[9px] text-[var(--color-on-surface-variant)]">{o.sub}</span>
+                )}
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function OrdersView({
-  orders,
+  sales,
+  purchaseOrders,
   parties,
   items,
   settings,
-  onAddOrder,
-  onUpdateOrder,
-  onDeleteOrder,
+  onAddSale,
+  onUpdateSale,
+  onAddSaleStage,
+  onDeleteSale,
+  onAddPurchase,
+  onUpdatePurchase,
+  onAddPurchaseStage,
+  onDeletePurchase,
   fixedType,
 }: OrdersViewProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [typeFilter, setTypeFilter] = useState<'all' | OrderType>('all');
-  const [statusFilter, setStatusFilter] = useState<'all' | OrderStatus>('all');
-  
   // Modals state
   const [isFormOpen, setIsFormOpen] = useState(false);
-  const [editingOrder, setEditingOrder] = useState<Order | null>(null);
+  const [isStageMenuOpen, setIsStageMenuOpen] = useState(false);
+  const stageMenuRef = React.useRef<HTMLDivElement | null>(null);
+  const [editingOrder, setEditingOrder] = useState<OrderDisplay | null>(null);
   const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
-  const [editingPurchaseOrder, setEditingPurchaseOrder] = useState<Order | null>(null);
+  const [editingPurchaseOrder, setEditingPurchaseOrder] = useState<OrderDisplay | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
-  const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
-  const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
+  const [selectedOrder, setSelectedOrder] = useState<OrderDisplay | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [formType, setFormType] = useState<OrderType>(fixedType || 'sales');
 
   // Form states
   const [formDate, setFormDate] = useState(new Date().toISOString().split('T')[0]);
   const [formPartyId, setFormPartyId] = useState('');
-  const [formStatus, setFormStatus] = useState<OrderStatus>('pending');
-  const [formItems, setFormItems] = useState<Array<{ itemId: string; quantity: string; rate: string; location: string }>>([
-    { itemId: '', quantity: '', rate: '', location: '' },
+  const [formItems, setFormItems] = useState<Array<{ itemId: string; quantity: string; rate: string; location: string; gstRate: string }>>([
+    { itemId: '', quantity: '', rate: '', location: '', gstRate: '' },
   ]);
-  const [formTaxRate, setFormTaxRate] = useState('18');
   const [formNotes, setFormNotes] = useState('');
   const [formOrderNumber, setFormOrderNumber] = useState('');
   const [formStage, setFormStage] = useState<SalesStage>('sales_order');
   const [formVehicleNo, setFormVehicleNo] = useState('');
   const [formDriverName, setFormDriverName] = useState('');
   const [formTransportCharges, setFormTransportCharges] = useState('0');
-  const [formPaymentMode, setFormPaymentMode] = useState<PaymentMode>('bank_transfer');
+  const [formPaymentMode, setFormPaymentMode] = useState<any>('bank_transfer');
   const [formAccountId, setFormAccountId] = useState<string>('');
-  
-  // Optional toggles for payment settlement & transportation
+
+  // Per-stage save toggle: apply the one-shot stockyard inventory update.
+  // Inventory/cash post ONCE per order — the server guards on the master flags.
+  const [updateInventory, setUpdateInventory] = useState<boolean>(false);
+  const [updateCash, setUpdateCash] = useState<boolean>(false);
+
+  // Payment settlement toggle — the cash posting rules are being specified
+  // separately; this UI selects mode/account preferences and is NOT persisted
+  // on the sale/purchase model yet.
   const [includePayment, setIncludePayment] = useState<boolean>(false);
   const [includeLogistics, setIncludeLogistics] = useState<boolean>(false);
 
@@ -132,8 +410,267 @@ export function OrdersView({
 
   // Preview modal states
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
-  const [previewOrder, setPreviewOrder] = useState<Order | null>(null);
+  const [previewOrder, setPreviewOrder] = useState<OrderDisplay | null>(null);
   const [previewStage, setPreviewStage] = useState<SalesStage>('sales_order');
+
+  // Add-Stage modal (issue a new stage document against an existing sale)
+  // Sales detail stage tabs: which issued stage document to display
+  // (null = show the CURRENT/latest stage on open)
+  const [detailStageTab, setDetailStageTab] = useState<string | null>(null);
+
+  // Stage-issue mode: the ⋮ popover's "Create Sales Order"/"Issue GST Tax
+  // Invoice" opens the SAME full form modal (edit-dialog style), pre-seeded
+  // with the sale's current-stage lines; submitting issues that stage doc.
+  const [stageIssueCtx, setStageIssueCtx] = useState<{
+    saleId: string;
+    saleNumber: string;
+    stageType: SalesStage;
+    inventoryApplied: boolean;
+    cashApplied: boolean;
+    transportCharges: number;
+    // Cash & Bank settlement already recorded on the sale (invoice stage)
+    settlementAccountId?: string;
+    settledAmount?: number;
+    settledDate?: string;
+  } | null>(null);
+
+  // Row-level ⋮ action popover (sales list). Rendered via PORTAL (fixed
+  // position above the page) so the list container's overflow-x-auto /
+  // overflow-hidden can never clip it.
+  const [rowActionMenuFor, setRowActionMenuFor] = useState<string | null>(null);
+  const [rowActionMenuPos, setRowActionMenuPos] = useState<{ top: number; right: number; flip: boolean } | null>(null);
+  const rowActionRef = React.useRef<HTMLDivElement | null>(null);
+  const rowMenuRef = React.useRef<HTMLDivElement | null>(null);
+
+  const closeRowActionMenu = () => {
+    setRowActionMenuFor(null);
+    setRowActionMenuPos(null);
+  };
+
+  React.useEffect(() => {
+    if (!rowActionMenuFor) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (rowActionRef.current && !rowActionRef.current.contains(t) &&
+          rowMenuRef.current && !rowMenuRef.current.contains(t)) {
+        closeRowActionMenu();
+      }
+    };
+    const handleMove = () => closeRowActionMenu();
+    document.addEventListener('mousedown', handleClickOutside);
+    window.addEventListener('scroll', handleMove, true);
+    window.addEventListener('resize', handleMove);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('scroll', handleMove, true);
+      window.removeEventListener('resize', handleMove);
+    };
+  }, [rowActionMenuFor]);
+
+  /**
+   * Sales stage hierarchy for the row ⋮ popover. The current (latest issued)
+   * stage gates what can still be issued — the user can NEVER create same-or-
+   * lower documents. Per direction: from quotation -> Sales Order, Proforma,
+   * Invoice; from sales_order -> Proforma + Invoice only (Delivery Note never
+   * appears in this menu); from proforma / delivery_note -> Invoice; from
+   * sales_invoice -> nothing (final).
+   */
+  // Sales stage ladder for the row ⋮ popover (user's exact rules):
+  //   quotation     -> Sales Order (row seeding from quotation), Invoice direct
+  //   sales_order   -> Invoice; "View Proforma" shows the SO as a proforma doc
+  //   sales_invoice -> sale LOCKED: no edit, no further stages, no cancel/delete
+  const salesStageActionMenu = (order: OrderDisplay): Array<{ stageType: SalesStage; label: string; icon: any }> => {
+    const current = order.stage || 'sales_order';
+    const menu: Array<{ stageType: SalesStage; label: string; icon: any }> = [];
+    if (current === 'sales_invoice') return menu; // locked
+    if (current === 'quotation') {
+      menu.push({ stageType: 'sales_order', label: 'Create Sales Order', icon: Layers });
+      menu.push({ stageType: 'sales_invoice', label: 'Issue GST Tax Invoice', icon: FileText });
+    } else {
+      // sales_order (and legacy proforma/delivery_note rows)
+      menu.push({ stageType: 'sales_invoice', label: 'Issue GST Tax Invoice', icon: FileText });
+    }
+    return menu;
+  };
+  const isSaleLocked = (order: OrderDisplay) => (order.stage || 'sales_order') === 'sales_invoice';
+  const editLabelFor = (order: OrderDisplay) =>
+    (order.stage || 'sales_order') === 'quotation' ? 'Edit Quotation' : 'Edit Sales Order';
+  const canViewProforma = (order: OrderDisplay) => {
+    const c = order.stage || 'sales_order';
+    return c === 'sales_order' || c === 'proforma_invoice' || c === 'delivery_note';
+  };
+
+  /**
+   * Opens the full sales form modal in STAGE-ISSUE mode: lines are seeded as
+   * an editable copy of the sale's current-stage items; submit issues the
+   * stage document (server stores these rows against the new stage).
+   */
+  const openIssueStageForm = (order: OrderDisplay, stageType: SalesStage) => {
+    const sale = sales.find((s) => s.id === order.id);
+    const display = sale ? saleToDisplay(sale) : order;
+    setStageIssueCtx({
+      saleId: order.id,
+      saleNumber: order.orderNumber,
+      stageType,
+      inventoryApplied: order.inventoryApplied,
+      cashApplied: order.cashApplied,
+      transportCharges: Number(order.transportCharges) || 0,
+      settlementAccountId: order.settlementAccountId,
+      settledAmount: order.settledAmount,
+      settledDate: order.settledDate,
+    });
+    setEditingOrder(null);
+    setFormType('sales');
+    setFormStage(stageType);
+    setFormDate(new Date().toISOString().split('T')[0]);
+    setFormPartyId(order.partyId === 'unassigned' ? '' : (order.partyId || ''));
+    setFormOrderNumber(suggestStageNumber('sales', stageType));
+    setFormNotes('');
+    setFormVehicleNo(order.vehicleNo || '');
+    setFormDriverName(order.driverName || '');
+    setFormTransportCharges(String(order.transportCharges || 0));
+    setIncludeLogistics(Number(order.transportCharges) > 0 || Boolean(order.vehicleNo || order.driverName));
+    setIncludePayment(false);
+    setFormAccountId(order.settlementAccountId || '');
+    setFormPaymentMode((order.paymentMode as any) || 'bank_transfer');
+    setUpdateInventory(!order.inventoryApplied);
+    setUpdateCash(false);
+    setFormItems(
+      display.items.map((i) => {
+        const prod = items.find((it) => it.id === i.itemId);
+        return {
+          itemId: i.itemId,
+          quantity: String(i.quantity),
+          rate: String(i.rate),
+          location: i.location || '',
+          gstRate: String(i.gstRate ?? prod?.taxRateGst ?? 0),
+        };
+      })
+    );
+    setFormError(null);
+    setIsFormOpen(true);
+  };
+
+  /** Opens the commercial-document preview for a SPECIFIC stage doc (its own
+   *  line values/totals), e.g. printing the quotation alone. */
+  const openStageDocPreview = (doc: StageDocDisplay) => {
+    if (!selectedOrder) return;
+    const subtotal = doc.items.reduce((sum, i) => sum + i.quantity * i.rate, 0);
+    const blendedRate = subtotal > 0 ? Math.round((doc.taxAmount / subtotal) * 10000) / 100 : 0;
+    setPreviewOrder({
+      ...selectedOrder,
+      stage: doc.stageType,
+      items: doc.items,
+      taxRateGst: blendedRate,
+      taxAmount: doc.taxAmount,
+      totalAmount: doc.totalAmount,
+      notes: doc.notes || selectedOrder.notes,
+    });
+    setPreviewStage(doc.stageType);
+    setIsPreviewOpen(true);
+  };
+
+  /** Renders ONE stage document card: doc header in its own format, the
+   *  stage's own line values, totals + its document actions. */
+  const renderStageDocCard = (doc: StageDocDisplay) => {
+    const meta = SALES_STAGE_META[doc.stageType] || SALES_STAGE_META.sales_order;
+    const MetaIcon = meta.icon;
+    return (
+      <div className="bg-[var(--color-surface-container)] rounded-2xl border border-[var(--color-outline-variant)] overflow-hidden">
+        {/* Doc header */}
+        <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-2 bg-[var(--color-surface-container-high)]/60 border-b border-[var(--color-outline-variant)]/60">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <MetaIcon className={`w-4 h-4 ${meta.tone} shrink-0`} />
+            <div className="min-w-0">
+              <p className="text-xs font-black text-[var(--color-on-surface)] truncate">
+                {meta.label} <span className="text-[var(--color-on-surface-variant)] font-semibold">· {doc.stageNumber}</span>
+              </p>
+              <p className="text-[10px] text-[var(--color-on-surface-variant)] font-medium">Issued {doc.date}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            
+            <button
+              type="button"
+              onClick={() => openStageDocPreview(doc)}
+              className="flex items-center gap-1 px-3 py-1.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-[10px] font-bold hover:opacity-90 transition-all"
+            >
+              <Printer className="w-3 h-3" /> Open document
+            </button>
+            {doc.stageType === 'sales_order' && (
+              <button
+                type="button"
+                onClick={() => {
+                  setPreviewOrder(selectedOrder);
+                  setPreviewStage('proforma_invoice');
+                  setIsPreviewOpen(true);
+                }}
+                className="flex items-center gap-1 px-3 py-1.5 border border-[var(--color-primary)]/40 text-[var(--color-primary)] rounded-full text-[10px] font-bold hover:bg-[var(--color-primary-container)]/30 transition-all"
+              >
+                <Receipt className="w-3 h-3" /> View Proforma
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Doc line items (its own values) */}
+        <div className="px-2 py-2">
+          <table className="w-full text-left text-[11px]">
+            <thead>
+              <tr className="text-[var(--color-on-surface-variant)] font-bold text-[9px] uppercase tracking-wider">
+                <th className="py-1.5 px-2">Item</th>
+                <th className="py-1.5 px-2">Location</th>
+                <th className="py-1.5 px-2 text-right">Qty</th>
+                <th className="py-1.5 px-2 text-right">Rate</th>
+                <th className="py-1.5 px-2 text-right">GST</th>
+                <th className="py-1.5 px-2 text-right">Amount</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--color-outline-variant)]/50">
+              {doc.items.map((i, idx) => (
+                <tr key={idx}>
+                  <td className="py-1.5 px-2 font-semibold text-[var(--color-on-surface)] truncate max-w-[220px]">
+                    {i.itemCode ? `${i.itemCode} (${i.itemName})` : i.itemName}
+                  </td>
+                  <td className="py-1.5 px-2 text-[var(--color-on-surface-variant)] font-medium">{i.location || 'Default Yard'}</td>
+                  <td className="py-1.5 px-2 text-right font-bold text-[var(--color-on-surface)]">{i.quantity.toLocaleString('en-IN')} {i.unit}</td>
+                  <td className="py-1.5 px-2 text-right text-[var(--color-on-surface-variant)]">{formatCurrency2(i.rate)}</td>
+                  <td className="py-1.5 px-2 text-right text-[var(--color-on-surface-variant)]">{i.gstRate ?? 0}%</td>
+                  <td className="py-1.5 px-2 text-right font-bold text-[var(--color-on-surface)]">{formatCurrency2(i.amount)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Doc totals */}
+        <div className="px-4 py-2.5 border-t border-[var(--color-outline-variant)]/60 flex items-center justify-end gap-4 text-[11px]">
+          <span className="text-[var(--color-on-surface-variant)]">Subtotal: <strong className="text-[var(--color-on-surface)]">{formatCurrency2(doc.subtotal)}</strong></span>
+          <span className="text-[var(--color-on-surface-variant)]">GST: <strong className="text-[var(--color-on-surface)]">{formatCurrency2(doc.taxAmount)}</strong></span>
+          <span className="text-[var(--color-on-surface-variant)]">Total: <strong className="text-[var(--color-primary)]">{formatCurrency2(doc.totalAmount)}</strong></span>
+        </div>
+
+        {/* Doc settlement info — Cash & Bank wiring for the invoice stage */}
+        {doc.stageType === 'sales_invoice' && selectedOrder && (
+          <div className="px-4 py-2.5 border-t border-[var(--color-outline-variant)]/60 flex flex-wrap items-center justify-between gap-2 text-[10px] bg-[var(--color-surface-container-lowest)]">
+            <span className="text-[var(--color-on-surface-variant)]">
+              Invoice voucher: <strong className="text-[var(--color-on-surface)] font-mono">{selectedOrder.invoiceVoucherNumber || '—'}</strong>
+            </span>
+            {selectedOrder.settlementVoucherNumber ? (
+              <span className="text-[var(--color-on-surface-variant)]">
+                Settled {(selectedOrder.settledAmount !== undefined ? formatCurrency2(selectedOrder.settledAmount) : '')}
+                {(selectedOrder.paymentMode ? ` · ${(selectedOrder.paymentMode === 'upi' ? 'UPI' : selectedOrder.paymentMode === 'bank_transfer' ? 'Bank Transfer / IMPS' : selectedOrder.paymentMode === 'neft_rtgs' ? 'NEFT / RTGS' : selectedOrder.paymentMode === 'cheque' ? 'Cheque / DD' : 'Cash')}` : '')}
+                {' — '}<strong className="text-[var(--color-on-surface)]">{selectedOrder.settlementAccountName || 'Cash/Bank'}</strong>
+                {' · Receipt '}{selectedOrder.settlementVoucherNumber ? <strong className="text-[var(--color-on-surface)] font-mono">{selectedOrder.settlementVoucherNumber}</strong> : '—'}
+              </span>
+            ) : (
+              <span className="text-[var(--color-on-surface-variant)] italic">Booked on credit — settle later under Cash &amp; Bank / Party ledger</span>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   // Currency Formatter
   const formatCurrency = (amount: number) => {
@@ -144,21 +681,26 @@ export function OrdersView({
     }).format(amount);
   };
 
-  const currentOrders = useMemo(() => {
-    if (fixedType) {
-      return orders.filter((o) => o.type === fixedType);
-    }
-    return orders;
-  }, [orders, fixedType]);
+  // Amounts are approximated to 2 decimal places (paise) across the modal:
+  // math keeps floats, but every figure displayed / saved is rounded to 2dp.
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const formatCurrency2 = (amount: number) => {
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: settings.currency?.code || 'INR',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(round2(amount));
+  };
 
-  // Filter parties based on order type
-  const eligibleParties = useMemo(() => {
-    if (formType === 'sales') {
-      return parties.filter((p) => p.type === 'customer' || p.type === 'both');
-    } else {
-      return parties.filter((p) => p.type === 'vendor' || p.type === 'both');
+  const currentOrders = useMemo(() => {
+    const saleDisplays = sales.map(saleToDisplay);
+    const purchaseDisplays = purchaseOrders.map(purchaseToDisplay);
+    if (fixedType) {
+      return (fixedType === 'sales' ? saleDisplays : purchaseDisplays).filter((o) => o.type === fixedType);
     }
-  }, [parties, formType]);
+    return [...saleDisplays, ...purchaseDisplays];
+  }, [sales, purchaseOrders, fixedType]);
 
   // Filter physical items (products) for the order dropdown
   const productItems = useMemo(() => {
@@ -173,16 +715,17 @@ export function OrdersView({
     let completedCount = 0;
 
     currentOrders.forEach((o) => {
-      if (o.status === 'cancelled') return;
+      const st = o.status ?? 'pending';
+      if (st === 'cancelled') return;
       if (o.type === 'sales') {
         salesTotal += o.totalAmount;
       } else if (o.purchaseStage !== 'rfq') {
         purchaseTotal += o.totalAmount;
       }
 
-      if (o.status === 'pending' || o.status === 'partially_delivered') {
+      if (st === 'pending' || st === 'partially_delivered') {
         pendingCount++;
-      } else if (o.status === 'completed') {
+      } else if (st === 'completed') {
         completedCount++;
       }
     });
@@ -194,19 +737,48 @@ export function OrdersView({
   const filteredOrders = useMemo(() => {
     return currentOrders.filter((o) => {
       const matchesSearch =
-        o.orderNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        o.partyName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        o.items.some((item) => item.itemName.toLowerCase().includes(searchTerm.toLowerCase()));
+        (o.orderNumber || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (o.partyName || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+        o.items.some((item) => (item.itemName || '').toLowerCase().includes(searchTerm.toLowerCase()));
 
       const matchesType = fixedType ? true : (typeFilter === 'all' || o.type === typeFilter);
-      const matchesStatus = statusFilter === 'all' || o.status === statusFilter;
 
-      return matchesSearch && matchesType && matchesStatus;
+      return matchesSearch && matchesType;
     });
-  }, [currentOrders, searchTerm, typeFilter, statusFilter, fixedType]);
+  }, [currentOrders, searchTerm, typeFilter, fixedType]);
+
+  // Next document number suggestion per stage type (client-side hint only;
+  // server enforces uniqueness on the issued number).
+  const suggestStageNumber = (kind: 'sales' | 'purchase', stageType?: string): string => {
+    const year = new Date().getFullYear();
+    const prefixMap: Record<string, string> = {
+      quotation: 'QUO',
+      sales_order: 'SO',
+      proforma_invoice: 'PROF',
+      delivery_note: 'DC',
+      sales_invoice: 'INV',
+      rfq: 'RFQ',
+      purchase_order: 'PO',
+      goods_receipt: 'GRN',
+    };
+    const prefix = prefixMap[stageType || ''] || (kind === 'sales' ? 'SO' : 'PO');
+    const known = new Set<string>([
+      ...sales.map((s) => s.saleNumber),
+      ...purchaseOrders.map((p) => p.purchaseNumber),
+      ...sales.flatMap((s) => (s.stages || []).map((st) => st.stageNumber)),
+      ...purchaseOrders.flatMap((p) => (p.stages || []).map((st) => st.stageNumber)),
+    ]);
+    let num = 1;
+    while (num < 9999) {
+      const candidate = `${prefix}-${year}-${String(num).padStart(4, '0')}`;
+      if (!known.has(candidate)) return candidate;
+      num++;
+    }
+    return `${prefix}-${year}-${Date.now().toString().slice(-4)}`;
+  };
 
   // Handle open Form Modal for Create
-  const handleOpenCreate = (type: OrderType) => {
+  const handleOpenCreate = (type: OrderType, stage?: SalesStage) => {
     const resolvedType = fixedType || type;
     if (resolvedType === 'purchase') {
       setEditingPurchaseOrder(null);
@@ -216,45 +788,33 @@ export function OrdersView({
 
     setFormType(resolvedType);
     setEditingOrder(null);
+    setStageIssueCtx(null);
     setFormDate(new Date().toISOString().split('T')[0]);
     setFormPartyId('');
-    setFormStatus('pending');
-    setFormItems([{ itemId: '', quantity: '', rate: '', location: '' }]);
-    // Pre-select default item tax rate if available
-    const initialItem = productItems[0];
-    const initialTax = initialItem?.taxRateGst !== undefined ? String(initialItem.taxRateGst) : '18';
-    setFormTaxRate(initialTax);
+    setFormItems([{ itemId: '', quantity: '', rate: '', location: '', gstRate: '' }]);
     setFormNotes('');
-    setFormStage('quotation');
+    setFormStage(stage || 'quotation');
     setFormVehicleNo('');
     setFormDriverName('');
     setFormTransportCharges('0');
+    setUpdateInventory(false);
+    setUpdateCash(false);
     setIncludePayment(false);
-    setIncludeLogistics(false);
-    
-    // Auto-select default active account
-    const activeAccs = localDb.getAccounts().filter((a) => a.isActive);
-    const defaultAcc = activeAccs.find((a) => a.isDefault) || activeAccs[0];
-    setFormPaymentMode('bank_transfer');
-    setFormAccountId(defaultAcc ? defaultAcc.id : '');
-    
-    // Auto-generate realistic order number
-    const prefix = resolvedType === 'sales' ? 'SO' : 'PO';
-    const typeCount = orders.filter(o => o.type === resolvedType).length;
-    const num = String(typeCount + 1).padStart(4, '0');
-    const year = new Date().getFullYear();
-    setFormOrderNumber(`${prefix}-${year}-${num}`);
+    setFormAccountId('');
+    setFormPaymentMode('bank_transfer' as any);
+
+
+    // Document number suggested per the chosen starting stage
+    setFormOrderNumber(suggestStageNumber('sales', stage || 'quotation'));
     setFormError(null);
-    
+
     setIsFormOpen(true);
   };
 
   React.useEffect(() => {
     const handleHeaderAction = (e: Event) => {
       const customEvent = e as CustomEvent;
-      if (fixedType === 'sales' && customEvent.detail === 'book-order') {
-        handleOpenCreate('sales');
-      } else if (
+      if (
         fixedType === 'purchase' &&
         (customEvent.detail === 'create-po' || customEvent.detail === 'add-purchase')
       ) {
@@ -263,32 +823,35 @@ export function OrdersView({
     };
     window.addEventListener('app-header-action', handleHeaderAction);
     return () => window.removeEventListener('app-header-action', handleHeaderAction);
-  }, [fixedType, orders.length]);
+  }, [fixedType, sales.length + purchaseOrders.length]);
 
-  // Handle save from AddPurchaseModal
-  const handleSavePurchaseOrder = (savedOrder: Order) => {
-    const exists = orders.some((o) => o.id === savedOrder.id);
-    if (exists) {
-      onUpdateOrder(savedOrder.id, savedOrder);
-    } else {
-      onAddOrder(savedOrder);
-    }
-    if (selectedOrder && selectedOrder.id === savedOrder.id) {
-      setSelectedOrder(savedOrder);
-    }
-  };
+  // Close the stage-selection popover when clicking outside it
+  React.useEffect(() => {
+    if (!isStageMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (stageMenuRef.current && !stageMenuRef.current.contains(e.target as Node)) {
+        setIsStageMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isStageMenuOpen]);
+
+  // Handle the AddPurchaseModal response (server-minted record already swaps
+  // into cloudStore; the detail view follows via sync — nothing to route here).
 
   // Handle cancel from AddPurchaseModal
   const handleCancelPurchaseOrder = (orderId: string) => {
-    onUpdateOrder(orderId, { status: 'cancelled' });
+    onUpdatePurchase(orderId, { status: 'cancelled' });
     if (selectedOrder && selectedOrder.id === orderId) {
       setSelectedOrder((prev) => (prev ? { ...prev, status: 'cancelled' } : null));
     }
   };
 
   // Handle open Form Modal for Edit
-  const handleOpenEdit = (order: Order, e: React.MouseEvent) => {
+  const handleOpenEdit = (order: OrderDisplay, e: React.MouseEvent) => {
     e.stopPropagation();
+    setStageIssueCtx(null);
     if (order.type === 'purchase') {
       setEditingPurchaseOrder(order);
       setIsPurchaseModalOpen(true);
@@ -298,25 +861,32 @@ export function OrdersView({
     setFormType(order.type);
     setFormDate(order.date);
     setFormPartyId(order.partyId);
-    setFormStatus(order.status);
-    setFormTaxRate(String(order.taxRateGst));
     setFormNotes(order.notes || '');
-    setFormOrderNumber(order.orderNumber);
-    setFormStage(order.stage || 'sales_order');
+    // Prefill with the CURRENT stage's document number (sales-order number
+    // at SO stage, quotation number at quotation stage) — number is immutable
+    setFormOrderNumber((order.stageNumbers || [])[((order.stageNumbers || []).length) - 1]?.number || order.orderNumber);
+    setFormStage((order.stage || 'sales_order') as SalesStage);
     setFormVehicleNo(order.vehicleNo || '');
     setFormDriverName(order.driverName || '');
     setFormTransportCharges(String(order.transportCharges || 0));
-    setFormPaymentMode(order.paymentMode || 'bank_transfer');
-    setFormAccountId(order.accountId || '');
-    setIncludePayment(Boolean(order.accountId && (order.paymentStatus === 'paid' || order.status === 'completed')));
-    setIncludeLogistics(Boolean(order.vehicleNo || order.driverName || (Number(order.transportCharges) > 0)));
+    setUpdateInventory(order.inventoryApplied ? false : true);
+    setUpdateCash(false);
+    // Settlement only exists on the invoice stage — never carry a stale
+    // settle toggle/account from a previously opened invoice form here.
+    setIncludePayment(false);
+    setFormAccountId('');
+    setFormPaymentMode('bank_transfer' as any);
     setFormItems(
-      order.items.map((i) => ({
-        itemId: i.itemId,
-        quantity: String(i.quantity),
-        rate: String(i.rate),
-        location: i.location || '',
-      }))
+      order.items.map((i) => {
+        const prod = items.find((it) => it.id === i.itemId);
+        return {
+          itemId: i.itemId,
+          quantity: String(i.quantity),
+          rate: String(i.rate),
+          location: i.location || '',
+          gstRate: String(i.gstRate ?? prod?.taxRateGst ?? 0),
+        };
+      })
     );
     setFormError(null);
     setIsFormOpen(true);
@@ -324,7 +894,7 @@ export function OrdersView({
 
   // Handle row addition in items form
   const handleAddFormItemRow = () => {
-    setFormItems([...formItems, { itemId: '', quantity: '', rate: '', location: '' }]);
+    setFormItems([...formItems, { itemId: '', quantity: '', rate: '', location: '', gstRate: '' }]);
   };
 
   // Handle row removal in items form
@@ -338,7 +908,7 @@ export function OrdersView({
   };
 
   // Handle field change inside items rows
-  const handleFormItemChange = (index: number, field: 'itemId' | 'quantity' | 'rate' | 'location', value: string) => {
+  const handleFormItemChange = (index: number, field: 'itemId' | 'quantity' | 'rate' | 'location' | 'gstRate', value: string) => {
     const updated = [...formItems];
     updated[index][field] = value;
 
@@ -371,9 +941,7 @@ export function OrdersView({
           updated[index].location = '';
         }
         // Auto-reflect the GST slab configured on this inventory item
-        if (selectedProduct.taxRateGst !== undefined) {
-          setFormTaxRate(String(selectedProduct.taxRateGst));
-        }
+        updated[index].gstRate = String(selectedProduct.taxRateGst ?? 0);
       } else {
         updated[index].location = '';
       }
@@ -381,24 +949,32 @@ export function OrdersView({
     setFormItems(updated);
   };
 
-  // Calculate dynamic subtotals for form
+  // Calculate dynamic subtotals for form (tax is per-item, so it is summed row by row)
   const formCalculations = useMemo(() => {
     let subtotal = 0;
+    let taxAmount = 0;
     formItems.forEach((row) => {
       const qty = Number(row.quantity) || 0;
       const rate = Number(row.rate) || 0;
-      subtotal += qty * rate;
+      const gstRate = Number(row.gstRate) || 0;
+      const lineTotal = qty * rate;
+      subtotal += lineTotal;
+      taxAmount += (lineTotal * gstRate) / 100;
     });
 
     const transportCharges = includeLogistics ? (Number(formTransportCharges) || 0) : 0;
-    const taxRate = Number(formTaxRate) || 0;
-    const taxAmount = (subtotal * taxRate) / 100;
-    const totalAmount = subtotal + taxAmount + transportCharges;
+    // Weighted-average slab kept on the order row for single-rate consumers
+    // (detail view / print); individual slabs live on each item row.
+    // All figures are approximated to 2 decimal places (paise).
+    const subtotal2 = round2(subtotal);
+    const taxAmount2 = round2(taxAmount);
+    const blendedGstRate = subtotal2 > 0 ? Math.round((taxAmount2 / subtotal2) * 10000) / 100 : 0;
+    const totalAmount = round2(subtotal2 + taxAmount2 + transportCharges);
 
-    return { subtotal, taxAmount, totalAmount, transportCharges };
-  }, [formItems, formTaxRate, formTransportCharges, includeLogistics]);
+    return { subtotal: subtotal2, taxAmount: taxAmount2, totalAmount, transportCharges, blendedGstRate };
+  }, [formItems, formTransportCharges, includeLogistics]);
 
-  // Save/Submit order form
+  // Save/Submit order form (SALES — create master+first stage, or master edit)
   const handleSubmitOrder = (e: React.FormEvent) => {
     e.preventDefault();
     if (!formPartyId) {
@@ -406,25 +982,21 @@ export function OrdersView({
       return;
     }
 
-    let selectedAccount = undefined;
-    if (includePayment) {
+    if (formStage === 'sales_invoice' && includePayment) {
       if (!formPaymentMode) {
         setFormError('Please select a Payment Mode.');
         return;
       }
-
       if (!formAccountId) {
         setFormError(`Please select a ${formType === 'sales' ? 'Deposit / Settlement Account (where money will be credited)' : 'Disbursement Account (where money will be debited)'}.`);
         return;
       }
-
-      selectedAccount = accounts.find((a) => a.id === formAccountId);
-      if (!selectedAccount) {
+      if (!accounts.find((a) => a.id === formAccountId)) {
         setFormError('The selected Cash/Bank account is invalid. Please select an active account from the list.');
         return;
       }
     }
-    
+
     // Validate rows
     const validRows = formItems.filter((row) => row.itemId && Number(row.quantity) > 0 && Number(row.rate) > 0);
     if (validRows.length === 0) {
@@ -435,8 +1007,8 @@ export function OrdersView({
     const party = parties.find((p) => p.id === formPartyId);
     if (!party) return;
 
-    // Map rows to OrderItem format
-    const itemsList: OrderItem[] = validRows.map((row) => {
+    // Map rows to item-input format (server resolves FKs: item/unit/location)
+    const itemsList = validRows.map((row) => {
       const product = items.find((i) => i.id === row.itemId)!;
       const qty = Number(row.quantity);
       const rate = Number(row.rate);
@@ -448,67 +1020,104 @@ export function OrdersView({
       const assignedLoc = row.location?.trim() || prodLocs[0]?.locationName || undefined;
       return {
         itemId: row.itemId,
-        itemName: product.name,
         quantity: qty,
-        unit: product.unit,
         rate: rate,
-        amount: qty * rate,
-        location: assignedLoc,
+        gstRate: Number(row.gstRate) || 0,
+        locationName: assignedLoc,
+        receivedQuantity: (formType === 'purchase') ? qty : undefined,
       };
     });
 
     const { taxAmount, totalAmount } = formCalculations;
 
-    const payload = {
-      orderNumber: formOrderNumber.trim(),
-      type: formType,
-      partyId: formPartyId,
-      partyName: party.tradeName || party.name,
-      date: formDate,
-      status: formStatus,
-      stage: formType === 'sales' ? formStage : undefined,
-      items: itemsList,
-      taxRateGst: Number(formTaxRate) || 0,
-      taxAmount: taxAmount,
-      totalAmount: totalAmount,
-      notes: formNotes.trim(),
-      vehicleNo: includeLogistics && formVehicleNo.trim() ? formVehicleNo.trim() : undefined,
-      driverName: includeLogistics && formDriverName.trim() ? formDriverName.trim() : undefined,
-      transportCharges: includeLogistics ? (Number(formTransportCharges) || 0) : 0,
-      paymentMode: includePayment ? formPaymentMode : undefined,
-      accountId: includePayment ? formAccountId : undefined,
-      accountName: includePayment && selectedAccount ? selectedAccount.name : undefined,
-      paymentStatus: includePayment ? ('paid' as const) : ('pending' as const),
-    };
+    if (stageIssueCtx) {
+      // STAGE-ISSUE mode: submit issues the new stage document; the lines
+      // become that stage's own rows (editable copy of the current stage).
+      onAddSaleStage(stageIssueCtx.saleId, {
+        stageType: stageIssueCtx.stageType,
+        stageNumber: formOrderNumber.trim(),
+        date: formDate,
+        notes: formNotes.trim() || undefined,
+        partyId: formPartyId || undefined,
+        updateInventory,
+        // "Settle Payment Now" = the cash application one-shot: posts the
+        // payment_in receipt voucher against the chosen account on the server.
+        updateCash: includePayment,
+        settlementAccountId: formAccountId || undefined,
+        paymentMode: formPaymentMode,
+        items: itemsList,
+      });
+      setStageIssueCtx(null);
+      setIsFormOpen(false);
+      return;
+    }
 
     if (editingOrder) {
-      onUpdateOrder(editingOrder.id, payload);
+      // Master edit: items/notes/logistics/date — stages stay untouched.
+      onUpdateSale(editingOrder.id, {
+        partyId: formPartyId,
+        date: formDate,
+        notes: formNotes.trim(),
+        vehicleNo: includeLogistics && formVehicleNo.trim() ? formVehicleNo.trim() : undefined,
+        driverName: includeLogistics && formDriverName.trim() ? formDriverName.trim() : undefined,
+        transportCharges: includeLogistics ? (Number(formTransportCharges) || 0) : 0,
+        items: itemsList,
+        subtotal: formCalculations.subtotal,
+        taxAmount,
+        totalAmount,
+      });
     } else {
-      onAddOrder(payload);
+      // Create: master + first stage document (+ toggles for the ONE-SHOT
+      // inventory / cash application)
+      onAddSale({
+        saleNumber: formOrderNumber.trim(),
+        partyId: formPartyId,
+        date: formDate,
+        notes: formNotes.trim(),
+        vehicleNo: includeLogistics && formVehicleNo.trim() ? formVehicleNo.trim() : undefined,
+        driverName: includeLogistics && formDriverName.trim() ? formDriverName.trim() : undefined,
+        transportCharges: includeLogistics ? (Number(formTransportCharges) || 0) : 0,
+        items: itemsList,
+        subtotal: formCalculations.subtotal,
+        taxAmount,
+        totalAmount,
+        stage: {
+          stageType: formStage,
+          stageNumber: formOrderNumber.trim(),
+          date: formDate,
+          notes: formNotes.trim(),
+          updateInventory,
+          // "Settle Payment Now" = the cash application one-shot: posts the
+          // payment_in receipt voucher against the chosen account on the server.
+          updateCash: includePayment,
+          settlementAccountId: formAccountId || undefined,
+          paymentMode: formPaymentMode,
+        },
+      });
     }
 
     setIsFormOpen(false);
   };
 
-  const handleDeleteOrderClick = (order: Order, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setOrderToDelete(order);
-  };
-
-  const handleConfirmDelete = () => {
-    if (!orderToDelete) return;
-    const targetId = orderToDelete.id;
-    onDeleteOrder(targetId);
-    if (selectedOrder?.id === targetId) {
-      setIsDetailOpen(false);
-    }
-    setOrderToDelete(null);
-  };
-
-  const handleOpenDetail = (order: Order) => {
+  const handleOpenDetail = (order: OrderDisplay) => {
+    setDetailStageTab(null); // default: show the current stage's document
     setSelectedOrder(order);
     setIsDetailOpen(true);
   };
+
+  // Keep the open detail view in step with fresh data (resync) — e.g. after
+  // issuing a stage from within the detail modal, its stage list updates.
+  React.useEffect(() => {
+    if (!isDetailOpen || !selectedOrder) return;
+    if (selectedOrder.type === 'purchase') {
+      const fresh = purchaseOrders.find((p) => p.id === selectedOrder.id);
+      if (fresh) setSelectedOrder(purchaseToDisplay(fresh));
+      return;
+    }
+    const freshSale = sales.find((sc) => sc.id === selectedOrder.id);
+    if (freshSale) setSelectedOrder(saleToDisplay(freshSale));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ sales, purchaseOrders ]);
 
   // Dynamic lookup for linked Trip Slip if any
   const linkedTripSlip = useMemo(() => {
@@ -569,11 +1178,11 @@ export function OrdersView({
 
             <div className="p-4 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl flex items-center justify-between shadow-xs">
               <div>
-                <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Active Customers</p>
+                <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Total Parties</p>
                 <p className="text-lg font-black text-[var(--color-primary)] mt-1">
-                  {parties.filter(p => p.type === 'customer' || p.type === 'both').length} Clients
+                  {parties.length} Parties
                 </p>
-                <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">Registered contract buyers</p>
+                <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">Registered party directory</p>
               </div>
               <div className="w-10 h-10 rounded-xl bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)] flex items-center justify-center">
                 <User className="w-5 h-5" />
@@ -726,39 +1335,52 @@ export function OrdersView({
             </div>
           )}
 
-          {/* Status Filter */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] flex items-center gap-1">
-              <Filter className="w-3 h-3" /> Status:
-            </span>
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as any)}
-              className="bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] px-3 py-1 focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)]"
+          {/* New Order Button (+ Sales Document Stage Popover) */}
+          <div className="relative" ref={stageMenuRef}>
+            <button
+              type="button"
+              onClick={() => {
+                if (fixedType === 'purchase') {
+                  handleOpenCreate('purchase');
+                } else {
+                  setIsStageMenuOpen((open) => !open);
+                }
+              }}
+              className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-bold text-xs rounded-full transition-all shadow-xs active:scale-95"
             >
-              <option value="all">All Statuses</option>
-              <option value="pending">Pending</option>
-              <option value="partially_delivered">Partially Delivered</option>
-              <option value="completed">Completed</option>
-              <option value="cancelled">Cancelled</option>
-            </select>
+              <Plus className="w-3.5 h-3.5" />
+              <span>{fixedType === 'sales' ? 'Add Sale' : fixedType === 'purchase' ? 'Add Purchase' : 'New Order'}</span>
+            </button>
+
+            {isStageMenuOpen && fixedType !== 'purchase' && (
+              <div className="absolute right-0 top-[calc(100%+6px)] z-30 w-56 rounded-2xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] shadow-lg overflow-hidden">
+                <p className="px-3 pt-3 pb-2 text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
+                  Create Sales Document
+                </p>
+                {[
+                  { id: 'quotation', label: 'Quotation', desc: 'Price Quote — starts a new sale' },
+                  { id: 'sales_order', label: 'Sales Order', desc: 'Confirmed outbound sale' },
+                  { id: 'sales_invoice', label: 'Invoice', desc: 'Final GST Bill — locks the sale' },
+                ].map((step) => (
+                  <button
+                    key={step.id}
+                    type="button"
+                    onClick={() => {
+                      setIsStageMenuOpen(false);
+                      handleOpenCreate('sales', step.id as SalesStage);
+                    }}
+                    className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50"
+                  >
+                    <div>
+                      <p className="text-xs font-bold text-[var(--color-on-surface)]">{step.label}</p>
+                      <p className="text-[10px] text-[var(--color-on-surface-variant)]">{step.desc}</p>
+                    </div>
+                    <ChevronRight className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
-
-          {/* Cloud Database indicator */}
-          <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-[var(--color-surface-container)] text-[var(--color-primary)] border border-[var(--color-outline-variant)]">
-            <Database className="w-3 h-3 text-[var(--color-primary)]" />
-            <span>Azure Cloud DB</span>
-          </span>
-
-          {/* New Order Button */}
-          <button
-            type="button"
-            onClick={() => handleOpenCreate(fixedType || 'sales')}
-            className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-bold text-xs rounded-full transition-all shadow-xs active:scale-95"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>{fixedType === 'sales' ? 'Book Sales Order' : fixedType === 'purchase' ? 'Add Purchase' : 'New Order'}</span>
-          </button>
         </div>
       </div>
 
@@ -768,21 +1390,21 @@ export function OrdersView({
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-                <th className="py-3.5 px-4">Order Ref / Date</th>
+                <th className="py-3.5 px-4">Date</th>
                 {!fixedType && <th className="py-3.5 px-3">Type</th>}
                 {fixedType === 'sales' && <th className="py-3.5 px-3">Sales Stage</th>}
                 {fixedType === 'purchase' && <th className="py-3.5 px-3">Purchase Stage</th>}
                 <th className="py-3.5 px-3">Party Name</th>
+                <th className="py-3.5 px-3">Stock / Cash</th>
                 <th className="py-3.5 px-3">Materials Ordered</th>
                 <th className="py-3.5 px-3 text-right">Total Amount</th>
-                <th className="py-3.5 px-3">Status</th>
                 <th className="py-3.5 px-4 text-center">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--color-outline-variant)]/60">
               {filteredOrders.length === 0 ? (
                 <tr>
-                  <td colSpan={!fixedType || fixedType === 'sales' || fixedType === 'purchase' ? 7 : 6} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                  <td colSpan={!fixedType ? 8 : 7} className="py-12 text-center text-[var(--color-on-surface-variant)]">
                     <FileText className="w-8 h-8 mx-auto text-[var(--color-outline-variant)] mb-2" />
                     <p className="text-xs font-bold">No Orders Found</p>
                     <p className="text-[10px] mt-0.5">Try widening search tags or filters.</p>
@@ -797,10 +1419,9 @@ export function OrdersView({
                       onClick={() => handleOpenDetail(order)}
                       className="hover:bg-[var(--color-surface-container-high)]/40 transition-colors cursor-pointer text-xs"
                     >
-                      {/* Order Ref & Date */}
+                      {/* Date */}
                       <td className="py-3.5 px-4">
-                        <div className="font-bold text-[var(--color-on-surface)]">{order.orderNumber}</div>
-                        <div className="text-[10px] text-[var(--color-on-surface-variant)] font-medium mt-0.5 flex items-center gap-1">
+                        <div className="font-bold text-[var(--color-on-surface)] flex items-center gap-1">
                           <Calendar className="w-3 h-3 text-[var(--color-on-surface-variant)]" /> {order.date}
                         </div>
                       </td>
@@ -896,28 +1517,52 @@ export function OrdersView({
                         </td>
                       )}
 
-                      {/* Party Name & Linked Settlement Account */}
+                      {/* Party Name — legal name; trade name on the next line */}
                       <td className="py-3.5 px-3">
                         <div className="font-bold text-[var(--color-on-surface)] max-w-[180px] truncate">
                           {order.purchaseStage === 'rfq' && (!order.partyName || order.partyName.includes('Unassigned') || order.partyId === 'unassigned') ? (
                             <span className="italic text-[var(--color-on-surface-variant)] font-semibold">Unassigned (RFQ)</span>
                           ) : (
-                            order.partyName
+                            parties.find((p) => p.id === order.partyId)?.name || order.partyName || '—'
                           )}
                         </div>
-                        {order.accountId ? (
-                          <div className="text-[10px] text-[var(--color-on-surface-variant)] font-semibold mt-1 flex items-center gap-1.5">
-                            <Landmark className="w-3 h-3 text-[var(--color-primary)] shrink-0" />
-                            <span className="truncate max-w-[110px]">{order.accountName || 'Linked A/c'}</span>
-                            <span className="capitalize text-[9px] bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] px-1.5 py-0.5 rounded font-bold shrink-0">
-                              {(order.paymentMode || 'bank_transfer').replace('_', ' ')}
-                            </span>
-                          </div>
-                        ) : (
-                          <div className="text-[10px] text-[var(--color-on-surface-variant)] font-medium mt-1">
-                            {order.purchaseStage === 'rfq' ? 'RFQ Ingestion' : 'Unsettled Credit'}
-                          </div>
-                        )}
+                        {(() => {
+                          const party = parties.find((p) => p.id === order.partyId);
+                          if (order.purchaseStage === 'rfq' && (!order.partyName || order.partyName.includes('Unassigned') || order.partyId === 'unassigned')) return null;
+                          return party?.tradeName ? (
+                            <div className="text-[10px] text-[var(--color-on-surface-variant)] font-medium mt-0.5 max-w-[180px] truncate">
+                              ({party.tradeName})
+                            </div>
+                          ) : null;
+                        })()}
+                      </td>
+
+                      {/* One-shot application flags (Stock / Cash) */}
+                      <td className="py-3.5 px-3">
+                        <div className="flex flex-col items-start gap-1">
+                          <span
+                            title={order.inventoryApplied ? 'Stockyard inventory applied (one-shot)' : 'Inventory not applied yet'}
+                            className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide ${
+                              order.inventoryApplied
+                                ? 'bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]'
+                                : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
+                            }`}
+                          >
+                            <Boxes className="w-2.5 h-2.5" /> {order.inventoryApplied ? 'Stock ✓' : 'Stock —'}
+                          </span>
+                          <span
+                            title={order.cashApplied
+                              ? `Cash applied — receipt voucher ${order.settlementVoucherNumber || ''} posted to ${order.settlementAccountName || 'Cash & Bank'}`
+                              : 'Cash not applied yet — booked on credit'}
+                            className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide ${
+                              order.cashApplied
+                                ? 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
+                                : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
+                            }`}
+                          >
+                            <Landmark className="w-2.5 h-2.5" /> {order.cashApplied ? 'Cash ✓' : 'Cash —'}
+                          </span>
+                        </div>
                       </td>
 
                       {/* Materials Summary */}
@@ -958,59 +1603,49 @@ export function OrdersView({
                         )}
                       </td>
 
-                      {/* Status Badge */}
-                      <td className="py-3.5 px-3">
-                        <span
-                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
-                            order.status === 'completed'
-                              ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-                              : order.status === 'pending'
-                              ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
-                              : order.status === 'partially_delivered'
-                              ? 'bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]'
-                              : 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
-                          }`}
-                        >
-                          {order.status === 'completed' && <CheckCircle2 className="w-3 h-3" />}
-                          {order.status === 'pending' && <Clock className="w-3 h-3" />}
-                          {order.status === 'partially_delivered' && <Layers className="w-3 h-3" />}
-                          {order.status === 'cancelled' && <Ban className="w-3 h-3" />}
-                          {order.status.replace('_', ' ').toUpperCase()}
-                        </span>
-                      </td>
-
-                      {/* Action buttons */}
+                      {/* Action buttons — ⋮ opens a portal popover (fixed above the page) */}
                       <td className="py-3.5 px-4 text-center">
                         <div className="flex items-center justify-center gap-2">
-                          <button
-                            type="button"
-                            title="View Details"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleOpenDetail(order);
-                            }}
-                            className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)] rounded-full transition-colors"
-                          >
-                            <Eye className="w-4 h-4" />
-                          </button>
-                          
-                          <button
-                            type="button"
-                            title="Edit Order"
-                            onClick={(e) => handleOpenEdit(order, e)}
-                            className="p-1.5 text-[var(--color-primary)] hover:opacity-80 hover:bg-[var(--color-primary-container)]/30 rounded-full transition-colors"
-                          >
-                            <Edit3 className="w-4 h-4" />
-                          </button>
-
-                          <button
-                            type="button"
-                            title="Delete Order"
-                            onClick={(e) => handleDeleteOrderClick(order, e)}
-                            className="p-1.5 text-[var(--color-error)] hover:opacity-80 hover:bg-[var(--color-error-container)]/30 rounded-full transition-colors"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                          {isSales ? (
+                            <div className="relative" ref={rowActionRef}>
+                              <button
+                                type="button"
+                                title="More Actions"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (rowActionMenuFor === order.id) {
+                                    closeRowActionMenu();
+                                    return;
+                                  }
+                                  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                  // flip above the button when nothing fits underneath
+                                  const flip = rect.bottom + 270 > window.innerHeight;
+                                  setRowActionMenuPos({
+                                    top: flip ? rect.top : rect.bottom,
+                                    right: window.innerWidth - rect.right,
+                                    flip,
+                                  });
+                                  setRowActionMenuFor(order.id);
+                                }}
+                                className={`p-1.5 rounded-full transition-colors ${
+                                  rowActionMenuFor === order.id
+                                    ? 'text-[var(--color-on-surface)] bg-[var(--color-surface-container-highest)]'
+                                    : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)]'
+                                }`}
+                              >
+                                <MoreVertical className="w-4 h-4" />
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              title="Edit Purchase"
+                              onClick={(e) => handleOpenEdit(order, e)}
+                              className="p-1.5 text-[var(--color-primary)] hover:opacity-80 hover:bg-[var(--color-primary-container)]/30 rounded-full transition-colors"
+                            >
+                              <Edit3 className="w-4 h-4" />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -1022,32 +1657,134 @@ export function OrdersView({
         </div>
       </div>
 
+      {/* Row action popover — PORTAL: fixed on the page so the list container
+          (overflow-x-auto / overflow-hidden) can never clip it */}
+      {rowActionMenuFor && rowActionMenuPos && createPortal(
+        <div
+          ref={rowMenuRef}
+          style={{
+            position: 'fixed',
+            top: rowActionMenuPos.flip ? rowActionMenuPos.top - 4 : rowActionMenuPos.top + 4,
+            right: Math.max(8, rowActionMenuPos.right + 8),
+            transform: rowActionMenuPos.flip ? 'translateY(-100%)' : 'none',
+          }}
+          className="z-[60] w-60 max-w-[calc(100vw-16px)] rounded-2xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] shadow-2xl overflow-hidden text-left"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <p className="px-3 pt-2.5 pb-1.5 text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
+            Actions — {filteredOrders.find((o) => o.id === rowActionMenuFor)?.orderNumber || ''}
+          </p>
+          {(() => {
+            const target = filteredOrders.find((o) => o.id === rowActionMenuFor);
+            if (!target) return null;
+            if (isSaleLocked(target)) {
+              return (
+                <div className="px-3 py-3 border-t border-[var(--color-outline-variant)]/50 text-[10px] font-bold text-[var(--color-error)] flex items-center gap-2">
+                  <Ban className="w-3.5 h-3.5" /> Sale locked — invoice issued
+                </div>
+              );
+            }
+            return (
+              <>
+                {/* Edit Sale */}
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={(e) => {
+                    closeRowActionMenu();
+                    handleOpenEdit(target, e);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-left text-[11px] font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50"
+                >
+                  <Edit3 className="w-3.5 h-3.5 text-[var(--color-primary)]" />
+                  {editLabelFor(target)}
+                </button>
+                {/* View Proforma — renders the Sales Order in Proforma format */}
+                {canViewProforma(target) && (
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      closeRowActionMenu();
+                      setPreviewOrder(target);
+                      setPreviewStage('proforma_invoice');
+                      setIsPreviewOpen(true);
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-left text-[11px] font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50"
+                  >
+                    <Receipt className="w-3.5 h-3.5 text-[var(--color-primary)]" />
+                    View Proforma
+                  </button>
+                )}
+                {/* Higher-hierarchy stage actions */}
+                {salesStageActionMenu(target).map((sa) => {
+                  const StageIcon = sa.icon;
+                  return (
+                    <button
+                      key={sa.stageType}
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        closeRowActionMenu();
+                        openIssueStageForm(target, sa.stageType);
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-left text-[11px] font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50"
+                    >
+                      <StageIcon className="w-3.5 h-3.5 text-[var(--color-primary)] shrink-0" />
+                      <span className="flex-1">{sa.label}</span>
+                    </button>
+                  );
+                })}
+              </>
+            );
+          })()}
+        </div>,
+        document.body
+      )}
+
       {/* --- FORM MODAL FOR CREATE & EDIT --- */}
       {isFormOpen && (
         <div className="fixed inset-0 z-50 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-[var(--color-surface)] rounded-3xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl border border-[var(--color-outline-variant)] animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-[var(--color-surface)] rounded-3xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl border border-[var(--color-outline-variant)] animate-in fade-in zoom-in-95 duration-150">
             {/* Header */}
             <div className="px-6 py-4 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
               <div className="flex items-center gap-2.5">
                 <div
                   className={`w-10 h-10 rounded-2xl flex items-center justify-center font-bold ${
-                    formType === 'sales' ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]' : 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
+                    stageIssueCtx?.stageType === 'sales_invoice' || (formType === 'sales' && !stageIssueCtx)
+                      ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
+                      : 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
                   }`}
                 >
                   {formType === 'sales' ? <ArrowUpRight className="w-5 h-5" /> : <ArrowDownLeft className="w-5 h-5" />}
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-[var(--color-on-surface)]">
-                    {editingOrder ? `Edit Order: ${formOrderNumber}` : `Book New ${formType === 'sales' ? 'Sales (Outward)' : 'Purchase (Inward)'} Order`}
+                    {(() => {
+                      if (stageIssueCtx) {
+                        return stageIssueCtx.stageType === 'sales_order'
+                          ? `Create Sales Order — ${stageIssueCtx.saleNumber}`
+                          : `Issue GST Tax Invoice — ${stageIssueCtx.saleNumber}`;
+                      }
+                      if (editingOrder) return `${editingOrder.stage === 'quotation' ? 'Edit Quotation' : 'Edit Sales Order'}: ${formOrderNumber}`;
+                      const stageTitles: Record<string, string> = {
+                        quotation: 'New Sales Quotation',
+                        sales_order: 'New Sales Order',
+                        proforma_invoice: 'New Proforma Invoice',
+                        delivery_note: 'New Delivery Note / Challan',
+                        sales_invoice: 'New Sales Invoice',
+                      };
+                      return stageTitles[formStage] || 'New Sales Order';
+                    })()}
                   </h3>
-                  <p className="text-[10px] text-[var(--color-on-surface-variant)]">
-                    Registered orders automatically adjust live item balances and log transactions in history.
-                  </p>
                 </div>
               </div>
               <button
                 type="button"
-                onClick={() => setIsFormOpen(false)}
+                onClick={() => {
+                  setStageIssueCtx(null);
+                  setIsFormOpen(false);
+                }}
                 className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)] rounded-full transition-colors"
               >
                 <X className="w-5 h-5" />
@@ -1069,15 +1806,19 @@ export function OrdersView({
               )}
 
               {/* Core Details Row */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Order Number</label>
                   <input
                     type="text"
                     required
+                    disabled={Boolean(editingOrder)}
+                    title={editingOrder ? 'Document number is locked for existing stage documents' : undefined}
                     value={formOrderNumber}
                     onChange={(e) => setFormOrderNumber(e.target.value)}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                    className={`w-full px-4 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${
+                      editingOrder ? 'opacity-60 cursor-not-allowed' : ''
+                    }`}
                   />
                 </div>
 
@@ -1091,48 +1832,240 @@ export function OrdersView({
                     className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                   />
                 </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Fulfillment Status</label>
-                  <select
-                    value={formStatus}
-                    onChange={(e) => setFormStatus(e.target.value as OrderStatus)}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                  >
-                    <option value="pending">Pending</option>
-                    <option value="partially_delivered">Partially Delivered</option>
-                    <option value="completed">Completed / Fulfilled</option>
-                    <option value="cancelled">Cancelled</option>
-                  </select>
-                </div>
               </div>
 
-              {/* Party Selection Row */}
+              {/* Party Selection Row (hidden entirely while issuing the invoice) */}
               <div>
+                {stageIssueCtx?.stageType === 'sales_invoice' ? null : (
+                <>
                 <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                  Select {formType === 'sales' ? 'Customer (Client / Dispatch to)' : 'Vendor (Supplier / Procured from)'}
+                  Select Party
                 </label>
                 <select
                   required
+                  disabled={Boolean(editingOrder) || Boolean(stageIssueCtx)}
+                  title={(editingOrder || stageIssueCtx) ? 'Party is locked once the sale is created against it' : undefined}
                   value={formPartyId}
                   onChange={(e) => setFormPartyId(e.target.value)}
-                  className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                  className={`w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${
+                    (editingOrder || stageIssueCtx) ? 'opacity-60 cursor-not-allowed' : ''
+                  }`}
                 >
                   <option value="">-- Choose Party --</option>
-                  {eligibleParties.map((p) => (
+                  {parties.map((p) => (
                     <option key={p.id} value={p.id}>
-                      {p.tradeName || p.name} ({p.category}) {p.gstin ? `| GSTIN: ${p.gstin}` : ''}
+                      {p.name}{p.tradeName ? ` (${p.tradeName})` : ''} {p.gstin ? `| GSTIN: ${p.gstin}` : ''}
                     </option>
                   ))}
                 </select>
-                {eligibleParties.length === 0 && (
+                {parties.length === 0 && (
                   <p className="text-[10px] text-[var(--color-error)] mt-1 ml-2">
-                    No parties found matching the requested type. Please add a relevant party under Party Directory.
+                    No parties found. Please add a party under Party Directory.
                   </p>
+                )}
+                {(editingOrder || stageIssueCtx) && (
+                  <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-1 ml-2 flex items-center gap-1">
+                    <Lock className="w-3 h-3" /> Party is locked — set at sale creation and cannot be changed.
+                  </p>
+                )}
+                </>
                 )}
               </div>
 
-              {/* Payment Mode & Cash/Bank Settlement Account (Optional Switch) */}
+              {/* Items Table Sub-Form — hidden entirely while issuing the invoice:
+                  order number/date -> settlement -> inventory toggles */}
+              {stageIssueCtx?.stageType !== 'sales_invoice' && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-1.5">
+                    <Boxes className="w-4 h-4 text-[var(--color-primary)]" /> Material Line Items
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={handleAddFormItemRow}
+                    className="flex items-center gap-1 text-[11px] font-bold text-[var(--color-primary)] hover:opacity-80 transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Add Row
+                  </button>
+                </div>
+
+                {/* No overflow-hidden here: the item-search dropdown must be
+                    able to escape the table; corners are rounded on the
+                    thead/tbody cells instead. */}
+                <div className="border border-[var(--color-outline-variant)] rounded-2xl bg-[var(--color-surface-container)]">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] font-bold text-[10px] uppercase border-b border-[var(--color-outline-variant)]">
+                        <th className="py-2.5 px-3 min-w-[240px] first:rounded-tl-2xl">Item / Product</th>
+                        <th className="py-2.5 px-3 w-44">{formType === 'sales' ? 'Dispatch Location' : 'Receiving Location'}</th>
+                        <th className="py-2.5 px-3 w-28">Quantity</th>
+                        <th className="py-2.5 px-3 w-28">Rate ({settings.currency?.symbol || '₹'})</th>
+                        <th className="py-2.5 px-3 w-24">GST Slab</th>
+                        <th className="py-2.5 px-3 w-32 text-right">Line Total</th>
+                        <th className="py-2.5 px-3 w-10 text-center last:rounded-tr-2xl"></th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--color-outline-variant)]/60 [&>tr:last-child>td:first-child]:rounded-bl-2xl [&>tr:last-child>td:last-child]:rounded-br-2xl">
+                      {formItems.map((row, idx) => {
+                        const selectedProd = productItems.find((p) => p.id === row.itemId);
+                        const lineTotal = (Number(row.quantity) || 0) * (Number(row.rate) || 0);
+
+                        // Multi-location options for this product
+                        const rawItemLocs = selectedProd?.locations && selectedProd.locations.length > 0
+                          ? selectedProd.locations
+                          : (selectedProd?.stockLocation
+                              ? selectedProd.stockLocation.split(',').map((s) => ({ locationName: s.trim(), currentStock: selectedProd.currentStock || 0 }))
+                              : []);
+                        const seenRowLocs = new Set<string>();
+                        const prodLocations = rawItemLocs.filter((l) => {
+                          const n = l.locationName?.trim();
+                          if (!n || seenRowLocs.has(n.toLowerCase())) return false;
+                          seenRowLocs.add(n.toLowerCase());
+                          return true;
+                        });
+                        const matchedLocStock = prodLocations.find(
+                          (l) => l.locationName.toLowerCase().trim() === row.location.toLowerCase().trim()
+                        );
+
+                        const currentLocStock = matchedLocStock ? Number(matchedLocStock.currentStock || 0) : (selectedProd?.currentStock || 0);
+                        const isStockInsufficient = formType === 'sales' && selectedProd && Number(row.quantity) > currentLocStock;
+
+                        return (
+                          <tr key={idx} className="bg-[var(--color-surface-container-lowest)]">
+                            {/* Material selection (typable, searchable by code or name) */}
+                            <td className="py-2 px-3">
+                              <SearchableSelect
+                                value={row.itemId}
+                                onChange={(v) => handleFormItemChange(idx, 'itemId', v)}
+                                placeholder="Type item code or name..."
+                                closedDisplay={selectedProd ? `${selectedProd.code} (${selectedProd.name})` : ''}
+                                options={productItems.map((p) => ({
+                                  value: p.id,
+                                  label: p.code,
+                                  sub: `(${p.name}) · Qty: ${p.currentStock || 0} ${p.unit}`,
+                                }))}
+                              />
+                            </td>
+
+                            {/* Location selection (typable, searchable) */}
+                            <td className="py-2 px-3">
+                              {!selectedProd ? (
+                                <SearchableSelect
+                                  value=""
+                                  onChange={() => {}}
+                                  disabledText="-- Select Item First --"
+                                />
+                              ) : prodLocations.length === 0 ? (
+                                <SearchableSelect
+                                  value=""
+                                  onChange={() => {}}
+                                  disabledText="No location added"
+                                />
+                              ) : (
+                                (() => {
+                                  const stockLabel = (stock: number | undefined) =>
+                                    `${formType === 'sales' ? 'Avail' : 'Stock'}: ${stock ?? 0} ${selectedProd.unit}`;
+                                  const selectedLocName = row.location || prodLocations[0].locationName;
+                                  const selectedLoc = prodLocations.find((l) => l.locationName === selectedLocName) || prodLocations[0];
+                                  return (
+                                    <SearchableSelect
+                                      value={selectedLocName}
+                                      onChange={(v) => handleFormItemChange(idx, 'location', v)}
+                                      placeholder="Type location name..."
+                                      closedDisplay={`${selectedLoc.locationName} (${stockLabel(selectedLoc.currentStock)})`}
+                                      options={prodLocations.map((loc) => ({
+                                        value: loc.locationName,
+                                        label: loc.locationName,
+                                        sub: stockLabel(loc.currentStock),
+                                      }))}
+                                    />
+                                  );
+                                })()
+                              )}
+                              {isStockInsufficient && (
+                                <p className="text-[10px] text-[var(--color-error)] font-bold mt-0.5">
+                                  ⚠️ Stock at {row.location || 'yard'} ({currentLocStock} {selectedProd?.unit}) is less than order qty
+                                </p>
+                              )}
+                            </td>
+
+                            {/* Quantity */}
+                            <td className="py-2 px-3">
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="number"
+                                  step="any"
+                                  required
+                                  placeholder="0"
+                                  value={row.quantity}
+                                  onChange={(e) => handleFormItemChange(idx, 'quantity', e.target.value)}
+                                  className="w-full bg-transparent border-b border-transparent focus:border-[var(--color-primary)] text-xs font-bold text-[var(--color-on-surface)] focus:outline-none"
+                                />
+                                {selectedProd && <span className="text-[10px] text-[var(--color-on-surface-variant)] font-semibold">{selectedProd.unit}</span>}
+                              </div>
+                            </td>
+
+                            {/* Rate */}
+                            <td className="py-2 px-3">
+                              <input
+                                type="number"
+                                step="any"
+                                required
+                                placeholder="0.00"
+                                value={row.rate}
+                                onChange={(e) => handleFormItemChange(idx, 'rate', e.target.value)}
+                                className="w-full bg-transparent border-b border-transparent focus:border-[var(--color-primary)] text-xs font-bold text-[var(--color-on-surface)] focus:outline-none"
+                              />
+                            </td>
+
+                            {/* GST Slab (per item, typable/searchable) */}
+                            <td className="py-2 px-3">
+                              <SearchableSelect
+                                value={row.gstRate}
+                                onChange={(v) => handleFormItemChange(idx, 'gstRate', v)}
+                                disabledText={!selectedProd ? '--' : undefined}
+                                closedDisplay={row.gstRate === '' ? '--' : undefined}
+                                options={[
+                                  { value: '', label: '--' },
+                                  { value: '0', label: '0% (GST Exempt)' },
+                                  { value: '5', label: '5% (Transportation / Raw GSB)' },
+                                  { value: '12', label: '12% (Machinery / Consumables)' },
+                                  { value: '18', label: '18% (Standard Hot Asphalt / Bitumen)' },
+                                  { value: '28', label: '28% (Luxury / Spares)' },
+                                  ...(row.gstRate !== '' && !['0', '5', '12', '18', '28'].includes(row.gstRate)
+                                    ? [{ value: row.gstRate, label: `${row.gstRate}% (Item Default Slab)` }]
+                                    : []),
+                                ]}
+                              />
+                            </td>
+
+                            {/* Line Total */}
+                            <td className="py-2 px-3 text-right text-xs font-bold text-[var(--color-on-surface)]">
+                              {formatCurrency2(lineTotal)}
+                            </td>
+
+                            {/* Remove Row Button */}
+                            <td className="py-2 px-3 text-center">
+                              <button
+                                type="button"
+                                disabled={formItems.length === 1}
+                                onClick={() => handleRemoveFormItemRow(idx)}
+                                className="p-1 text-[var(--color-error)] hover:bg-[var(--color-error-container)]/30 disabled:opacity-30 rounded-full transition-colors"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              )}
+
+              {/* Payment Mode & Cash/Bank Settlement Account (Optional Switch) — Invoice Stage Only */}
+              {formStage === 'sales_invoice' && (
               <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3">
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <div className="flex items-center gap-2">
@@ -1151,27 +2084,35 @@ export function OrdersView({
                     </div>
                   </div>
 
-                  {/* Toggle Switch */}
-                  <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
+                  {/* Toggle Switch (locked ON once the payment voucher was posted) */}
+                  {(() => {
+                    const cashAlready = Boolean(stageIssueCtx?.cashApplied);
+                    const shown = cashAlready || includePayment;
+                    return (
+                    <label className={`inline-flex items-center gap-2.5 select-none ${cashAlready ? 'opacity-70' : 'cursor-pointer'}`}>
                     <span className="text-xs font-bold text-[var(--color-on-surface)]">
-                      {includePayment ? 'Settle Payment Now' : 'Book on Credit (Unpaid)'}
+                      {cashAlready ? 'Payment Already Settled' : includePayment ? 'Settle Payment Now' : 'Book on Credit (Unpaid)'}
                     </span>
                     <button
                       type="button"
                       role="switch"
-                      aria-checked={includePayment}
+                      aria-checked={shown}
+                      disabled={cashAlready}
+                      title={cashAlready ? 'Payment was already settled for this sale' : undefined}
                       onClick={() => setIncludePayment(!includePayment)}
-                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                        includePayment ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-surface-container-highest)]'
-                      }`}
+                      className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                        shown ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-surface-container-highest)]'
+                      } ${cashAlready ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                     >
                       <span
                         className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
-                          includePayment ? 'translate-x-5' : 'translate-x-0'
+                          shown ? 'translate-x-5' : 'translate-x-0'
                         }`}
                       />
                     </button>
                   </label>
+                    );
+                  })()}
                 </div>
 
                 {includePayment ? (
@@ -1204,8 +2145,9 @@ export function OrdersView({
                         <select
                           required={includePayment}
                           value={formAccountId}
+                          disabled={Boolean(stageIssueCtx?.cashApplied)}
                           onChange={(e) => setFormAccountId(e.target.value)}
-                          className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          className={`w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${stageIssueCtx?.cashApplied ? 'opacity-60 cursor-not-allowed' : ''}`}
                         >
                           <option value="">-- Choose Cash / Bank Account --</option>
                           {accounts
@@ -1249,6 +2191,20 @@ export function OrdersView({
                     )}
                   </div>
                 ) : (
+                  stageIssueCtx?.cashApplied ? (
+                  <div className="p-3 rounded-xl bg-[var(--color-success-container)]/40 border border-[var(--color-success)]/30 flex items-center justify-between text-xs text-[var(--color-on-surface-variant)]">
+                    <span className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-[var(--color-success)]" />
+                      <span>
+                        Payment of <strong className="text-[var(--color-on-surface)]">{formatCurrency(stageIssueCtx.settledAmount ?? 0)}</strong>{' '}
+                        was already settled into the sale's Cash/Bank account — no further voucher will be posted.
+                      </span>
+                    </span>
+                    <span className="text-[10px] font-bold text-[var(--color-on-success-container)] uppercase bg-[var(--color-success-container)] px-2.5 py-0.5 rounded-full shrink-0">
+                      Payment Settled
+                    </span>
+                  </div>
+                  ) : (
                   <div className="p-3 rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)]/60 flex items-center justify-between text-xs text-[var(--color-on-surface-variant)]">
                     <span className="flex items-center gap-2">
                       <span className="w-2 h-2 rounded-full bg-[var(--color-outline)]" />
@@ -1258,266 +2214,86 @@ export function OrdersView({
                       Credit {formType === 'sales' ? 'Sale' : 'Purchase'}
                     </span>
                   </div>
+                  )
                 )}
               </div>
+              )}
 
-              {/* Sales Document Stage Stepper Pipeline */}
-              {formType === 'sales' && (
-                <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-1.5">
-                      <ClipboardList className="w-4 h-4 text-[var(--color-primary)]" /> Sales Document Stage
-                    </h4>
-                    <span className="text-[9px] bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
-                      Step-by-Step Flow
-                    </span>
-                  </div>
-                  <p className="text-[10px] text-[var(--color-on-surface-variant)]">
-                    Where is this sale currently at? Click the correct step below to generate that document.
-                  </p>
+              {/* Stockyard Inventory & Cash application toggles — ONE-SHOT per order.
+                  Stock posts a sale_dispatch / purchase_inward movement at this
+                  stage save the first time the user enables it; the server refuses
+                  double application (master flag). Cash applies through the
+                  Payment Settlement section on the invoice stage (voucher
+                  posting — once per order). */}
+              {!editingOrder && (
+                <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2">
+                      <div className={`p-2 rounded-xl transition-colors ${updateInventory ? 'bg-[var(--color-primary-container)] text-[var(--color-primary)]' : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'}`}>
+                        <Boxes className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
+                          {formType === 'sales' ? 'Deduct Stockyard Inventory Now' : 'Receive Into Stockyard Inventory Now'}
+                        </h4>
+                        <p className="text-[10px] text-[var(--color-on-surface-variant)]">
+                          {stageIssueCtx?.inventoryApplied
+                            ? 'Inventory is already updated for this sale — no further stock movement will be written.'
+                            : stageIssueCtx?.stageType === 'sales_invoice'
+                            ? 'Issuing the invoice permanently updates this sale\'s inventory — it was not applied at an earlier stage, so the dispatch posts now and cannot be switched off.'
+                            : updateInventory
+                            ? (formType === 'sales'
+                              ? 'FIFO sale_dispatch ledger rows will be written at this stage save (one-time per sale)'
+                              : 'FIFO purchase_inward ledger rows will be written at this stage save (one-time per purchase)')
+                            : 'No stock movement yet — you can enable it later at any stage save (applies once)'}
+                        </p>
+                      </div>
+                    </div>
 
-                  <div className="grid grid-cols-5 gap-1.5 pt-1">
-                    {[
-                      { id: 'quotation', label: '1. Quotation', desc: 'Price Quote', badge: 'Draft' },
-                      { id: 'sales_order', label: '2. Sales Order', desc: 'Stock Booked', badge: 'Active' },
-                      { id: 'proforma_invoice', label: '3. Proforma', desc: 'Payment Demand', badge: 'Billing' },
-                      { id: 'delivery_note', label: '4. Delivery', desc: 'Dispatch slip', badge: 'Transit' },
-                      { id: 'sales_invoice', label: '5. Invoice', desc: 'Final GST bill', badge: 'Final' }
-                    ].map((step) => {
-                      const isActive = formStage === step.id;
-                      const index = ['quotation', 'sales_order', 'proforma_invoice', 'delivery_note', 'sales_invoice'].indexOf(step.id);
-                      const currentIndex = ['quotation', 'sales_order', 'proforma_invoice', 'delivery_note', 'sales_invoice'].indexOf(formStage);
-                      const isCompleted = index < currentIndex;
-
+                    {(() => {
+                      const already = Boolean(stageIssueCtx?.inventoryApplied);
+                      // Issuing the invoice: PERMANENT-ON — applies here if it
+                      // was not applied at the sales-order stage; cannot be
+                      // unchecked at this stage.
+                      const invoiceForcedOn = stageIssueCtx?.stageType === 'sales_invoice' && !already;
+                      const locked = already || invoiceForcedOn;
+                      const shown = locked || updateInventory;
                       return (
-                        <button
-                          key={step.id}
-                          type="button"
-                          onClick={() => setFormStage(step.id as SalesStage)}
-                          className={`p-2.5 rounded-xl text-left border flex flex-col justify-between h-20 transition-all ${
-                            isActive
-                              ? 'bg-[var(--color-primary)] border-[var(--color-primary)] text-[var(--color-on-primary)] shadow-xs scale-102 ring-2 ring-[var(--color-primary)]/15'
-                              : isCompleted
-                              ? 'bg-[var(--color-primary-container)] border-[var(--color-primary)]/20 text-[var(--color-on-primary-container)]'
-                              : 'bg-[var(--color-surface-container-lowest)] border-[var(--color-outline-variant)] text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)]'
+                    <label className={`inline-flex items-center gap-2.5 select-none ${locked ? 'opacity-70' : 'cursor-pointer'}`}>
+                      <span className="text-xs font-bold text-[var(--color-on-surface)]">
+                        {already ? 'Inventory Updated' : shown ? 'Update Inventory' : 'Inventory Untouched'}
+                      </span>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={shown}
+                        disabled={locked}
+                        title={already
+                          ? 'Inventory is already updated for this sale'
+                          : invoiceForcedOn
+                          ? 'Inventory must be updated when the invoice is issued — cannot be unchecked at this stage'
+                          : undefined}
+                        onClick={() => setUpdateInventory(!updateInventory)}
+                        className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                          shown ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-surface-container-highest)]'
+                        } ${already ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                            shown ? 'translate-x-5' : 'translate-x-0'
                           }`}
-                        >
-                          <div>
-                            <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded-md uppercase tracking-wider ${
-                              isActive
-                                ? 'bg-white/25 text-white'
-                                : isCompleted
-                                ? 'bg-[var(--color-primary)]/10 text-[var(--color-primary)]'
-                                : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)]'
-                            }`}>
-                              {step.badge}
-                            </span>
-                            <p className="text-[11px] font-black mt-1 leading-none">{step.label}</p>
-                          </div>
-                          <p className={`text-[8px] ${isActive ? 'text-white/80' : 'text-[var(--color-on-surface-variant)]'} font-semibold truncate w-full`}>
-                            {step.desc}
-                          </p>
-                        </button>
+                        />
+                      </button>
+                    </label>
                       );
-                    })}
-                  </div>
-
-                  {/* Dynamic Help Text Banner */}
-                  <div className="p-2.5 rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)]/60 flex items-center gap-2 text-[10px] text-[var(--color-on-surface-variant)]">
-                    {formStage === 'quotation' ? (
-                      <>
-                        <span className="w-2 h-2 rounded-full bg-[var(--color-outline)] animate-pulse" />
-                        <p className="font-semibold">
-                          ⚠️ <span className="text-[var(--color-on-surface)] font-bold">Quotation Stage selected:</span> Useful for pitching rates. <span className="text-[var(--color-error)] font-black">No material will be subtracted</span> from live stocks.
-                        </p>
-                      </>
-                    ) : (
-                      <>
-                        <span className="w-2 h-2 rounded-full bg-[var(--color-success)] animate-pulse" />
-                        <p className="font-semibold">
-                          📦 <span className="text-[var(--color-success)] font-bold">{formStage.replace('_', ' ').toUpperCase()} Stage selected:</span> This is a confirmed transaction. The system <span className="text-[var(--color-success)] font-black">will subtract these material quantities</span> from stock.
-                        </p>
-                      </>
-                    )}
+                    })()}
                   </div>
                 </div>
               )}
 
-              {/* Items Table Sub-Form */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-1.5">
-                    <Boxes className="w-4 h-4 text-[var(--color-primary)]" /> Material Line Items
-                  </h4>
-                  <button
-                    type="button"
-                    onClick={handleAddFormItemRow}
-                    className="flex items-center gap-1 text-[11px] font-bold text-[var(--color-primary)] hover:opacity-80 transition-colors"
-                  >
-                    <Plus className="w-3.5 h-3.5" /> Add Row
-                  </button>
-                </div>
-
-                <div className="border border-[var(--color-outline-variant)] rounded-2xl overflow-hidden bg-[var(--color-surface-container)]">
-                  <table className="w-full text-left">
-                    <thead>
-                      <tr className="bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] font-bold text-[10px] uppercase border-b border-[var(--color-outline-variant)]">
-                        <th className="py-2.5 px-3">Item / Product</th>
-                        <th className="py-2.5 px-3 w-44">{formType === 'sales' ? 'Dispatch Location' : 'Receiving Location'}</th>
-                        <th className="py-2.5 px-3 w-28">Quantity</th>
-                        <th className="py-2.5 px-3 w-32">Rate ({settings.currency?.symbol || '₹'})</th>
-                        <th className="py-2.5 px-3 w-32 text-right">Line Total</th>
-                        <th className="py-2.5 px-3 w-10 text-center"></th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[var(--color-outline-variant)]/60">
-                      {formItems.map((row, idx) => {
-                        const selectedProd = productItems.find((p) => p.id === row.itemId);
-                        const lineTotal = (Number(row.quantity) || 0) * (Number(row.rate) || 0);
-
-                        // Multi-location options for this product
-                        const rawItemLocs = selectedProd?.locations && selectedProd.locations.length > 0
-                          ? selectedProd.locations
-                          : (selectedProd?.stockLocation
-                              ? selectedProd.stockLocation.split(',').map((s) => ({ locationName: s.trim(), currentStock: selectedProd.currentStock || 0 }))
-                              : []);
-                        const seenRowLocs = new Set<string>();
-                        const prodLocations = rawItemLocs.filter((l) => {
-                          const n = l.locationName?.trim();
-                          if (!n || seenRowLocs.has(n.toLowerCase())) return false;
-                          seenRowLocs.add(n.toLowerCase());
-                          return true;
-                        });
-
-                        const matchedLocStock = prodLocations.find(
-                          (l) => l.locationName.toLowerCase().trim() === row.location.toLowerCase().trim()
-                        );
-                        const currentLocStock = matchedLocStock ? Number(matchedLocStock.currentStock || 0) : (selectedProd?.currentStock || 0);
-                        const isStockInsufficient = formType === 'sales' && selectedProd && Number(row.quantity) > currentLocStock;
-
-                        return (
-                          <tr key={idx} className="bg-[var(--color-surface-container-lowest)]">
-                            {/* Material selection */}
-                            <td className="py-2 px-3">
-                              <select
-                                required
-                                value={row.itemId}
-                                onChange={(e) => handleFormItemChange(idx, 'itemId', e.target.value)}
-                                className="w-full bg-transparent text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
-                              >
-                                <option value="">-- Choose Item --</option>
-                                {productItems.map((p) => (
-                                  <option key={p.id} value={p.id}>
-                                    {p.name} [{p.code}] (Total Stock: {p.currentStock || 0} {p.unit})
-                                  </option>
-                                ))}
-                              </select>
-                            </td>
-
-                            {/* Location selection */}
-                            <td className="py-2 px-3">
-                              {!selectedProd ? (
-                                <select
-                                  disabled
-                                  value=""
-                                  className="w-full bg-transparent text-xs font-medium text-[var(--color-outline)] cursor-not-allowed focus:outline-none"
-                                >
-                                  <option value="">-- Select Item First --</option>
-                                </select>
-                              ) : prodLocations.length === 1 ? (
-                                <select
-                                  value={prodLocations[0].locationName}
-                                  onChange={(e) => handleFormItemChange(idx, 'location', e.target.value)}
-                                  className="w-full bg-transparent text-xs font-bold text-[var(--color-on-surface)] focus:outline-none"
-                                >
-                                  <option value={prodLocations[0].locationName}>
-                                    {prodLocations[0].locationName} ({formType === 'sales' ? 'Avail' : 'Stock'}: {prodLocations[0].currentStock ?? 0} {selectedProd.unit})
-                                  </option>
-                                </select>
-                              ) : prodLocations.length > 1 ? (
-                                <select
-                                  value={row.location || prodLocations[0].locationName}
-                                  onChange={(e) => handleFormItemChange(idx, 'location', e.target.value)}
-                                  className="w-full bg-transparent text-xs font-semibold text-[var(--color-on-surface)] focus:outline-none"
-                                >
-                                  {prodLocations.map((loc, lIdx) => (
-                                    <option key={lIdx} value={loc.locationName}>
-                                      {loc.locationName} ({formType === 'sales' ? 'Avail' : 'Stock'}: {loc.currentStock ?? 0} {selectedProd.unit})
-                                    </option>
-                                  ))}
-                                </select>
-                              ) : (
-                                <select
-                                  disabled
-                                  value=""
-                                  className="w-full bg-transparent text-xs font-medium text-[var(--color-outline)] cursor-not-allowed focus:outline-none"
-                                >
-                                  <option value="">No location added</option>
-                                </select>
-                              )}
-                              {isStockInsufficient && (
-                                <p className="text-[10px] text-[var(--color-error)] font-bold mt-0.5">
-                                  ⚠️ Stock at {row.location || 'yard'} ({currentLocStock} {selectedProd?.unit}) is less than order qty
-                                </p>
-                              )}
-                            </td>
-
-                            {/* Quantity */}
-                            <td className="py-2 px-3">
-                              <div className="flex items-center gap-1">
-                                <input
-                                  type="number"
-                                  step="any"
-                                  required
-                                  placeholder="0"
-                                  value={row.quantity}
-                                  onChange={(e) => handleFormItemChange(idx, 'quantity', e.target.value)}
-                                  className="w-full bg-transparent border-b border-transparent focus:border-[var(--color-primary)] text-xs font-bold text-[var(--color-on-surface)] focus:outline-none"
-                                />
-                                {selectedProd && <span className="text-[10px] text-[var(--color-on-surface-variant)] font-semibold">{selectedProd.unit}</span>}
-                              </div>
-                            </td>
-
-                            {/* Rate */}
-                            <td className="py-2 px-3">
-                              <input
-                                type="number"
-                                step="any"
-                                required
-                                placeholder="0.00"
-                                value={row.rate}
-                                onChange={(e) => handleFormItemChange(idx, 'rate', e.target.value)}
-                                className="w-full bg-transparent border-b border-transparent focus:border-[var(--color-primary)] text-xs font-bold text-[var(--color-on-surface)] focus:outline-none"
-                              />
-                            </td>
-
-                            {/* Line Total */}
-                            <td className="py-2 px-3 text-right text-xs font-bold text-[var(--color-on-surface)]">
-                              {formatCurrency(lineTotal)}
-                            </td>
-
-                            {/* Remove Row Button */}
-                            <td className="py-2 px-3 text-center">
-                              <button
-                                type="button"
-                                disabled={formItems.length === 1}
-                                onClick={() => handleRemoveFormItemRow(idx)}
-                                className="p-1 text-[var(--color-error)] hover:bg-[var(--color-error-container)]/30 disabled:opacity-30 rounded-full transition-colors"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
               {/* Transport & Logistics Section (Optional Switch for Sales) */}
               {formType === 'sales' && (
-                <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3">
+                <div className="hidden bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3">
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <div className="flex items-center gap-2">
                       <div className={`p-2 rounded-xl transition-colors ${includeLogistics ? 'bg-[var(--color-primary-container)] text-[var(--color-primary)]' : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'}`}>
@@ -1535,8 +2311,8 @@ export function OrdersView({
                       </div>
                     </div>
 
-                    {/* Toggle Switch */}
-                    <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
+                    {/* Toggle Switch (disabled for now — logistics coming soon) */}
+                    <label className="inline-flex items-center gap-2.5 select-none opacity-60">
                       <span className="text-xs font-bold text-[var(--color-on-surface)]">
                         {includeLogistics ? 'Logistics Added' : 'No Transport'}
                       </span>
@@ -1544,16 +2320,9 @@ export function OrdersView({
                         type="button"
                         role="switch"
                         aria-checked={includeLogistics}
-                        onClick={() => {
-                          const next = !includeLogistics;
-                          setIncludeLogistics(next);
-                          if (!next) {
-                            setFormTransportCharges('0');
-                            setFormVehicleNo('');
-                            setFormDriverName('');
-                          }
-                        }}
-                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                        disabled
+                        title="Logistics assignment coming soon"
+                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-not-allowed rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                           includeLogistics ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-surface-container-highest)]'
                         }`}
                       >
@@ -1659,55 +2428,35 @@ export function OrdersView({
                   />
                 </div>
 
+                {/* Totals Summary — per-item GST summed across rows */}
                 <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-2 text-xs">
                   <div className="flex justify-between font-medium text-[var(--color-on-surface-variant)]">
                     <span>Material Subtotal:</span>
-                    <span className="font-bold text-[var(--color-on-surface)]">{formatCurrency(formCalculations.subtotal)}</span>
-                  </div>
-
-                  <div className="flex items-center justify-between gap-4 font-medium text-[var(--color-on-surface-variant)]">
-                    <span className="flex items-center gap-1">
-                      <Percent className="w-3 h-3" /> GST Slab Rate:
-                    </span>
-                    <select
-                      value={formTaxRate}
-                      onChange={(e) => setFormTaxRate(e.target.value)}
-                      className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] px-2 py-0.5 focus:outline-none"
-                    >
-                      <option value="0">0% (GST Exempt)</option>
-                      <option value="5">5% (Transportation / Raw GSB)</option>
-                      <option value="12">12% (Machinery / Consumables)</option>
-                      <option value="18">18% (Standard Hot Asphalt / Bitumen)</option>
-                      <option value="28">28% (Luxury / Spares)</option>
-                      {!['0', '5', '12', '18', '28'].includes(String(formTaxRate)) && (
-                        <option value={formTaxRate}>{formTaxRate}% (Item Default Slab)</option>
-                      )}
-                    </select>
+                    <span className="font-bold text-[var(--color-on-surface)]">{formatCurrency2(formCalculations.subtotal)}</span>
                   </div>
 
                   <div className="flex justify-between font-medium text-[var(--color-on-surface-variant)]">
-                    <span>GST Tax Amount ({formTaxRate}%):</span>
-                    <span className="font-bold text-[var(--color-on-surface)]">{formatCurrency(formCalculations.taxAmount)}</span>
+                    <span>Total GST (per-item slabs):</span>
+                    <span className="font-bold text-[var(--color-on-surface)]">{formatCurrency2(formCalculations.taxAmount)}</span>
                   </div>
+
+                  {formCalculations.transportCharges > 0 && (
+                    <div className="flex justify-between font-medium text-[var(--color-on-surface-variant)]">
+                      <span>Transport Charges:</span>
+                      <span className="font-bold text-[var(--color-on-surface)]">{formatCurrency2(formCalculations.transportCharges)}</span>
+                    </div>
+                  )}
 
                   <div className="h-px bg-[var(--color-outline-variant)] my-2" />
 
                   <div className="flex justify-between items-center text-sm font-black text-[var(--color-on-surface)]">
                     <span>Grand Total:</span>
-                    <span className="text-[var(--color-primary)] text-base">{formatCurrency(formCalculations.totalAmount)}</span>
+                    <span className="text-[var(--color-primary)] text-base">{formatCurrency2(formCalculations.totalAmount)}</span>
                   </div>
                 </div>
               </div>
 
               {/* Error/Notice */}
-              {formType === 'sales' && (
-                <div className="p-3.5 bg-[var(--color-warning-container)]/30 border border-[var(--color-warning)]/30 rounded-2xl text-[11px] text-[var(--color-on-warning-container)] flex items-start gap-2.5">
-                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-                  <div>
-                    <span className="font-bold">Stock Deduction Pre-warning:</span> When saved as Pending/Completed state, the system will deduct this sales order's quantities from your live stockpiles immediately.
-                  </div>
-                </div>
-              )}
               {formType === 'purchase' && (
                 <div className="p-3.5 bg-[var(--color-success-container)]/30 border border-[var(--color-success)]/30 rounded-2xl text-[11px] text-[var(--color-on-success-container)] flex items-start gap-2.5">
                   <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
@@ -1721,7 +2470,10 @@ export function OrdersView({
               <div className="flex items-center justify-end gap-3 pt-3 border-t border-[var(--color-outline-variant)]">
                 <button
                   type="button"
-                  onClick={() => setIsFormOpen(false)}
+                  onClick={() => {
+                    setStageIssueCtx(null);
+                    setIsFormOpen(false);
+                  }}
                   className="px-5 py-2.5 border border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] rounded-full text-xs font-semibold hover:bg-[var(--color-surface-container-high)] transition-colors"
                 >
                   Cancel
@@ -1730,7 +2482,7 @@ export function OrdersView({
                   type="submit"
                   className="px-6 py-2.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-semibold hover:opacity-90 transition-all shadow-xs"
                 >
-                  {editingOrder ? 'Save Changes' : 'Confirm Order Booking'}
+                  {editingOrder ? 'Save Changes' : 'Submit'}
                 </button>
               </div>
             </form>
@@ -1754,107 +2506,43 @@ export function OrdersView({
                 >
                   {selectedOrder.type === 'sales' ? 'Sales / Dispatch Order' : 'Purchase / Inward Order'}
                 </span>
-                <h3 className="text-base font-black text-[var(--color-on-surface)]">{selectedOrder.orderNumber}</h3>
-                <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">Booked on {selectedOrder.date}</p>
+                  {selectedOrder.type === 'sales' ? (
+                    <h3 className="text-base font-black text-[var(--color-on-surface)]">{selectedOrder.date}</h3>
+                  ) : (
+                    <>
+                      <h3 className="text-base font-black text-[var(--color-on-surface)]">{selectedOrder.orderNumber}</h3>
+                      <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">Booked on {selectedOrder.date}</p>
+                    </>
+                  )}
               </div>
-              <button
-                type="button"
-                onClick={() => setIsDetailOpen(false)}
-                className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)] rounded-full transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                {selectedOrder.type === 'purchase' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPreviewOrder(selectedOrder);
+                      setPreviewStage(selectedOrder.stage || 'sales_order');
+                      setIsPreviewOpen(true);
+                    }}
+                    title="Print this sale document"
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold hover:opacity-90 transition-all shadow-xs"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                    Print
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setIsDetailOpen(false)}
+                  className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)] rounded-full transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
             {/* Body */}
             <div className="p-6 space-y-5">
-              {/* Sales Document Stage & Live Printer Control */}
-              {selectedOrder.type === 'sales' && (
-                <div className="bg-[var(--color-surface-container)] p-4.5 rounded-2xl border border-[var(--color-outline-variant)] space-y-3.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-bold uppercase text-[var(--color-on-surface-variant)] tracking-wider flex items-center gap-1.5">
-                      <ClipboardList className="w-4 h-4 text-[var(--color-primary)]" /> Sales Document Stage Pipeline
-                    </span>
-                    <span className="text-[9px] font-extrabold text-[var(--color-on-primary-container)] bg-[var(--color-primary-container)] px-2.5 py-0.5 rounded-full uppercase tracking-wider">
-                      Interactive Stepper
-                    </span>
-                  </div>
-
-                  {/* Micro Stepper Flow */}
-                  <div className="grid grid-cols-5 gap-1.5">
-                    {[
-                      { id: 'quotation', label: '1. Quote', color: 'bg-[var(--color-outline)]', desc: 'No inventory impact' },
-                      { id: 'sales_order', label: '2. Order', color: 'bg-[var(--color-success)]', desc: 'Stock deducted' },
-                      { id: 'proforma_invoice', label: '3. Proforma', color: 'bg-[var(--color-primary)]', desc: 'Advance bill' },
-                      { id: 'delivery_note', label: '4. Challan', color: 'bg-[var(--color-warning)]', desc: 'Truck gate pass' },
-                      { id: 'sales_invoice', label: '5. Invoice', color: 'bg-[var(--color-success)]', desc: 'Final tax invoice' },
-                    ].map((step) => {
-                      const isCurrent = (selectedOrder.stage || 'sales_order') === step.id;
-                      return (
-                        <button
-                          key={step.id}
-                          type="button"
-                          onClick={() => {
-                            const updated = onUpdateOrder(selectedOrder.id, { stage: step.id as SalesStage });
-                            setSelectedOrder(updated);
-                          }}
-                          className={`py-2 px-1 rounded-xl text-center border text-[10px] font-bold transition-all ${
-                            isCurrent
-                              ? 'bg-[var(--color-surface-container-lowest)] text-[var(--color-primary)] border-[var(--color-primary)] shadow-xs ring-2 ring-[var(--color-primary)]/15 scale-102 font-extrabold'
-                              : 'bg-transparent text-[var(--color-on-surface-variant)] border-[var(--color-outline-variant)] hover:bg-[var(--color-surface-container-high)] hover:text-[var(--color-on-surface)]'
-                          }`}
-                          title={`${step.label}: ${step.desc}`}
-                        >
-                          <div className={`w-1.5 h-1.5 rounded-full mx-auto mb-1 ${step.color} ${isCurrent ? 'animate-pulse scale-125' : ''}`} />
-                          {step.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {/* Document Generation Action Box */}
-                  <div className="bg-[var(--color-surface-container-lowest)] p-3 rounded-xl border border-[var(--color-outline-variant)]/60 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xs">
-                    <div className="flex items-center gap-2.5 text-left">
-                      <div className="w-8 h-8 rounded-lg bg-[var(--color-primary-container)] flex items-center justify-center text-[var(--color-on-primary-container)] shrink-0">
-                        <FileText className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <p className="text-xs font-black text-[var(--color-on-surface)]">
-                          {(() => {
-                            const labels: Record<string, string> = {
-                              quotation: 'Sales Quotation Document',
-                              sales_order: 'Sales Order Confirmation',
-                              proforma_invoice: 'Proforma Commercial Invoice',
-                              delivery_note: 'Delivery Challan / Loading Note',
-                              sales_invoice: 'Official GST Tax Invoice',
-                            };
-                            return labels[selectedOrder.stage || 'sales_order'] || 'Sales Order Confirmation';
-                          })()}
-                        </p>
-                        <p className="text-[9px] text-[var(--color-on-surface-variant)]">
-                          {selectedOrder.stage === 'quotation'
-                            ? 'Draft rate offer pitch. (Note: Stockyard materials are NOT deducted.)'
-                            : 'Official order stage document. (Note: Stockyard materials ARE deducted.)'}
-                        </p>
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPreviewOrder(selectedOrder);
-                        setPreviewStage(selectedOrder.stage || 'sales_order');
-                        setIsPreviewOpen(true);
-                      }}
-                      className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold hover:opacity-90 transition-all shadow-xs shrink-0"
-                    >
-                      <Printer className="w-3.5 h-3.5" />
-                      Print Document
-                    </button>
-                  </div>
-                </div>
-              )}
-
               {/* Purchase 3-Stage Stepper & Document Box */}
               {selectedOrder.type === 'purchase' && (
                 <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3 shadow-xs">
@@ -1953,36 +2641,100 @@ export function OrdersView({
                 </div>
               )}
 
-              {/* Party Information & Payment Account */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="p-4 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-2xl flex items-start gap-3">
-                  <div className="w-9 h-9 rounded-xl bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface-variant)] flex items-center justify-center border border-[var(--color-outline-variant)] shrink-0">
-                    <User className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Party Details</h4>
-                    <p className="text-xs font-bold text-[var(--color-on-surface)] mt-0.5">{selectedOrder.partyName}</p>
-                    <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">Database reference: {selectedOrder.partyId}</p>
-                  </div>
-                </div>
-
-                <div className="p-4 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-2xl flex items-start gap-3">
-                  <div className="w-9 h-9 rounded-xl bg-[var(--color-surface-container-lowest)] text-[var(--color-primary)] flex items-center justify-center border border-[var(--color-outline-variant)] shrink-0">
-                    <Landmark className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-                      {selectedOrder.type === 'sales' ? 'Credited Settlement Account' : 'Debited Source Account'}
-                    </h4>
-                    <p className="text-xs font-bold text-[var(--color-on-surface)] mt-0.5">{selectedOrder.accountName || 'Primary Cash/Bank A/c'}</p>
-                    <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5 capitalize font-medium">
-                      Mode: {(selectedOrder.paymentMode || 'bank_transfer').replace('_', ' ')}
-                    </p>
-                  </div>
-                </div>
+              {/* Party (plain — no card) */}
+              <div>
+                <p className="text-xs font-black text-[var(--color-on-surface)]">
+                  {parties.find((p) => p.id === selectedOrder.partyId)?.name || selectedOrder.partyName || '—'}
+                </p>
+                {(() => {
+                  const party = parties.find((p) => p.id === selectedOrder.partyId);
+                  return party?.tradeName ? (
+                    <p className="text-[11px] text-[var(--color-on-surface-variant)] font-medium">({party.tradeName})</p>
+                  ) : null;
+                })()}
+                {(() => {
+                  const party = parties.find((p) => p.id === selectedOrder.partyId);
+                  return party?.category ? (
+                    <p className="text-[10px] text-[var(--color-on-surface-variant)] font-medium mt-0.5">{party.category}</p>
+                  ) : null;
+                })()}
               </div>
 
-              {/* Items List */}
+              {/* SALES — every issued stage document (values in its own format) + create buttons */}
+              {selectedOrder.type === 'sales' && (
+                <div className="space-y-3">
+                  <h4 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
+                    Stage Documents
+                  </h4>
+
+                  {(() => {
+                    const docs = selectedOrder.stageDocs || [];
+                    if (docs.length === 0) return null;
+                    const active = docs.find((d) => d.stageType === (detailStageTab || selectedOrder.stage)) || docs[docs.length - 1];
+                    return (
+                      <>
+                        {/* Stage tabs — click a stage to view its document data */}
+                        <div className="flex flex-wrap gap-1.5">
+                          {docs.map((d) => {
+                            const meta = SALES_STAGE_META[d.stageType] || SALES_STAGE_META.sales_order;
+                            const isActive = d.stageType === active.stageType;
+                            const isCurrent = d.stageType === (selectedOrder.stage || 'sales_order');
+                            return (
+                              <button
+                                key={d.stageType + d.stageNumber}
+                                type="button"
+                                onClick={() => setDetailStageTab(d.stageType)}
+                                className={`px-3.5 py-2 rounded-full text-[11px] font-bold transition-all border text-left ${
+                                  isActive
+                                    ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] border-[var(--color-primary)] shadow-xs'
+                                    : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] border-[var(--color-outline-variant)] hover:text-[var(--color-on-surface)]'
+                                }`}
+                              >
+                                <span className="flex items-center gap-1.5">
+                                  <meta.icon className="w-3.5 h-3.5 shrink-0" />
+                                  {meta.label}
+                                  {isCurrent && <span className={`text-[8px] uppercase tracking-wider px-1.5 py-0.5 rounded-full ${isActive ? 'bg-white/25' : 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'}`}>current</span>}
+                                </span>
+                                <span className={`block text-[9px] font-semibold mt-0.5 ${isActive ? 'opacity-80' : 'opacity-70'}`}>
+                                  {d.stageNumber} · {d.date}
+                                </span>
+                              </button>
+                            );
+                          })}
+                          {/* Next stages — as dashed create buttons in the tab row */}
+                          {!isSaleLocked(selectedOrder) && salesStageActionMenu(selectedOrder).map((sa) => {
+                            const StageIcon = sa.icon;
+                            return (
+                              <button
+                                key={sa.stageType}
+                                type="button"
+                                title={`Issue ${sa.label}`}
+                                onClick={() => openIssueStageForm(selectedOrder, sa.stageType)}
+                                className="flex flex-col items-start px-3.5 py-2 rounded-full text-[11px] font-bold border border-dashed border-[var(--color-primary)]/50 text-[var(--color-primary)] hover:bg-[var(--color-primary-container)]/30 transition-all"
+                              >
+                                <span className="flex items-center gap-1">
+                                  <StageIcon className="w-3.5 h-3.5" />+ {sa.label}
+                                </span>
+                              </button>
+                            );
+                          })}
+                          {isSaleLocked(selectedOrder) && (
+                            <span className="flex items-center gap-1.5 px-3 py-2 rounded-full text-[10px] font-bold text-[var(--color-error)] bg-[var(--color-error-container)]/25 border border-[var(--color-error)]/30">
+                              <Ban className="w-3 h-3" /> Sale locked — invoice issued
+                            </span>
+                          )}
+                        </div>
+
+                        {/* The active stage document */}
+                        {renderStageDocCard(active)}
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {/* Items List (PURCHASES) */}
+              {selectedOrder.type === 'purchase' && (
               <div className="space-y-2">
                 <h4 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider">Material Details</h4>
                 <div className="border border-[var(--color-outline-variant)] rounded-2xl overflow-hidden">
@@ -2001,7 +2753,9 @@ export function OrdersView({
                     <tbody className="divide-y divide-[var(--color-outline-variant)]/60">
                       {selectedOrder.items.map((i, index) => (
                         <tr key={index} className="bg-[var(--color-surface-container-lowest)]">
-                          <td className="py-2.5 px-3 font-semibold text-[var(--color-on-surface)]">{i.itemName}</td>
+                          <td className="py-2.5 px-3 font-semibold text-[var(--color-on-surface)]">
+                            {i.itemCode ? `${i.itemCode} (${i.itemName})` : i.itemName}
+                          </td>
                           <td className="py-2.5 px-3">
                             {i.location ? (
                               <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]">
@@ -2036,63 +2790,12 @@ export function OrdersView({
                   </table>
                 </div>
               </div>
+              )}
 
-              {/* Financial calculations */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="space-y-1.5 text-xs text-[var(--color-on-surface-variant)]">
-                  <div>
-                    <strong className="text-[var(--color-on-surface)]">Notes / Instructions:</strong>
-                    <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-1 bg-[var(--color-surface-container-lowest)] p-2.5 rounded-xl border border-[var(--color-outline-variant)] italic leading-relaxed">
-                      {selectedOrder.notes || 'No custom remarks recorded.'}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-2 text-xs">
-                  <div className="flex justify-between text-[var(--color-on-surface-variant)]">
-                    <span>Taxable Value:</span>
-                    <span className="font-bold text-[var(--color-on-surface)]">
-                      {formatCurrency(selectedOrder.totalAmount - selectedOrder.taxAmount)}
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-[var(--color-on-surface-variant)]">
-                    <span>GST ({selectedOrder.taxRateGst}%):</span>
-                    <span className="font-bold text-[var(--color-on-surface)]">{formatCurrency(selectedOrder.taxAmount)}</span>
-                  </div>
-                  <div className="h-px bg-[var(--color-outline-variant)] my-1" />
-                  <div className="flex justify-between text-sm font-black text-[var(--color-on-surface)]">
-                    <span>Grand Total:</span>
-                    <span className="text-[var(--color-primary)]">{formatCurrency(selectedOrder.totalAmount)}</span>
-                  </div>
-                  <div className="flex justify-between text-[10px] items-center mt-2 pt-1 border-t border-[var(--color-outline-variant)]/60 text-[var(--color-on-surface-variant)]">
-                    <span>Fulfillment Status:</span>
-                    <span
-                      className={`inline-block px-2 py-0.5 rounded-full text-[9px] font-bold uppercase ${
-                        selectedOrder.status === 'completed'
-                          ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-                          : selectedOrder.status === 'pending'
-                          ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
-                          : selectedOrder.status === 'partially_delivered'
-                          ? 'bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]'
-                          : 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
-                      }`}
-                    >
-                      {selectedOrder.status}
-                    </span>
-                  </div>
-                </div>
-              </div>
+              
 
               {/* Actions Footer */}
-              <div className="flex items-center justify-between pt-3 border-t border-[var(--color-outline-variant)]">
-                <button
-                  type="button"
-                  onClick={(e) => handleDeleteOrderClick(selectedOrder, e)}
-                  className="flex items-center gap-1 px-4 py-2 border border-[var(--color-error)] text-[var(--color-error)] rounded-full text-xs font-semibold hover:bg-[var(--color-error-container)]/30 transition-colors"
-                >
-                  <Trash2 className="w-4 h-4" /> Delete Order
-                </button>
-
+              <div className="flex items-center justify-end pt-3 border-t border-[var(--color-outline-variant)]">
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -2101,16 +2804,18 @@ export function OrdersView({
                   >
                     Close
                   </button>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      setIsDetailOpen(false);
-                      handleOpenEdit(selectedOrder, e);
-                    }}
-                    className="flex items-center gap-1 px-5 py-2 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-semibold hover:opacity-90 transition-colors"
-                  >
-                    <Edit3 className="w-4 h-4" /> Edit Order
-                  </button>
+                  {selectedOrder.type === 'sales' && isSaleLocked(selectedOrder) ? null : (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        setIsDetailOpen(false);
+                        handleOpenEdit(selectedOrder, e);
+                      }}
+                      className="flex items-center gap-1 px-5 py-2 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-semibold hover:opacity-90 transition-colors"
+                    >
+                      <Edit3 className="w-4 h-4" /> {selectedOrder.type === 'sales' ? editLabelFor(selectedOrder) : 'Edit Purchase'}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -2339,7 +3044,9 @@ export function OrdersView({
                       <tr key={idx} className="bg-white font-medium text-[11px] text-[#1c1b1f]">
                         <td className="py-3 px-3 border-r border-[#e1e2ec] text-center">{idx + 1}</td>
                         <td className="py-3 px-3 border-r border-[#e1e2ec]">
-                          <p className="font-bold text-[#1c1b1f]">{item.itemName}</p>
+                          <p className="font-bold text-[#1c1b1f]">
+                            {item.itemCode ? `${item.itemCode} (${item.itemName})` : item.itemName}
+                          </p>
                           {item.location && (
                             <p className="text-[10px] font-semibold text-[#006a6a] mt-0.5">
                               {previewOrder.type === 'sales' ? 'Dispatch Location:' : 'Inward Location:'} {item.location}
@@ -2509,80 +3216,6 @@ export function OrdersView({
         </div>
       )}
 
-      {/* Material Design 3 Delete Order Confirmation Dialog */}
-      {orderToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-fadeIn">
-          <div className="w-full max-w-md bg-[var(--color-surface-container-lowest)] rounded-3xl border border-[var(--color-outline-variant)] shadow-2xl overflow-hidden animate-scaleUp">
-            {/* Header */}
-            <div className="p-5 pb-4 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container-low)]">
-              <div className="flex items-center gap-3">
-                <div className="p-2.5 rounded-2xl bg-[var(--color-error-container)]/70 text-[var(--color-error)]">
-                  <Trash2 className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-[var(--color-on-surface)]">
-                    Delete {orderToDelete.type === 'purchase' ? 'Purchase Order' : 'Sales Order'}
-                  </h3>
-                  <p className="text-xs text-[var(--color-on-surface-variant)]">
-                    {orderToDelete.orderNumber}
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setOrderToDelete(null)}
-                className="p-1.5 rounded-full text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-highest)] transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Body */}
-            <div className="p-5 space-y-4">
-              <p className="text-sm text-[var(--color-on-surface)] leading-relaxed">
-                Are you sure you want to permanently delete order{' '}
-                <strong className="text-[var(--color-primary)] font-bold">{orderToDelete.orderNumber}</strong> for{' '}
-                <strong className="text-[var(--color-on-surface)] font-bold">{orderToDelete.partyName}</strong>?
-              </p>
-
-              <div className="p-3.5 rounded-2xl bg-[var(--color-error-container)]/20 border border-[var(--color-error)]/30 text-xs text-[var(--color-on-surface)] space-y-1.5">
-                <div className="flex items-center gap-2 text-[var(--color-error)] font-bold">
-                  <AlertTriangle className="w-4 h-4 shrink-0" />
-                  <span>Cloud Database & Inventory Reversal</span>
-                </div>
-                <p className="text-[var(--color-on-surface-variant)] leading-normal">
-                  This action will permanently delete this order record from the Azure Cloud Database. Any allocated or received material quantities will be restored back to inventory.
-                </p>
-              </div>
-
-              <div className="p-3.5 rounded-xl bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] text-xs flex justify-between items-center">
-                <span className="text-[var(--color-on-surface-variant)]">Total Order Value</span>
-                <span className="font-black text-[var(--color-on-surface)] text-sm">{formatCurrency(orderToDelete.totalAmount)}</span>
-              </div>
-            </div>
-
-            {/* Actions */}
-            <div className="p-4 bg-[var(--color-surface-container-low)] border-t border-[var(--color-outline-variant)] flex items-center justify-end gap-3">
-              <button
-                type="button"
-                onClick={() => setOrderToDelete(null)}
-                className="px-5 py-2.5 rounded-full text-xs font-bold text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)] transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmDelete}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-full text-xs font-bold bg-[var(--color-error)] text-[var(--color-on-error)] hover:opacity-90 active:scale-95 transition-all shadow-sm"
-              >
-                <Trash2 className="w-4 h-4" />
-                <span>Confirm & Delete</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Add Purchase 3-Stage Workflow Modal */}
       {isPurchaseModalOpen && (
         <AddPurchaseModal
@@ -2595,10 +3228,13 @@ export function OrdersView({
           parties={parties}
           items={items}
           settings={settings}
-          onSaveOrder={handleSavePurchaseOrder}
+          onAddPurchase={onAddPurchase}
+          onUpdatePurchase={onUpdatePurchase}
+          onAddPurchaseStage={onAddPurchaseStage}
           onCancelOrder={handleCancelPurchaseOrder}
         />
       )}
+
     </div>
   );
 }

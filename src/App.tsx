@@ -41,6 +41,8 @@ function AppContent() {
     locations,
     productionBatches,
     orders,
+    sales,
+    purchases,
     employees,
     accounts,
     transfers,
@@ -175,23 +177,55 @@ function AppContent() {
     showToast('Adjustment voucher deleted.', 'info');
   };
 
-  // Handlers
-  const handleAddOrder = (orderData: any) => {
-    const o = db.addOrder(orderData);
-    showToast(`Order ${orderData.orderNumber} booked successfully!`);
-    return o;
+  // Sales & Purchase handlers (relational order model)
+  const handleAddSale = (payload: any) => {
+    const sale = db.addSale(payload);
+    showToast(`${payload.stage?.stageType === 'quotation' ? 'Quotation' : 'Sale'} ${sale.saleNumber} registered successfully!`);
+    return sale;
   };
 
-  const handleUpdateOrder = (id: string, updates: any) => {
-    const o = db.updateOrder(id, updates);
-    showToast(`Order ${updates.orderNumber || ''} updated successfully!`);
-    return o;
+  const handleUpdateSale = (id: string, updates: any) => {
+    const sale = db.updateSale(id, updates);
+    if (sale) showToast(`Sale ${sale.saleNumber} updated successfully!`);
+    return sale;
   };
 
-  const handleDeleteOrder = (id: string) => {
-    const success = db.deleteOrder(id);
+  const handleAddSaleStage = (id: string, stageInput: any) => {
+    const sale = db.addSaleStage(id, stageInput);
+    if (sale) showToast(`Stage ${stageInput.stageType} saved on ${sale.saleNumber}!`);
+    return sale;
+  };
+
+  const handleDeleteSale = (id: string) => {
+    const success = db.deleteSale(id);
     if (success) {
-      showToast('Order deleted and stock levels restored.', 'info');
+      showToast('Sale deleted and ledger compensated.', 'info');
+    }
+    return success;
+  };
+
+  const handleAddPurchase = (payload: any) => {
+    const purchase = db.addPurchase(payload);
+    showToast(`Purchase ${purchase.purchaseNumber} registered successfully!`);
+    return purchase;
+  };
+
+  const handleUpdatePurchase = (id: string, updates: any) => {
+    const purchase = db.updatePurchase(id, updates);
+    if (purchase) showToast(`Purchase ${purchase.purchaseNumber || ''} updated successfully!`);
+    return purchase;
+  };
+
+  const handleAddPurchaseStage = (id: string, stageInput: any) => {
+    const purchase = db.addPurchaseStage(id, stageInput);
+    if (purchase) showToast(`Stage ${stageInput.stageType} saved on ${purchase.purchaseNumber}!`);
+    return purchase;
+  };
+
+  const handleDeletePurchase = (id: string) => {
+    const success = db.deletePurchase(id);
+    if (success) {
+      showToast('Purchase deleted and ledger compensated.', 'info');
     }
     return success;
   };
@@ -349,8 +383,8 @@ function AppContent() {
         onSelectTab={setActiveTab}
         partiesCount={parties.length}
         itemsCount={items.length}
-        salesCount={orders.filter(o => o.type === 'sales').length}
-        purchasesCount={orders.filter(o => o.type === 'purchase').length}
+        salesCount={sales.length + orders.filter(o => o.type === 'sales').length}
+        purchasesCount={purchases.length + orders.filter(o => o.type === 'purchase').length}
         accountsCount={accounts.length}
         employeesCount={employees?.length || 0}
         settings={settings}
@@ -464,26 +498,38 @@ function AppContent() {
 
           {activeTab === 'sales' && hasPermission('manage_sales') && (
             <OrdersView
-              orders={orders}
+              sales={sales}
+              purchaseOrders={purchases}
               parties={parties}
               items={items}
               settings={settings}
-              onAddOrder={handleAddOrder}
-              onUpdateOrder={handleUpdateOrder}
-              onDeleteOrder={handleDeleteOrder}
+              onAddSale={handleAddSale}
+              onUpdateSale={handleUpdateSale}
+              onAddSaleStage={handleAddSaleStage}
+              onDeleteSale={handleDeleteSale}
+              onAddPurchase={handleAddPurchase}
+              onUpdatePurchase={handleUpdatePurchase}
+              onAddPurchaseStage={handleAddPurchaseStage}
+              onDeletePurchase={handleDeletePurchase}
               fixedType="sales"
             />
           )}
 
           {activeTab === 'purchases' && hasPermission('manage_purchases') && (
             <OrdersView
-              orders={orders}
+              sales={sales}
+              purchaseOrders={purchases}
               parties={parties}
               items={items}
               settings={settings}
-              onAddOrder={handleAddOrder}
-              onUpdateOrder={handleUpdateOrder}
-              onDeleteOrder={handleDeleteOrder}
+              onAddSale={handleAddSale}
+              onUpdateSale={handleUpdateSale}
+              onAddSaleStage={handleAddSaleStage}
+              onDeleteSale={handleDeleteSale}
+              onAddPurchase={handleAddPurchase}
+              onUpdatePurchase={handleUpdatePurchase}
+              onAddPurchaseStage={handleAddPurchaseStage}
+              onDeletePurchase={handleDeletePurchase}
               fixedType="purchase"
             />
           )}

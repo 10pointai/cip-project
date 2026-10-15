@@ -27,12 +27,12 @@ import {
 } from 'lucide-react';
 import {
   Order,
-  OrderItem,
   OrderStatus,
   PurchaseStage,
   Party,
   Item,
   CompanySettings,
+  Purchase,
   PaymentMode,
   CashBankAccount,
 } from '../../types';
@@ -41,11 +41,18 @@ import { cloudStore as localDb } from '../../services/cloudStore';
 interface AddPurchaseModalProps {
   isOpen: boolean;
   onClose: () => void;
-  existingOrder?: Order | null;
+  /** Existing purchase shown as the Order-shaped display adapter from OrdersView
+   *  (carries the one-shot flags on top of the legacy Order shape) */
+  existingOrder?: (Order & { inventoryApplied?: boolean }) | null;
   parties: Party[];
   items: Item[];
   settings: CompanySettings;
-  onSaveOrder: (order: Order) => void;
+  /** First-stage save (no purchase record yet): creates the master + first stage */
+  onAddPurchase: (payload: any) => any;
+  /** Master-level updates (items / notes / vendor) — inventory compensation on edit is server-side */
+  onUpdatePurchase: (id: string, updates: any) => any;
+  /** Save/advance a stage document (RFQ → PO → GRN); one-shot inventory rides on stageInput */
+  onAddPurchaseStage: (id: string, stageInput: any) => any;
   onCancelOrder?: (orderId: string) => void;
 }
 
@@ -65,7 +72,7 @@ const STAGES: StageStep[] = [
     badge: 'RFQ / Ingestion',
     title: 'Request For Quotation',
     desc: 'Supplier price solicitation & rate quotation entry.',
-    inventoryNote: 'No inventory updated at this stage.',
+    inventoryNote: 'Inward only when the Update Stockyard Inventory toggle is enabled at save (one-time per purchase).',
   },
   {
     id: 'purchase_order',
@@ -73,7 +80,7 @@ const STAGES: StageStep[] = [
     badge: 'Purchase Order',
     title: 'Official Purchase Order',
     desc: 'Procurement commitment sent to supplier.',
-    inventoryNote: 'Raw material stock balance is updated upon PO generation.',
+    inventoryNote: 'Inward only when the Update Stockyard Inventory toggle is enabled at save (one-time per purchase).',
   },
   {
     id: 'goods_receipt',
@@ -81,7 +88,7 @@ const STAGES: StageStep[] = [
     badge: 'Receipt / GRN',
     title: 'Goods Receipt (GRN)',
     desc: 'Gate delivery, inspection & shortage reconciliation.',
-    inventoryNote: 'Stock is reconciled to actual received quantity and marked Completed.',
+    inventoryNote: 'Inward at the received quantities when the Update Stockyard Inventory toggle is enabled (one-time per purchase).',
   },
 ];
 
@@ -94,7 +101,9 @@ export function AddPurchaseModal({
   parties,
   items,
   settings,
-  onSaveOrder,
+  onAddPurchase,
+  onUpdatePurchase,
+  onAddPurchaseStage,
   onCancelOrder,
 }: AddPurchaseModalProps) {
   // Determine initial and minimum allowed stage
@@ -103,11 +112,17 @@ export function AddPurchaseModal({
     ? STAGE_ORDER.indexOf(existingOrder.purchaseStage)
     : 0;
 
+  // One-shot inventory application toggle for THIS stage save — stock inward
+  // posts at most once per purchase (master flag guards server-side).
+  const [updateInventory, setUpdateInventory] = useState<boolean>(
+    Boolean(existingOrder && !existingOrder.inventoryApplied)
+  );
+
   const [currentStage, setCurrentStage] = useState<PurchaseStage>(initialStage);
   const currentStageIndex = STAGE_ORDER.indexOf(currentStage);
 
   // Core order state
-  const [partyId, setPartyId] = useState<string>(existingOrder?.partyId || '');
+  const [partyId, setPartyId] = useState<string>(existingOrder?.partyId === 'unassigned' ? '' : (existingOrder?.partyId || ''));
   const [date, setDate] = useState<string>(
     existingOrder?.date || new Date().toISOString().split('T')[0]
   );
@@ -222,16 +237,18 @@ export function AddPurchaseModal({
     existingOrder?.receiptDetails?.reconciliationNotes || ''
   );
 
-  // Optional payment & deposit account section
+  // Optional payment & deposit account section (settled = cash already moved
+  // for this purchase; the one-shot flag guards a second payout voucher)
   const [includePayment, setIncludePayment] = useState<boolean>(
-    Boolean(existingOrder?.accountId)
+    Boolean((existingOrder as any)?.settlementAccountId)
   );
   const [paymentMode, setPaymentMode] = useState<PaymentMode>(
-    existingOrder?.paymentMode || 'bank_transfer'
+    ((existingOrder as any)?.paymentMode as PaymentMode) || 'bank_transfer'
   );
   const [accountId, setAccountId] = useState<string>(
-    existingOrder?.accountId || ''
+    (existingOrder as any)?.settlementAccountId || ''
   );
+  const cashAlready = Boolean((existingOrder as any)?.cashApplied);
 
   // Confirmation modals
   const [showShortageConfirmModal, setShowShortageConfirmModal] = useState(false);
@@ -255,23 +272,26 @@ export function AddPurchaseModal({
   useEffect(() => {
     if (!existingOrder) {
       const year = new Date().getFullYear();
-      const existingPurchases = localDb.getOrders().filter((o) => o.type === 'purchase');
-      const count = existingPurchases.length + 1;
-      const numStr = String(count).padStart(4, '0');
+      // Client-side hint only — the server enforces uniqueness of the number
+      const existingPurchases = localDb.getPurchases();
+      const known = new Set<string>([
+        ...existingPurchases.map((p) => p.purchaseNumber),
+        ...existingPurchases.flatMap((p) => (p.stages || []).map((st) => st.stageNumber)),
+      ]);
+      const freshNumber = (prefix: string) => {
+        for (let n = 1; n < 9999; n++) {
+          const candidate = `${prefix}-${year}-${String(n).padStart(4, '0')}`;
+          if (!known.has(candidate)) return candidate;
+        }
+        return `${prefix}-${year}-${Date.now().toString().slice(-4)}`;
+      };
 
-      if (!orderNumber) setOrderNumber(`PO-${year}-${numStr}`);
-      if (!rfqNumber) setRfqNumber(`RFQ-${year}-${numStr}`);
-      if (!poNumber) setPoNumber(`PO-${year}-${numStr}`);
-      if (!grnNumber) setGrnNumber(`GRN-${year}-${numStr}`);
-
-      // Auto-select active default bank/cash account
-      const activeAccs = accounts.filter((a) => a.isActive);
-      const defAcc = activeAccs.find((a) => a.isDefault) || activeAccs[0];
-      if (defAcc && !accountId) {
-        setAccountId(defAcc.id);
-      }
+      if (!orderNumber) setOrderNumber(freshNumber('PO'));
+      if (!rfqNumber) setRfqNumber(freshNumber('RFQ'));
+      if (!poNumber) setPoNumber(freshNumber('PO'));
+      if (!grnNumber) setGrnNumber(freshNumber('GRN'));
     }
-  }, [existingOrder, accounts]);
+  }, [existingOrder, orderNumber]);
 
   // When party changes, prefill contact if empty
   const handlePartyChange = (id: string) => {
@@ -409,11 +429,13 @@ export function AddPurchaseModal({
     });
 
     const taxPercent = parseFloat(taxRateGst) || 0;
-    const taxAmount = (subtotal * taxPercent) / 100;
-    const grandTotal = subtotal + taxAmount;
+    // Figures approximated to 2 decimal places (paise)
+    const subtotal2 = round2(subtotal);
+    const taxAmount = round2((subtotal2 * taxPercent) / 100);
+    const grandTotal = round2(subtotal2 + taxAmount);
 
     return {
-      subtotal,
+      subtotal: subtotal2,
       taxAmount,
       grandTotal,
       totalOrderedQty,
@@ -438,6 +460,17 @@ export function AddPurchaseModal({
       currency: settings.currency?.code || 'INR',
       maximumFractionDigits: 0,
     }).format(amount);
+  };
+
+  // Amounts approximated to 2 decimal places (paise)
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const formatCurrency2 = (amount: number) => {
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: settings.currency?.code || 'INR',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(round2(amount));
   };
 
   // Stage advancement validation & action
@@ -485,118 +518,122 @@ export function AddPurchaseModal({
     return true;
   };
 
-  // Build the complete Order object
-  const buildOrderPayload = (targetStage: PurchaseStage, finalStatus?: OrderStatus): Order => {
+  // Build the stage-save payload against the RELATIONAL purchase model:
+  //  - first-stage save  -> master payload {purchaseNumber, partyId, items, stage}
+  //  - existing purchase -> stage payload (carry items only when inventory has
+  //    NOT been applied; applied masters keep their ledger quantities fixed,
+  //    master item edits go through PUT /:id with server-side compensation)
+  const buildStagePayload = (targetStage: PurchaseStage) => {
     const isRfq = targetStage === 'rfq';
     const isStage3 = targetStage === 'goods_receipt';
 
-    const resolvedStatus: OrderStatus =
-      finalStatus ||
-      (isStage3 ? 'completed' : 'pending');
+    const itemsPayload = lineItems
+      .filter((row) => row.itemId)
+      .map((row) => {
+        const orderedQty = parseFloat(row.quantity) || 0;
+        const recvQty =
+          row.receivedQuantity !== '' ? parseFloat(row.receivedQuantity) || 0 : orderedQty;
+        const prod = productItems.find((p) => p.id === row.itemId);
+        const prodLocs = prod?.locations || [];
+        const assignedLoc =
+          row.location?.trim() ||
+          (prodLocs.length > 0 ? prodLocs[0].locationName : prod?.stockLocation || 'Main Yard');
+        return {
+          itemId: row.itemId,
+          quantity: orderedQty,
+          rate: isRfq ? 0 : parseFloat(row.rate) || 0,
+          gstRate: isRfq ? 0 : parseFloat(taxRateGst) || 0,
+          locationName: assignedLoc,
+          receivedQuantity: isStage3 ? recvQty : undefined,
+          itemNotes: row.itemNotes || undefined,
+        };
+      });
 
-    const formattedItems: OrderItem[] = lineItems.map((row) => {
-      const orderedQty = parseFloat(row.quantity) || 0;
-      const rateVal = isRfq ? 0 : (parseFloat(row.rate) || 0);
-      const recvQty =
-        row.receivedQuantity !== ''
-          ? parseFloat(row.receivedQuantity) || 0
-          : orderedQty;
-
-      const shortage = Math.max(0, orderedQty - recvQty);
-      const overage = Math.max(0, recvQty - orderedQty);
-
-      // Resolve location from item's stock locations
-      const prod = productItems.find((p) => p.id === row.itemId);
-      const prodLocs = prod?.locations || [];
-      const assignedLoc =
-        row.location?.trim() ||
-        (prodLocs.length > 0 ? prodLocs[0].locationName : prod?.stockLocation || 'Main Yard');
-
-      return {
-        itemId: row.itemId,
-        itemName: row.itemName,
-        quantity: orderedQty,
-        unit: row.unit || 'MT',
-        rate: rateVal,
-        amount: isRfq ? 0 : orderedQty * rateVal,
-        location: assignedLoc,
-        receivedQuantity: isStage3 ? recvQty : undefined,
-        shortageQuantity: shortage > 0 ? shortage : undefined,
-        overageQuantity: overage > 0 ? overage : undefined,
-        itemNotes: row.itemNotes || undefined,
-      };
-    });
-
-    const vendorParty = partyId ? parties.find((p) => p.id === partyId) : undefined;
-    // Payment settlement is on Stage 3 only
-    const shouldIncludePayment = isStage3 && includePayment && Boolean(accountId);
-    const selectedAccount = shouldIncludePayment ? accounts.find((a) => a.id === accountId) : undefined;
-
-    const now = new Date().toISOString();
     const effectiveOrderNumber =
       targetStage === 'rfq'
         ? rfqNumber || orderNumber
         : targetStage === 'purchase_order'
         ? poNumber || orderNumber
-        : orderNumber;
+        : grnNumber || orderNumber;
 
-    const effectiveTaxRate = isRfq ? 0 : (parseFloat(taxRateGst) || 0);
-    const effectiveTaxAmount = isRfq ? 0 : calculations.taxAmount;
-    const effectiveTotalAmount = isRfq ? 0 : calculations.grandTotal;
+    const stageInput = {
+      stageType: targetStage,
+      stageNumber: effectiveOrderNumber,
+      date: date || new Date().toISOString().split('T')[0],
+      notes: notes || undefined,
+      // Master-level fields ride along so a stage save can add/change the
+      // vendor, date or notes (applied before the stage row is written)
+      partyId: existingOrder ? (partyId || undefined) : undefined,
+      rfqDetails: isRfq
+        ? {
+            rfqNumber: rfqNumber || undefined,
+            rfqDate: rfqDate || undefined,
+            quotationRef: quotationRef || undefined,
+            quotationDate: quotationDate || undefined,
+            validityDate: rfqValidityDate || undefined,
+            expectedDeliveryDate: rfqExpectedDeliveryDate || undefined,
+            notes: notes || undefined,
+          }
+        : undefined,
+      poDetails: targetStage === 'purchase_order'
+        ? {
+            poNumber: poNumber || undefined,
+            poDate: poDate || undefined,
+            expectedDeliveryDate: poDeliveryDate || undefined,
+            paymentTerms: paymentTerms || undefined,
+            vendorContact: vendorContact || undefined,
+            notes: notes || undefined,
+          }
+        : undefined,
+      receiptDetails: isStage3
+        ? {
+            grnNumber: grnNumber || undefined,
+            receiptDate: receiptDate || undefined,
+            challanNumber: challanNumber || undefined,
+            vendorInvoiceNumber: vendorInvoiceNumber || undefined,
+            receivedBy: receivedBy || undefined,
+            inspectionStatus,
+            reconciliationNotes: reconciliationNotes || undefined,
+            notes: notes || undefined,
+          }
+        : undefined,
+      // ONE-SHOT inventory application toggle (server guards the master flag)
+      updateInventory,
+      // "Settle Payment Now" = the cash application one-shot: posts the
+      // payment_out payout voucher against the chosen account on the server.
+      updateCash: cashAlready ? false : includePayment,
+      settlementAccountId: accountId || undefined,
+      paymentMode,
+    };
+
+    if (existingOrder) {
+      const canCarryItems = !existingOrder.inventoryApplied;
+      return { stageInput: { ...stageInput, items: canCarryItems ? itemsPayload : undefined } };
+    }
 
     return {
-      id: existingOrder?.id || `ord-${Date.now()}`,
-      orderNumber: effectiveOrderNumber,
-      type: 'purchase',
-      partyId: isRfq && !partyId ? 'unassigned' : (partyId || 'unassigned'),
-      partyName: vendorParty ? vendorParty.name : isRfq ? 'Unassigned (RFQ Ingestion)' : 'Unassigned Vendor',
-      date: date || new Date().toISOString().split('T')[0],
-      status: resolvedStatus,
-      purchaseStage: targetStage,
-      rfqDetails: {
-        rfqNumber: rfqNumber || undefined,
-        rfqDate: rfqDate || undefined,
-        quotationRef: quotationRef || undefined,
-        quotationDate: quotationDate || undefined,
-        validityDate: rfqValidityDate || undefined,
-        expectedDeliveryDate: rfqExpectedDeliveryDate || undefined,
+      masterPayload: {
+        purchaseNumber: effectiveOrderNumber,
+        partyId: partyId || undefined, // nullable: RFQ ingestion may have no vendor
+        date: date || new Date().toISOString().split('T')[0],
         notes: notes || undefined,
+        items: itemsPayload,
+        stage: stageInput,
       },
-      poDetails: {
-        poNumber: poNumber || undefined,
-        poDate: poDate || undefined,
-        expectedDeliveryDate: poDeliveryDate || undefined,
-        paymentTerms: paymentTerms || undefined,
-        vendorContact: vendorContact || undefined,
-        notes: notes || undefined,
-      },
-      receiptDetails: {
-        grnNumber: grnNumber || undefined,
-        receiptDate: receiptDate || undefined,
-        challanNumber: challanNumber || undefined,
-        vendorInvoiceNumber: vendorInvoiceNumber || undefined,
-        receivedBy: receivedBy || undefined,
-        inspectionStatus,
-        reconciliationNotes: reconciliationNotes || undefined,
-        notes: notes || undefined,
-      },
-      items: formattedItems,
-      taxRateGst: effectiveTaxRate,
-      taxAmount: effectiveTaxAmount,
-      totalAmount: effectiveTotalAmount,
-      notes: notes || undefined,
-      paymentMode,
-      accountId: shouldIncludePayment && accountId ? accountId : '',
-      accountName: shouldIncludePayment && selectedAccount ? selectedAccount.name : undefined,
-      paymentStatus:
-        shouldIncludePayment && accountId
-          ? resolvedStatus === 'completed'
-            ? 'paid'
-            : 'pending'
-          : 'pending',
-      createdAt: existingOrder?.createdAt || now,
-      updatedAt: now,
     };
+  };
+
+  // Single submit funnel: first-stage saves create the purchase master; stage
+  // saves write the stage document row (+ received quantities while inventory
+  // is not yet applied).
+  const submitStage = (targetStage: PurchaseStage) => {
+    const built = buildStagePayload(targetStage);
+    if (existingOrder) {
+      onAddPurchaseStage((existingOrder as any).id, built.stageInput);
+    } else {
+      onAddPurchase(built.masterPayload);
+    }
+    onClose();
   };
 
   // Direct start or stage progression
@@ -615,6 +652,13 @@ export function AddPurchaseModal({
   const handleSaveCurrentStage = () => {
     if (!validateForm()) return;
 
+    // "Settle Payment Now" requires a disbursement account (server refuses a
+    // settle request without one — validate up front so the user sees it).
+    if (currentStage === 'goods_receipt' && includePayment && !accountId) {
+      setValidationError('Please select a Debit / Payment Account to settle this receipt.');
+      return;
+    }
+
     if (currentStage === 'goods_receipt') {
       // If there is any shortage or overage discrepancy, require explicit confirmation modal
       if (calculations.discrepancyCount > 0) {
@@ -622,16 +666,12 @@ export function AddPurchaseModal({
         return;
       }
       // Clean match, proceed directly
-      const payload = buildOrderPayload('goods_receipt', 'completed');
-      onSaveOrder(payload);
-      onClose();
+      submitStage('goods_receipt');
       return;
     }
 
     // Saving at RFQ or PO stage
-    const payload = buildOrderPayload(currentStage, 'pending');
-    onSaveOrder(payload);
-    onClose();
+    submitStage(currentStage);
   };
 
   // Advance to next stage
@@ -681,23 +721,16 @@ export function AddPurchaseModal({
   // Confirm shortage submission from modal
   const handleConfirmShortageReceipt = () => {
     setShowShortageConfirmModal(false);
-    const payload = buildOrderPayload('goods_receipt', 'completed');
-    onSaveOrder(payload);
-    onClose();
+    submitStage('goods_receipt');
   };
 
   // Handle Cancel Purchase
   const handleConfirmCancel = () => {
     setShowCancelConfirmModal(false);
     if (existingOrder && onCancelOrder) {
-      onCancelOrder(existingOrder.id);
+      onCancelOrder((existingOrder as any).id);
     } else if (existingOrder) {
-      const payload: Order = {
-        ...existingOrder,
-        status: 'cancelled',
-        updatedAt: new Date().toISOString(),
-      };
-      onSaveOrder(payload);
+      onUpdatePurchase((existingOrder as any).id, { status: 'cancelled' });
     }
     onClose();
   };
@@ -1393,7 +1426,7 @@ export function AddPurchaseModal({
                         {/* Subtotal - Stage 2 (PO) & Stage 3 (GRN) Only */}
                         {currentStage !== 'rfq' && (
                           <td className="py-3 px-3 align-top text-right font-black text-[var(--color-on-surface)]">
-                            {formatCurrency(itemAmount)}
+                            {formatCurrency2(itemAmount)}
                           </td>
                         )}
 
@@ -1508,12 +1541,12 @@ export function AddPurchaseModal({
                 <div className="space-y-2 text-xs">
                   <div className="flex justify-between font-bold text-[var(--color-on-surface-variant)]">
                     <span>Materials Subtotal:</span>
-                    <span className="text-[var(--color-on-surface)]">{formatCurrency(calculations.subtotal)}</span>
+                    <span className="text-[var(--color-on-surface)]">{formatCurrency2(calculations.subtotal)}</span>
                   </div>
 
                   <div className="flex justify-between font-bold text-[var(--color-on-surface-variant)]">
                     <span>GST Amount ({taxRateGst}%):</span>
-                    <span className="text-[var(--color-on-surface)]">{formatCurrency(calculations.taxAmount)}</span>
+                    <span className="text-[var(--color-on-surface)]">{formatCurrency2(calculations.taxAmount)}</span>
                   </div>
 
                   <div className="h-px bg-[var(--color-outline-variant)]" />
@@ -1521,7 +1554,7 @@ export function AddPurchaseModal({
                   <div className="flex justify-between items-center text-sm font-black text-[var(--color-on-surface)]">
                     <span>Grand Total (Net Inward):</span>
                     <span className="text-base text-[var(--color-primary)]">
-                      {formatCurrency(calculations.grandTotal)}
+                      {formatCurrency2(calculations.grandTotal)}
                     </span>
                   </div>
                 </div>
@@ -1625,6 +1658,45 @@ export function AddPurchaseModal({
           </div>
 
           <div className="flex items-center gap-2.5 w-full sm:w-auto justify-end">
+            <div className="flex flex-col gap-1">
+              {/* ONE-SHOT inventory application toggle */}
+              <label
+                className={`inline-flex items-center gap-2 select-none ${
+                  existingOrder?.inventoryApplied ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'
+                }`}
+                title={
+                  existingOrder?.inventoryApplied
+                    ? 'Stockyard inventory was already applied for this purchase (one-time per purchase)'
+                    : 'POSTs the FIFO purchase_inward ledger rows in THIS stage save'
+                }
+              >
+                <input
+                  type="checkbox"
+                  className="sr-only"
+                  disabled={existingOrder?.inventoryApplied}
+                  checked={updateInventory}
+                  onChange={(e) => setUpdateInventory(e.target.checked)}
+                />
+                <span
+                  className={`relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors ${
+                    updateInventory ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-outline)]'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition ${
+                      updateInventory ? 'translate-x-4' : 'translate-x-0.5'
+                    } my-0.5 mx-0.5`}
+                  />
+                </span>
+                <span className="text-[11px] font-bold text-[var(--color-on-surface)] whitespace-nowrap">
+                  {existingOrder?.inventoryApplied
+                    ? 'Inventory already applied'
+                    : updateInventory
+                    ? 'Update Stockyard Inventory ✓'
+                    : 'Inventory untouched'}
+                </span>
+              </label>
+            </div>
             <button
               type="button"
               onClick={onClose}

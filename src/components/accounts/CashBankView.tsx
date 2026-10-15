@@ -576,7 +576,7 @@ export function CashBankView({
               {formatCurrency(totalBankBalance, currencySymbol)}
             </p>
             <p className="text-xs text-[var(--color-on-surface-variant)] mt-1">
-              Across current & collection accounts
+              Across all bank accounts
             </p>
           </div>
         </div>
@@ -596,7 +596,7 @@ export function CashBankView({
               {formatCurrency(totalCashBalance, currencySymbol)}
             </p>
             <p className="text-xs text-[var(--color-on-surface-variant)] mt-1">
-              Plant site & head office vaults
+              Across all cash drawers
             </p>
           </div>
         </div>
@@ -681,14 +681,14 @@ export function CashBankView({
               >
                 <FileSpreadsheet className="w-4 h-4" />
               </button>
-              <button
+              {/* <button
                 type="button"
                 onClick={handlePrint}
                 className="p-2 text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)] hover:bg-[var(--color-surface-container)] rounded-full transition-colors border border-[var(--color-outline-variant)]"
                 title="Print Account List"
               >
                 <Printer className="w-4 h-4" />
-              </button>
+              </button> */}
             </div>
 
             {/* Quick Actions */}

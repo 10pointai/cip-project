@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Tag, Plus, Edit2, Trash2, Check, AlertCircle, Layers } from 'lucide-react';
+import { X, Tag, Plus, Edit2, Check, AlertCircle, Layers } from 'lucide-react';
 import { ItemCategory, Item } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 
@@ -90,21 +90,6 @@ export const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
       setError('');
     } catch (err: any) {
       setError(err.message || 'Failed to save category.');
-    }
-  };
-
-  const handleDelete = (id: string, catName: string) => {
-    const linkedItemsCount = items.filter((i) => i.categoryId === id).length;
-    if (linkedItemsCount > 0) {
-      setError(`Cannot delete "${catName}" because ${linkedItemsCount} item(s) are currently categorized under it.`);
-      return;
-    }
-
-    if (window.confirm(`Are you sure you want to delete category "${catName}"?`)) {
-      localDb.deleteCategory(id);
-      if (editingId === id) {
-        setEditingId(null);
-      }
     }
   };
 
@@ -293,14 +278,6 @@ export const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
                       title="Edit Category"
                     >
                       <Edit2 className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDelete(cat.id, cat.name)}
-                      className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-error)] hover:bg-[var(--color-error-container)] rounded-full transition-colors"
-                      title="Delete Category"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 </div>

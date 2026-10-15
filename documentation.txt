@@ -320,13 +320,45 @@ KNOWN SECURITY TODO (must fix before external deployment):
   parties                  Customer/vendor/transporter directory + balances
   transactions             Vouchers (sale_invoice, purchase_bill, payment_in,
                            payment_out, debit_note, credit_note) — party_id FK
-                           + account_id FK; keeps party_name snapshot (statutory)
+                           + account_id FK (FKs ONLY — names JOINed at read)
   item_categories / item_units / item_locations    Catalog masters
   items                    Product/service catalog — NAMES NEVER STORED (§2):
                            category_id FK + unit_id FK only; the categoryName /
                            unit display strings are JOINed at read time from the
                            masters (renames propagate everywhere). movements
                            JSON column LEGACY-ONLY (NULL going forward)
+  item_location_mapping    Per-item x per-location stock (location_id FK only)
+  stock_movements          Append-only ledger — FKs (item_id, location_id,
+                           party_id) + reference_id (sale/purchase master id);
+                           movement types: purchase_inward, sale_dispatch,
+                           dispatch_reversal, inward_reversal, production_*,
+                           adjustment_*; reversal rows match their original by
+                           reference_number = original movement id
+  sales_orders             Sale MASTER — sale_number (document number),
+                           party_id FK, date, status (server-computed),
+                           vehicle/driver/transport, inventory_applied +
+                           cash_applied ONE-SHOT flags; cash wiring FKs:
+                           settlement_account_id (cash_bank_accounts),
+                           invoice_voucher_id + settlement_voucher_id
+                           (transactions), payment_mode, settled_amount /
+                           settled_date (statutory snapshots)
+  sales_order_items        Line items on the sale master — sale_id FK +
+                           item_id FK + unit_id FK + location_id FK (§2),
+                           quantity/rate/gst_rate
+  sales_order_stages       Stage documents per sale (quotation, sales_order,
+                           proforma_invoice, delivery_note, sales_invoice):
+                           sale_id FK, stage_type, stage_number as issued,
+                           date, subtotal/tax/total snapshot; re-issues allowed
+  purchase_orders          Purchase MASTER — party_id NULLABLE (RFQ ingestion
+                           may have no vendor yet), same flags as sales
+  purchase_order_items     purchase_id FK + item_id etc. + received_quantity /
+                           shortage_quantity / overage_quantity (GRN)
+  purchase_order_stages    rfq | purchase_order | goods_receipt —
+                           UNIQUE(purchase_id, stage_type); stage_details JSON
+                           carries the rfqDetails/poDetails/receiptDetails
+                           interfaces (typed per stageType at read time)
+  orders                   LEGACY (RETIRED 2026-10-15 by the relational
+                           sale/purchase split — kept, never written)
 
 If you created the inventory tables BEFORE this documentation (from the first
 DDL), the migration at startup normalizes them automatically. The equivalent
@@ -398,20 +430,64 @@ manual SQL, should you prefer to run it yourself:
 8. PHASE 1 REMAINING WORK (as of this documentation)
 --------------------------------------------------------------------------------
 
-  - Sales & Purchase: persist purchaseStage + rfqDetails/poDetails/
-    receiptDetails to MySQL (columns + mapping + update path); wire orders to
-    the voucher/party-balance system; compute partially_delivered; migrate
-    orders/transactions account references to the FK + JOIN standard.
-  - Cash & Bank: ~~account-name references in transfers/adjustments -> FK + JOIN~~
-    DONE 2026-10-14 (FKs only + LEFT JOIN reads; account_type copy dropped);
-    ~~Edit-account UI~~ DONE (add-account modal is add/edit dual-mode). Remaining:
-    real bank reconciliation; voucher edit UI; unify balance recalc voucher types.
-  - Parties: bulk entry to use POST /api/parties/bulk; voucher edit/delete UI;
-    unify client-side balance delta with server logic.
-    ~~capture server-minted IDs on create~~ DONE 2026-10-14 (cloudStore captures
-    the POST response and swaps the optimistic party).
+  - Sales & Purchase — DONE 2026-10-15: RELATIONAL ORDER MODEL. The legacy
+    `orders` JSON-blob table is RETIRED (kept, never written). Phase 1 ships:
+      * sales_orders/purchase_orders masters + *_order_items + *_order_stages
+        child tables (FKs only; see §7)
+      * stage documents stay saved per master (quotation → sales order/proforma
+        → delivery note / invoice; RFQ → PO → GRN), UNIQUE(purchase_id, stage_type)
+      * ONE-SHOT inventory application: the user toggles "Update Stockyard
+        Inventory" per stage save; the master's inventory_applied flag guards —
+        purchase inward posts at receivedQuantity (GRN) or ordered qty, sale
+        dispatch posts FIFO outward; edits/cancels/deletes write compensating
+        dispatch_reversal / inward_reversal rows keyed on stock_movements
+        .reference_id (reversal matched to original by movement id; reversal
+        re-enters stock at the recorded FIFO consumed rate)
+      * PARTY LOCK (user rule): a sale is bound to its party at creation —
+        edit attempts and stage issuances can never change it (server ignores
+        partyId after creation + logs an audit note; UI disables the field)
+      * SALE DETAILS MODAL (user rule): renders EVERY issued stage as its own
+        document card (quotation / sales order / GST invoice — each with its
+        own line values CODE (name), qty, rate, GST, amount + totals), per-card
+        "Open document" print (stage-specific values), "View Proforma" on the
+        sales order card, and create-next-stage buttons per the ladder; locked
+        sales show a lock notice instead. The old single-list item table now
+        applies to purchases only.
+      * legacy backfill: rows split once from `orders` (sales/purchase + items
+        + a synthesized stage row), stock_movements.reference_id backfilled by
+        document number
+  - Cash & Bank wiring (user-specified, DONE 2026-10-15): when a sales_invoice
+    stage is issued the server posts a sale_invoice journal voucher (party
+    receivable — full stage total incl. GST + transport; 'pending' on credit);
+    when "Settle Payment Now" is ON it additionally posts a payment_in receipt
+    voucher crediting the chosen Cash/Bank account (balance up via
+    recalculateAccountBalance) and stores the settlement FKs on the master.
+    Credits (settlement OFF) book only the unpaid sale_invoice voucher so the
+    party ledger still carries the receivable. Mirror for purchases at the
+    goods_receipt stage: purchase_bill voucher + payment_out payout (debit).
+    Voucher ids are deterministic (txn-<saleId>-inv / -pay) so re-saves
+    upsert instead of duplicating; delete/cancel of a GRN'd purchase un-books
+    its vouchers; purchase line edits refresh the posted bill voucher amount.
+    Server mints voucher numbers from the settings prefixes
+    (INV-26/ PUR-26/ RCPT-26/ + 4 digits, collision-checked).
+  - Purchase stage-details normalization: stage_details JSON holds the
+    rfq/po/grn document interfaces (typed per stageType at read time).
+  - SALE STAGE LADDER (user-specified, DONE 2026-10-15): stages are
+    quotation -> sales_order -> sales_invoice (a new sale may START at any of
+    the three; invoice may be issued straight from a quotation; View Proforma
+    renders the sales order in proforma-invoice format). Item rows are
+    STAGE-SCOPED via sales_order_items.sales_order_stage_id: issuing a sales
+    order seeds a COPY of the quotation rows; editing a sale touches ONLY the
+    current (latest) stage's rows — a quotation's values/dates/numbers never
+    change after advancing. Issuing an invoice LOCKS the sale: master edits,
+    item edits, new stages and cancel/delete are all refused (HTTP 400).
+  - Cash & Bank: real bank reconciliation; voucher edit UI; unify balance recalc voucher types.
+  - Parties: voucher edit/delete UI; unify client-side balance delta with server logic.
   - Cross-cutting: authenticate /api/sync + /api/health; env-based JWT secret;
-    client resync/ID-capture discipline for optimistic writes.
+    server-minted document numbering (SO/PO/RFQ/GRN/INV) to replace client
+    suggestions; per-line delivered-quantity tracking for partially_delivered
+    (sales); route legacy-module reads (Party detail orders list, Cash & Bank,
+    Logistics) onto the new sale/purchase repositories.
 
 ================================================================================
 END OF DOCUMENTATION — keep this file updated as modules are completed.

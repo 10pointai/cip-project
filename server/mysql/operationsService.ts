@@ -1,6 +1,6 @@
 import { executeMysqlQuery, executeMysqlOne } from './queryClient';
 import { isMysqlConfigured } from './connection';
-import { Item, ItemCategory, ItemUnit, ItemLocation, ProductionBatchRun, Order, Vehicle, Driver, TripSlip, Tyre, ItemStockAdjustment, StockMovementLog } from '../../src/types';
+import { Item, ItemCategory, ItemUnit, ItemLocation, ProductionBatchRun, Vehicle, Driver, TripSlip, Tyre, ItemStockAdjustment, StockMovementLog, Sale, Purchase } from '../../src/types';
 import { serverDb } from '../db';
 import { computeItemValuation } from '../inventoryValuation';
 import { resolveUnitIdByCode } from './azureSync';
@@ -329,70 +329,87 @@ export async function fetchBatchesDirect(): Promise<ProductionBatchRun[]> {
 }
 
 // ==========================================
-// ORDERS
+// ORDERS (LEGACY — retired for reads/writes by the relational model above)
 // ==========================================
 
-export async function fetchOrdersDirect(): Promise<Order[]> {
-  if (!isMysqlConfigured()) {
-    return serverDb.getOrders();
-  }
-  const rows = await executeMysqlQuery('SELECT * FROM orders ORDER BY date DESC, created_at DESC');
-  return rows.map((o: any) => ({
-    id: o.id,
-    orderNumber: o.order_number,
-    type: o.type,
-    partyId: o.party_id,
-    partyName: o.party_name,
-    date: o.date,
-    stage: o.stage || undefined,
-    status: o.status || 'pending',
-    paymentMode: o.payment_mode || undefined,
-    accountId: o.account_id || undefined,
-    accountName: o.account_name || undefined,
-    paymentStatus: o.payment_status || 'paid',
-    items: parseJsonField(o.items, []),
-    taxRateGst: parseNum(o.tax_rate_gst, 18),
-    taxAmount: parseNum(o.tax_amount),
-    totalAmount: parseNum(o.total_amount),
-    notes: o.notes || undefined,
-    vehicleNo: o.vehicle_no || undefined,
-    driverName: o.driver_name || undefined,
-    transportCharges: parseNum(o.transport_charges),
-    createdAt: o.created_at,
-    updatedAt: o.updated_at,
-  }));
+// ==========================================
+// SALES & PURCHASE — RELATIONAL ORDER MODEL
+// Reads/writes funnel through serverDb (server/db.ts): the sandbox is the
+// working copy, its repositories apply the business logic — FK normalization,
+// status computation, one-shot inventory application — and the liveSync*
+// helpers persist master + items + stages to Azure MySQL (azureSync.ts).
+// The client refetches GET /api/sync?fresh=true after mutations, which
+// rehydrates the sandbox straight from MySQL.
+// ==========================================
+
+export async function fetchSalesDirect(): Promise<Sale[]> {
+  return serverDb.getSales();
 }
 
-export async function fetchOrderByIdDirect(id: string): Promise<Order | null> {
-  if (!isMysqlConfigured()) {
-    return serverDb.getOrderById(id) || null;
+export async function fetchSaleByIdDirect(id: string): Promise<Sale | null> {
+  return serverDb.getSaleById(id) || null;
+}
+
+export async function createSaleDirect(data: any): Promise<Sale> {
+  return serverDb.createSale(data);
+}
+
+export async function updateSaleDirect(id: string, updates: any): Promise<Sale | null> {
+  return serverDb.updateSale(id, updates);
+}
+
+export async function addSaleStageDirect(id: string, stageInput: any): Promise<Sale | null> {
+  // Master date/notes/party ride along; items are NOT pushed through
+  // updateSale — the new stage owns its own rows (seeded from the current
+  // stage's rows, or from stageInput.items when the caller provides them).
+  // Pushing items into updateSale first would overwrite the CURRENT stage's rows.
+  const masterUpdates: any = {};
+  if (stageInput.date) masterUpdates.date = stageInput.date;
+  if (stageInput.notes !== undefined) masterUpdates.notes = stageInput.notes;
+  // Party is LOCKED at creation — stage issuance never touches it.
+  if (Object.keys(masterUpdates).length > 0) {
+    serverDb.updateSale(id, masterUpdates);
   }
-  const o = await executeMysqlOne('SELECT * FROM orders WHERE id = ?', [id]);
-  if (!o) return null;
-  return {
-    id: o.id,
-    orderNumber: o.order_number,
-    type: o.type,
-    partyId: o.party_id,
-    partyName: o.party_name,
-    date: o.date,
-    stage: o.stage || undefined,
-    status: o.status || 'pending',
-    paymentMode: o.payment_mode || undefined,
-    accountId: o.account_id || undefined,
-    accountName: o.account_name || undefined,
-    paymentStatus: o.payment_status || 'paid',
-    items: parseJsonField(o.items, []),
-    taxRateGst: parseNum(o.tax_rate_gst, 18),
-    taxAmount: parseNum(o.tax_amount),
-    totalAmount: parseNum(o.total_amount),
-    notes: o.notes || undefined,
-    vehicleNo: o.vehicle_no || undefined,
-    driverName: o.driver_name || undefined,
-    transportCharges: parseNum(o.transport_charges),
-    createdAt: o.created_at,
-    updatedAt: o.updated_at,
-  };
+  return serverDb.addSaleStage(id, stageInput);
+}
+
+export async function deleteSaleDirect(id: string): Promise<boolean> {
+  return serverDb.deleteSale(id);
+}
+
+export async function fetchPurchasesDirect(): Promise<Purchase[]> {
+  return serverDb.getPurchases();
+}
+
+export async function fetchPurchaseByIdDirect(id: string): Promise<Purchase | null> {
+  return serverDb.getPurchaseById(id) || null;
+}
+
+export async function createPurchaseDirect(data: any): Promise<Purchase> {
+  return serverDb.createPurchase(data);
+}
+
+export async function updatePurchaseDirect(id: string, updates: any): Promise<Purchase | null> {
+  return serverDb.updatePurchase(id, updates);
+}
+
+export async function addPurchaseStageDirect(id: string, stageInput: any): Promise<Purchase | null> {
+  // Goods-receipt saves carry the master edits + received quantities: apply
+  // them to the master items BEFORE the stage save so its totals and inward
+  // use them.
+  const masterUpdates: any = {};
+  if (stageInput.partyId !== undefined) masterUpdates.partyId = stageInput.partyId;
+  if (stageInput.date) masterUpdates.date = stageInput.date;
+  if (stageInput.notes !== undefined) masterUpdates.notes = stageInput.notes;
+  if (stageInput.items) masterUpdates.items = stageInput.items;
+  if (Object.keys(masterUpdates).length > 0) {
+    serverDb.updatePurchase(id, masterUpdates);
+  }
+  return serverDb.addPurchaseStage(id, stageInput);
+}
+
+export async function deletePurchaseDirect(id: string): Promise<boolean> {
+  return serverDb.deletePurchase(id);
 }
 
 // ==========================================
@@ -546,7 +563,7 @@ export async function createItemDirect(itemData: any): Promise<Item> {
       id, name, code, type, category_id, unit_id, hsn_sac_code,
       tax_rate_gst, sale_price, purchase_price, opening_stock, opening_stock_price,
       opening_stock_date, technical_specs, remarks, is_active, current_stock,
-      min_stock_level, max_capacity, last_stock_update, movements, created_at, updated_at
+      min_stock_level, max_capacity, last_stock_update,  created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       name=VALUES(name), code=VALUES(code), type=VALUES(type),
@@ -559,7 +576,7 @@ export async function createItemDirect(itemData: any): Promise<Item> {
       technical_specs=VALUES(technical_specs),
       remarks=VALUES(remarks), is_active=VALUES(is_active),
       current_stock=VALUES(current_stock), min_stock_level=VALUES(min_stock_level),
-      max_capacity=VALUES(max_capacity), movements=VALUES(movements),
+      max_capacity=VALUES(max_capacity),
       last_stock_update=VALUES(last_stock_update),
       updated_at=VALUES(updated_at)`,
     [
@@ -584,7 +601,6 @@ export async function createItemDirect(itemData: any): Promise<Item> {
       item.maxCapacity || null,
       item.lastStockUpdate || null,
       // Movements live in the stock_movements ledger only — never on the items row.
-      null,
       item.createdAt || new Date().toISOString(),
       item.updatedAt || new Date().toISOString(),
     ]
@@ -713,84 +729,6 @@ export async function createBatchDirect(batchData: any): Promise<ProductionBatch
     ]
   );
   return batch;
-}
-
-export async function createOrderDirect(orderData: any): Promise<Order> {
-  const order = serverDb.createOrder(orderData);
-  if (!isMysqlConfigured()) return order;
-
-  await executeMysqlQuery(
-    `INSERT INTO orders (
-      id, order_number, type, party_id, party_name, date, stage, status,
-      payment_mode, account_id, account_name, payment_status, items,
-      tax_rate_gst, tax_amount, total_amount, notes, vehicle_no, driver_name,
-      transport_charges, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      order_number=VALUES(order_number), type=VALUES(type), party_id=VALUES(party_id),
-      party_name=VALUES(party_name), date=VALUES(date), stage=VALUES(stage), status=VALUES(status),
-      payment_mode=VALUES(payment_mode), account_id=VALUES(account_id), account_name=VALUES(account_name),
-      payment_status=VALUES(payment_status), items=VALUES(items), tax_rate_gst=VALUES(tax_rate_gst),
-      tax_amount=VALUES(tax_amount), total_amount=VALUES(total_amount), notes=VALUES(notes),
-      vehicle_no=VALUES(vehicle_no), driver_name=VALUES(driver_name),
-      transport_charges=VALUES(transport_charges), updated_at=VALUES(updated_at)`,
-    [
-      order.id,
-      order.orderNumber,
-      order.type,
-      order.partyId,
-      order.partyName,
-      order.date,
-      order.stage || null,
-      order.status || 'pending',
-      order.paymentMode || null,
-      order.accountId || null,
-      order.accountName || null,
-      order.paymentStatus || 'paid',
-      JSON.stringify(order.items || []),
-      order.taxRateGst || 18,
-      order.taxAmount || 0,
-      order.totalAmount || 0,
-      order.notes || null,
-      order.vehicleNo || null,
-      order.driverName || null,
-      order.transportCharges || 0,
-      order.createdAt || new Date().toISOString(),
-      order.updatedAt || new Date().toISOString(),
-    ]
-  );
-  return order;
-}
-
-export async function updateOrderDirect(id: string, updates: any): Promise<Order | null> {
-  const order = serverDb.updateOrder(id, updates);
-  if (!order || !isMysqlConfigured()) return order;
-
-  await executeMysqlQuery(
-    `UPDATE orders SET
-      stage = COALESCE(?, stage),
-      status = COALESCE(?, status),
-      payment_status = COALESCE(?, payment_status),
-      notes = COALESCE(?, notes),
-      updated_at = ?
-    WHERE id = ?`,
-    [
-      updates.stage || null,
-      updates.status || null,
-      updates.paymentStatus || null,
-      updates.notes || null,
-      new Date().toISOString(),
-      id,
-    ]
-  );
-  return order;
-}
-
-export async function deleteOrderDirect(id: string): Promise<boolean> {
-  const deleted = serverDb.deleteOrder(id);
-  if (!isMysqlConfigured()) return deleted;
-  await executeMysqlQuery('DELETE FROM orders WHERE id = ?', [id]);
-  return true;
 }
 
 export async function createVehicleDirect(vehData: any): Promise<Vehicle> {

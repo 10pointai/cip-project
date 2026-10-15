@@ -22,6 +22,19 @@ import {
   EmployeePayment,
   ItemStockAdjustment,
   StockMovementLog,
+  OrderStatus,
+  PaymentMode,
+  Sale,
+  Purchase,
+  SalesOrderItem,
+  SalesOrderStage,
+  SalesStage,
+  PurchaseOrderItem,
+  PurchaseOrderStage,
+  SalesOrderItemInput,
+  PurchaseOrderItemInput,
+  SalesOrderStageInput,
+  PurchaseOrderStageInput,
   AppUser,
   UserPermissions,
   UserRole,
@@ -35,7 +48,12 @@ import {
   liveSyncParty,
   liveSyncItem,
   liveSyncTransaction,
-  liveSyncOrder,
+  liveSyncSale,
+  liveSyncSaleItems,
+  liveSyncSaleStages,
+  liveSyncPurchase,
+  liveSyncPurchaseItems,
+  liveSyncPurchaseStages,
   liveSyncBatch,
   liveSyncAuditLog,
   liveSyncVehicle,
@@ -110,7 +128,10 @@ export interface DatabaseSchema {
   locations: ItemLocation[];
   stockAdjustments: ItemStockAdjustment[];
   productionBatches: ProductionBatchRun[];
+  /** @deprecated legacy `orders` rows (retired by the relational sale/purchase split) */
   orders: Order[];
+  sales: Sale[];
+  purchases: Purchase[];
   vehicles: Vehicle[];
   drivers: Driver[];
   tripSlips: TripSlip[];
@@ -137,6 +158,7 @@ export interface StockMovementRecord extends StockMovementLog {
   locationId?: string;
   partyId?: string;
   referenceType?: string;
+  referenceId?: string; // FK to the source sale/purchase master (reversal key)
   // Display names resolved via JOIN at read time (never persisted by name in MySQL)
   locationName?: string;
   partyName?: string;
@@ -171,6 +193,8 @@ class ServerLocalDatabase {
       stockMovements: [],
       productionBatches: JSON.parse(JSON.stringify(SEED_BATCHES)),
       orders: [],
+      sales: [],
+      purchases: [],
       vehicles: JSON.parse(JSON.stringify(SEED_VEHICLES)),
       drivers: JSON.parse(JSON.stringify(SEED_DRIVERS)),
       tripSlips: JSON.parse(JSON.stringify(SEED_TRIP_SLIPS)),
@@ -335,6 +359,10 @@ class ServerLocalDatabase {
     const snapshot = {
       ...this.data,
       items: this.data.items.map((i) => this.hydrateItemWithMovements(i)),
+      // Sale/purchase display fields are live views: party/unit/location names
+      // are re-resolved from the masters on every snapshot (Golden Rule §2).
+      sales: (this.data.sales || []).map((s) => this.hydrateSale(s)),
+      purchases: (this.data.purchases || []).map((p) => this.hydratePurchase(p)),
       // Transfer/adjustment display names are live views from the account master
       transfers: (this.data.transfers || []).map((t) => this.hydrateTransfer(t)),
       adjustments: (this.data.adjustments || []).map((a) => this.hydrateAdjustment(a)),
@@ -359,6 +387,8 @@ class ServerLocalDatabase {
         locations: this.data.locations.length,
         productionBatches: this.data.productionBatches.length,
         orders: this.data.orders.length,
+        sales: (this.data.sales || []).length,
+        purchases: (this.data.purchases || []).length,
         vehicles: this.data.vehicles.length,
         drivers: this.data.drivers.length,
         tripSlips: this.data.tripSlips.length,
@@ -377,7 +407,11 @@ class ServerLocalDatabase {
     const party = this.data.parties.find((p) => p.id === partyId);
     if (!party) return 0;
 
-    let balance = party.openingBalanceType === 'to_receive' ? party.openingBalance : -party.openingBalance;
+    // Guard: parties created without an opening balance carry undefined here —
+    // start the ledger from 0, never from NaN (NaN would poison every later
+    // read balance and write back as 0/null).
+    const opening = Number(party.openingBalance) || 0;
+    let balance = party.openingBalanceType === 'to_receive' ? opening : -opening;
 
     const txns = this.data.transactions.filter((t) => t.partyId === partyId);
     for (const t of txns) {
@@ -441,12 +475,13 @@ class ServerLocalDatabase {
   public createParty(partyData: Omit<Party, 'id' | 'createdAt' | 'updatedAt' | 'currentBalance'> & { currentBalance?: number }): Party {
     // Monotonic clock id: concurrent creates must never share an id
     const newId = `pty-${this.nextLedgerMs()}`;
+    const openingBal = Number(partyData.openingBalance) || 0;
     const initialBal =
       partyData.currentBalance !== undefined
         ? partyData.currentBalance
         : partyData.openingBalanceType === 'to_receive'
-        ? partyData.openingBalance
-        : -partyData.openingBalance;
+        ? openingBal
+        : -openingBal;
 
     const newParty: Party = {
       ...partyData,
@@ -469,12 +504,13 @@ class ServerLocalDatabase {
 
     partiesData.forEach((partyData, index) => {
       const newId = `pty-${timestamp}-${index}-${Math.random().toString(36).substring(2, 7)}`;
+      const openingBal = Number(partyData.openingBalance) || 0;
       const initialBal =
         partyData.currentBalance !== undefined
           ? partyData.currentBalance
           : partyData.openingBalanceType === 'to_receive'
-          ? partyData.openingBalance
-          : -partyData.openingBalance;
+          ? openingBal
+          : -openingBal;
 
       const newParty: Party = {
         ...partyData,
@@ -862,7 +898,7 @@ class ServerLocalDatabase {
     return true;
   }
 
-  public adjustItemStock(id: string, delta: number, logType: 'purchase_inward' | 'production_output' | 'production_consumed' | 'sale_dispatch' | 'opening' | 'adjustment_increase' | 'adjustment_decrease', refNo?: string, notes?: string, locationName?: string, partyId?: string, rate?: number): Item {
+  public adjustItemStock(id: string, delta: number, logType: 'purchase_inward' | 'production_output' | 'production_consumed' | 'sale_dispatch' | 'opening' | 'adjustment_increase' | 'adjustment_decrease' | 'dispatch_reversal' | 'inward_reversal', refNo?: string, notes?: string, locationName?: string, partyId?: string, rate?: number, referenceId?: string): Item {
     const item = this.findItemRaw(id);
     if (!item) throw new Error(`Item ${id} not found.`);
     const current = item.currentStock || 0;
@@ -975,6 +1011,7 @@ class ServerLocalDatabase {
       rate: rateToRecord > 0 ? rateToRecord : undefined,
       movementValue: rateToRecord > 0 ? Math.abs(delta) * rateToRecord : undefined,
       referenceNumber: refNo,
+      referenceId: referenceId,
       sourcePartyOrBatch: undefined, // resolved via party JOIN on read, never stored by name
       partyId: partyId && partyId !== 'unassigned' ? partyId : undefined,
       notes: notes,
@@ -992,7 +1029,7 @@ class ServerLocalDatabase {
         movement.referenceType = 'production_batch';
         break;
       default:
-        movement.referenceType = 'order';
+        movement.referenceType = referenceId ? 'order_document' : 'order';
     }
 
     // Append-only ledger: one INSERT per stock change, never rewritten.
@@ -1328,7 +1365,15 @@ class ServerLocalDatabase {
     return true;
   }
 
-  // --- ORDERS ---
+  // ========== SALES & PURCHASE — RELATIONAL ORDER MODEL ==========
+  // The legacy single-table `orders` design is retired: a sale / purchase is a
+  // MASTER record; stage documents (quotation → sales order / proforma →
+  // delivery note / invoice; RFQ → PO → GRN) are separate rows saved against
+  // it (full document history). Items live on the master. Stock / cash
+  // application happens ONCE per master, at whichever stage save the user
+  // flips the "update inventory / update cash" toggle.
+
+  /** Legacy `orders` rows are READ-only (kept for the retired table). */
   public getOrders(): Order[] {
     return this.data.orders;
   }
@@ -1337,122 +1382,1202 @@ class ServerLocalDatabase {
     return this.data.orders.find((o) => o.id === id);
   }
 
-  private applyOrderStock(order: Order, reverse: boolean = false) {
-    if (!order.items || order.items.length === 0) return;
-    if (order.type === 'sales' && order.stage === 'quotation') return;
-    if (order.type === 'purchase' && order.purchaseStage === 'rfq') return;
-    if (order.status === 'cancelled') return;
+  // ---------- shared FK resolution helpers (Golden Rule §2) ----------
 
-    const multiplier = reverse ? -1 : 1;
-    for (const item of order.items) {
+  private resolveUnitIdFromCode(code?: string | null): string | undefined {
+    const c = (code || '').trim().toLowerCase();
+    if (!c) return undefined;
+    return this.data.units.find(
+      (u) => (u.code || '').trim().toLowerCase() === c || (u.name || '').trim().toLowerCase() === c
+    )?.id;
+  }
+
+  private resolveLocationIdFromName(name?: string | null): string | undefined {
+    const n = (name || '').trim().toLowerCase();
+    if (!n) return undefined;
+    return this.data.locations.find((l) => (l.name || '').trim().toLowerCase() === n)?.id;
+  }
+
+  private computeStageTotals(
+    lines: Array<{ quantity: number; rate: number; gstRate?: number }>,
+    transportCharges = 0
+  ): { subtotal: number; taxAmount: number; totalAmount: number; taxRateGst: number } {
+    let subtotal = 0;
+    let taxAmount = 0;
+    for (const li of lines) {
+      const lineTotal = (Number(li.quantity) || 0) * (Number(li.rate) || 0);
+      subtotal += lineTotal;
+      taxAmount += (lineTotal * (Number(li.gstRate) || 0)) / 100;
+    }
+    const taxRateGst = subtotal > 0 ? Math.round((taxAmount / subtotal) * 10000) / 100 : 0;
+    // Figures approximated to 2 decimal places (paise) — matches the modal math
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+    const subtotal2 = r2(subtotal);
+    const taxAmount2 = r2(taxAmount);
+    return { subtotal: subtotal2, taxAmount: taxAmount2, totalAmount: r2(subtotal2 + taxAmount2 + (Number(transportCharges) || 0)), taxRateGst };
+  }
+
+  private computeSalesStatus(sale: Sale): OrderStatus {
+    if (sale.status === 'cancelled') return 'cancelled';
+    const stageTypes = new Set((sale.stages || []).map((s) => s.stageType));
+    return stageTypes.has('delivery_note') || stageTypes.has('sales_invoice') ? 'completed' : 'pending';
+  }
+
+  private computePurchaseStatus(purchase: Purchase): OrderStatus {
+    if (purchase.status === 'cancelled') return 'cancelled';
+    return (purchase.stages || []).some((s) => s.stageType === 'goods_receipt') ? 'completed' : 'pending';
+  }
+
+  // ---------- CASH & BANK SETTLEMENT — voucher posting for sales/purchases ----------
+  // A sale's sales_invoice stage (a purchase's goods_receipt stage) posts TWO
+  // entries through the shared voucher funnel (cash & bank + party ledger):
+  //   1. the invoice/bill journal voucher  — party receivable/payable moves;
+  //      NO account linkage → the Cash/Bank account balance is untouched.
+  //   2. (only when the user chose "Settle Payment Now") the receipt/payout
+  //      voucher — account FK set via createTransaction → its
+  //      recalculateAccountBalance credits/debits the account, and
+  //      recalculatePartyBalance cancels the receivable/payable.
+  // Voucher ids are deterministic (`txn-<saleId>-inv` / `-pay`), so a re-run
+  // of the same stage save REPLACES its own row instead of duplicating it
+  // (createTransaction upserts by id). The invoice/bill voucher number is
+  // stamped at first issue and then kept stable across re-runs.
+
+  private roundMoney(n: number): number {
+    return Math.round((Number(n) || 0) * 100) / 100;
+  }
+
+  /** Mint a voucher number under the company's configured prefix, skipping
+   *  collisions with any existing voucher. */
+  private mintVoucherNumber(prefix: string): string {
+    const taken = new Set((this.data.transactions || []).map((t) => t.voucherNumber));
+    for (let i = 0; i < 50; i += 1) {
+      const candidate = `${prefix}${Math.floor(1000 + Math.random() * 9000)}`;
+      if (!taken.has(candidate)) return candidate;
+    }
+    return `${prefix}${Date.now().toString().slice(-6)}`; // fallback after 50 tries
+  }
+
+  /** Voucher mutations recalculate the sandbox party/account balances — the
+   *  finance reads rehydrate from MySQL, so push the fresh balances out. */
+  private syncLedgerBalances(partyId?: string, accountIds?: Array<string | undefined | null>): void {
+    if (partyId) {
+      this.recalculatePartyBalance(partyId);
+      const party = this.data.parties.find((p) => p.id === partyId);
+      if (party) liveSyncParty(party);
+    }
+    for (const aid of accountIds || []) {
+      if (!aid) continue;
+      this.recalculateAccountBalance(aid);
+      const acc = (this.data.accounts || []).find((a) => a.id === aid);
+      if (acc) liveSyncAccount(acc);
+    }
+  }
+
+  /** Post (idempotently, by id) the sale_invoice journal voucher for the
+   *  invoice stage — amount is a statutory snapshot of the stage total. */
+  private upsertSaleInvoiceVoucher(sale: Sale, stage: SalesOrderStage): string {
+    const party = this.data.parties.find((p) => p.id === sale.partyId);
+    const existingVoucher = sale.invoiceVoucherId
+      ? (this.data.transactions || []).find((t) => t.id === sale.invoiceVoucherId)
+      : undefined;
+    const voucherNumber = existingVoucher?.voucherNumber || this.mintVoucherNumber(this.data.settings.prefixes.salesInvoice);
+    const voucherId = existingVoucher?.id || `txn-${sale.id}-inv`;
+    this.createTransaction(
+      {
+        id: voucherId,
+        voucherNumber,
+        partyId: sale.partyId,
+        partyType: (party?.type as any) || 'customer',
+        type: 'sale_invoice',
+        amount: this.roundMoney(stage.totalAmount),
+        date: stage.date || sale.date,
+        referenceNumber: stage.stageNumber,
+        description: `Sales Invoice ${stage.stageNumber} — sale ${sale.saleNumber}`,
+        status: sale.cashApplied ? 'paid' : 'pending',
+      },
+    );
+    return voucherId;
+  }
+
+  /** Post (idempotently) the payment_in receipt voucher crediting the chosen
+   *  Cash/Bank account; throws when the settlement account is unknown (the
+   *  routes surface it as a 400 via the bizStatus pattern). */
+  private upsertSaleReceiptVoucher(sale: Sale, stage: SalesOrderStage, settlementAccountId: string, paymentMode?: string): string {
+    const account = (this.data.accounts || []).find((a) => a.id === settlementAccountId && a.isActive);
+    if (!account) {
+      throw new Error('Selected settlement account was not found — please choose an active Cash/Bank account.');
+    }
+    const party = this.data.parties.find((p) => p.id === sale.partyId);
+    const existingVoucher = sale.settlementVoucherId
+      ? (this.data.transactions || []).find((t) => t.id === sale.settlementVoucherId)
+      : undefined;
+    const voucherNumber = existingVoucher?.voucherNumber || this.mintVoucherNumber(this.data.settings.prefixes.paymentReceipt);
+    const voucherId = existingVoucher?.id || `txn-${sale.id}-pay`;
+    this.createTransaction(
+      {
+        id: voucherId,
+        voucherNumber,
+        partyId: sale.partyId,
+        partyType: (party?.type as any) || 'customer',
+        type: 'payment_in',
+        amount: this.roundMoney(stage.totalAmount),
+        date: stage.date || sale.date,
+        accountId: settlementAccountId,
+        paymentMode: (paymentMode as any) || 'bank_transfer',
+        referenceNumber: stage.stageNumber,
+        description: `Receipt against Sales Invoice ${stage.stageNumber} — sale ${sale.saleNumber}`,
+        status: 'paid',
+      }
+    );
+    return voucherId;
+  }
+
+  /** One-shot gate: posts the sale's invoice voucher (+ receipt voucher when
+   *  settling) exactly once per sale, recording the settlement FKs + snapshot
+   *  on the master. Runs whenever a sales_invoice stage document is saved. */
+  private applySaleCash(
+    sale: Sale,
+    stage: SalesOrderStage,
+    settlement: { settle: boolean; settlementAccountId?: string; paymentMode?: PaymentMode }
+  ): void {
+    const wasSettled = sale.cashApplied;
+
+    // Validate the settlement account BEFORE any voucher is written — a reject
+    // must not leave an orphaned invoice voucher behind.
+    if (settlement.settle && !wasSettled && settlement.settlementAccountId) {
+      const account = (this.data.accounts || []).find((a) => a.id === settlement.settlementAccountId && a.isActive);
+      if (!account) {
+        throw new Error('Selected settlement account was not found — please choose an active Cash/Bank account.');
+      }
+    }
+
+    // 1. Invoice voucher (always, once the invoice document exists).
+    const billId = this.upsertSaleInvoiceVoucher(sale, stage);
+    sale.invoiceVoucherId = billId;
+
+    // 2. Receipt voucher (only when the user settles; guard: never doubles).
+    if (settlement.settle && !wasSettled) {
+      if (!settlement.settlementAccountId) {
+        throw new Error('A Deposit / Settlement Account is required when settling payment for an invoice.');
+      }
+      const payId = this.upsertSaleReceiptVoucher(sale, stage, settlement.settlementAccountId, settlement.paymentMode);
+      sale.settlementVoucherId = payId;
+      sale.settlementAccountId = settlement.settlementAccountId;
+      sale.paymentMode = settlement.paymentMode || sale.paymentMode;
+      sale.settledAmount = this.roundMoney(stage.totalAmount);
+      sale.settledDate = stage.date || sale.date;
+      sale.cashApplied = true;
+    } else if (wasSettled && sale.invoiceVoucherId) {
+      // Sale was already settled (defensive: settlement outside the UI) —
+      // keep the receipt voucher's amount in step with the stage total.
+      const receipt = (this.data.transactions || []).find((t) => t.id === sale.settlementVoucherId);
+      if (receipt && this.roundMoney(receipt.amount) !== this.roundMoney(stage.totalAmount)) {
+        this.updateTransaction(receipt.id, { amount: this.roundMoney(stage.totalAmount) });
+        sale.settledAmount = this.roundMoney(stage.totalAmount);
+      }
+    }
+    // Refresh the invoice voucher's status flag: paid when settled.
+    if (sale.invoiceVoucherId) {
+      const invoiceTxn = (this.data.transactions || []).find((t) => t.id === sale.invoiceVoucherId);
+      if (invoiceTxn && invoiceTxn.status !== (sale.cashApplied ? 'paid' : 'pending') && invoiceTxn.status !== 'cancelled') {
+        this.updateTransaction(invoiceTxn.id, { status: sale.cashApplied ? 'paid' : 'pending' });
+      }
+    }
+    // Push the recalculated party/account balances to MySQL.
+    this.syncLedgerBalances(sale.partyId, [sale.settlementAccountId]);
+  }
+
+  /** Mirror for purchases at the goods_receipt stage: purchase_bill journal
+   *  voucher + (when settling) payment_out payout voucher debiting the
+   *  selected Cash/Bank account. */
+  private applyPurchaseCash(
+    purchase: Purchase,
+    stage: PurchaseOrderStage,
+    settlement: { settle: boolean; settlementAccountId?: string; paymentMode?: PaymentMode }
+  ): void {
+    const wasSettled = purchase.cashApplied;
+    const party = purchase.partyId ? this.data.parties.find((p) => p.id === purchase.partyId) : undefined;
+
+    // Validate the settlement account BEFORE any voucher is written — a reject
+    // must not leave an orphaned bill voucher behind.
+    if (settlement.settle && !wasSettled) {
+      if (!settlement.settlementAccountId) {
+        throw new Error('A Disbursement / Source Account is required when settling payment for a goods receipt.');
+      }
+      const account = (this.data.accounts || []).find((a) => a.id === settlement.settlementAccountId && a.isActive);
+      if (!account) {
+        throw new Error('Selected settlement account was not found — please choose an active Cash/Bank account.');
+      }
+    }
+
+    // 1. Purchase bill journal voucher (payable moves; no account linkage).
+    const existingBill = purchase.invoiceVoucherId
+      ? (this.data.transactions || []).find((t) => t.id === purchase.invoiceVoucherId)
+      : undefined;
+    const billNumber = existingBill?.voucherNumber || this.mintVoucherNumber(this.data.settings.prefixes.purchaseBill);
+    const billId = existingBill?.id || `txn-${purchase.id}-bill`;
+    this.createTransaction(
+      {
+        id: billId,
+        voucherNumber: billNumber,
+        partyId: purchase.partyId!,
+        partyType: (party?.type as any) || 'supplier',
+        type: 'purchase_bill',
+        amount: this.roundMoney(stage.totalAmount),
+        date: stage.date || purchase.date,
+        referenceNumber: stage.stageNumber,
+        description: `Purchase Bill ${stage.stageNumber} — purchase ${purchase.purchaseNumber}`,
+        status: purchase.cashApplied ? 'paid' : 'pending',
+      }
+    );
+    purchase.invoiceVoucherId = billId;
+
+    // 2. Payout voucher (debit the account).
+    if (settlement.settle && !wasSettled) {
+      const existingPay = purchase.settlementVoucherId
+        ? (this.data.transactions || []).find((t) => t.id === purchase.settlementVoucherId)
+        : undefined;
+      const payNumber = existingPay?.voucherNumber || this.mintVoucherNumber(this.data.settings.prefixes.paymentReceipt);
+      const payId = existingPay?.id || `txn-${purchase.id}-pay`;
+      this.createTransaction(
+        {
+          id: payId,
+          voucherNumber: payNumber,
+          partyId: purchase.partyId!,
+          partyType: (party?.type as any) || 'supplier',
+          type: 'payment_out',
+          amount: this.roundMoney(stage.totalAmount),
+          date: stage.date || purchase.date,
+          accountId: settlement.settlementAccountId,
+          paymentMode: (settlement.paymentMode as any) || 'bank_transfer',
+          referenceNumber: stage.stageNumber,
+          description: `Payout against Purchase Bill ${stage.stageNumber} — purchase ${purchase.purchaseNumber}`,
+          status: 'paid',
+        }
+      );
+      purchase.settlementVoucherId = payId;
+      purchase.settlementAccountId = settlement.settlementAccountId;
+      purchase.paymentMode = settlement.paymentMode || purchase.paymentMode;
+      purchase.settledAmount = this.roundMoney(stage.totalAmount);
+      purchase.settledDate = stage.date || purchase.date;
+      purchase.cashApplied = true;
+    } else if (wasSettled && purchase.settlementVoucherId) {
+      const receipt = (this.data.transactions || []).find((t) => t.id === purchase.settlementVoucherId);
+      if (receipt && this.roundMoney(receipt.amount) !== this.roundMoney(stage.totalAmount)) {
+        this.updateTransaction(receipt.id, { amount: this.roundMoney(stage.totalAmount) });
+        purchase.settledAmount = this.roundMoney(stage.totalAmount);
+      }
+    }
+    if (purchase.invoiceVoucherId) {
+      const billTxn = (this.data.transactions || []).find((t) => t.id === purchase.invoiceVoucherId);
+      if (billTxn && billTxn.status !== (purchase.cashApplied ? 'paid' : 'pending') && billTxn.status !== 'cancelled') {
+        this.updateTransaction(billTxn.id, { status: purchase.cashApplied ? 'paid' : 'pending' });
+      }
+    }
+    // Push the recalculated party/account balances to MySQL.
+    this.syncLedgerBalances(purchase.partyId, [purchase.settlementAccountId]);
+  }
+
+  /** Remove the voucher(s) a sale/purchase posted to Cash & Bank (deletion /
+   *  cancellation reversal — the party + account balances re-recalculate via
+   *  deleteTransaction's built-in compensation). */
+  private deleteLinkedVouchers(
+    master: { partyId?: string; invoiceVoucherId?: string; settlementVoucherId?: string },
+    label: string
+  ): void {
+    const accountIds: Array<string | undefined> = [];
+    for (const vid of [master.invoiceVoucherId, master.settlementVoucherId]) {
+      if (vid) {
+        const txn = (this.data.transactions || []).find((t) => t.id === vid);
+        if (txn) {
+          accountIds.push(txn.accountId);
+          this.deleteTransaction(vid);
+          this.logAudit('DELETE', 'VOUCHER_REVERSAL', vid, `${label}: removed voucher ${txn.voucherNumber}`);
+        }
+      }
+    }
+    master.invoiceVoucherId = undefined;
+    master.settlementVoucherId = undefined;
+    // Push the recalculated party/account balances to MySQL.
+    this.syncLedgerBalances(master.partyId, accountIds);
+  }
+
+  /** Material equality of order line sets (item, qty, rate, received qty) —
+   *  re-saves that don't change the applied values must not churn the ledger. */
+  private areOrderItemLinesEqual(
+    a: Array<any> | undefined,
+    b: Array<any> | undefined
+  ): boolean {
+    const la = a || [];
+    const lb = b || [];
+    if (la.length !== lb.length) return false;
+    const epsilon = 1e-9;
+    return la.every((x, i) => {
+      const y = lb[i];
+      const sameId = x.itemId === y.itemId;
+      const sameQty = Math.abs((Number(x.quantity) || 0) - (Number(y.quantity) || 0)) < epsilon;
+      const sameRate = Math.abs((Number(x.rate) || 0) - (Number(y.rate) || 0)) < epsilon;
+      const sameRecv =
+        (x.receivedQuantity === undefined || x.receivedQuantity === null) === (y.receivedQuantity === undefined || y.receivedQuantity === null) &&
+        Math.abs((Number(x.receivedQuantity) || 0) - (Number(y.receivedQuantity) || 0)) < epsilon;
+      return sameId && sameQty && sameRate && sameRecv;
+    });
+  }
+
+  // ---------- hydration (display names re-resolved live from the masters) ----------
+
+  private hydrateSale(sale: Sale): Sale {
+    const party = this.data.parties.find((p) => p.id === sale.partyId);
+    const hydrateLines = (lines?: SalesOrderItem[]): SalesOrderItem[] =>
+      (lines || []).map((li) => {
+        const master = this.findItemRaw(li.itemId);
+        const unitId = li.unitId || master?.unitId;
+        const unit = unitId
+          ? this.data.units.find((u) => u.id === unitId)?.code || undefined
+          : master?.unit;
+        const location = li.locationId
+          ? this.data.locations.find((l) => l.id === li.locationId)?.name
+          : undefined;
+        return {
+          ...li,
+          itemName: master?.name,
+          itemCode: master?.code,
+          unit,
+          location,
+          amount: (Number(li.quantity) || 0) * (Number(li.rate) || 0),
+        };
+      });
+    const stages: SalesOrderStage[] = (sale.stages || []).map((st) => ({
+      ...st,
+      items: hydrateLines(st.items),
+    }));
+    // Sale.items = the CURRENT (latest) stage's line set; falls back to the
+    // master-level rows for legacy data that predates stage scoping.
+    const latestStage = stages.length > 0 ? stages[stages.length - 1] : undefined;
+    const items: SalesOrderItem[] =
+      latestStage && (latestStage.items || []).length > 0
+        ? (latestStage.items as SalesOrderItem[])
+        : hydrateLines(sale.items);
+    return {
+      ...sale,
+      partyName: party ? (party.tradeName || party.name) : undefined,
+      items,
+      stages,
+      // Settlement display fields (Golden Rule §2 — JOINed, never persisted)
+      settlementAccountName: sale.settlementAccountId
+        ? (this.data.accounts || []).find((a) => a.id === sale.settlementAccountId)?.name
+        : undefined,
+      invoiceVoucherNumber: sale.invoiceVoucherId
+        ? (this.data.transactions || []).find((t) => t.id === sale.invoiceVoucherId)?.voucherNumber
+        : undefined,
+      settlementVoucherNumber: sale.settlementVoucherId
+        ? (this.data.transactions || []).find((t) => t.id === sale.settlementVoucherId)?.voucherNumber
+        : undefined,
+    };
+  }
+
+  private hydratePurchase(purchase: Purchase): Purchase {
+    const party = purchase.partyId
+      ? this.data.parties.find((p) => p.id === purchase.partyId)
+      : undefined;
+    const items: PurchaseOrderItem[] = (purchase.items || []).map((li) => {
+      const master = this.findItemRaw(li.itemId);
+      const unitId = li.unitId || master?.unitId;
+      const unit = unitId
+        ? this.data.units.find((u) => u.id === unitId)?.code || undefined
+        : master?.unit;
+      const location = li.locationId
+        ? this.data.locations.find((l) => l.id === li.locationId)?.name
+        : undefined;
+      const ordered = Number(li.quantity) || 0;
+      const recv = li.receivedQuantity !== undefined && li.receivedQuantity !== null ? Number(li.receivedQuantity) : undefined;
+      return {
+        ...li,
+        itemName: master?.name,
+        itemCode: master?.code,
+        unit,
+        location,
+        receivedQuantity: recv,
+        shortageQuantity: recv !== undefined && recv < ordered ? ordered - recv : undefined,
+        overageQuantity: recv !== undefined && recv > ordered ? recv - ordered : undefined,
+        amount: ordered * (Number(li.rate) || 0),
+      };
+    });
+    return {
+      ...purchase,
+      partyName: party ? (party.tradeName || party.name) : undefined,
+      items,
+      stages: [...(purchase.stages || [])],
+      // Settlement display fields (Golden Rule §2 — JOINed, never persisted)
+      settlementAccountName: purchase.settlementAccountId
+        ? (this.data.accounts || []).find((a) => a.id === purchase.settlementAccountId)?.name
+        : undefined,
+      invoiceVoucherNumber: purchase.invoiceVoucherId
+        ? (this.data.transactions || []).find((t) => t.id === purchase.invoiceVoucherId)?.voucherNumber
+        : undefined,
+      settlementVoucherNumber: purchase.settlementVoucherId
+        ? (this.data.transactions || []).find((t) => t.id === purchase.settlementVoucherId)?.voucherNumber
+        : undefined,
+    };
+  }
+
+  // ---------- line normalization: FKs only, resolved from the masters ----------
+
+  private normalizeSaleItemLines(saleId: string, input: SalesOrderItemInput[], stageId?: string): SalesOrderItem[] {
+    const now = new Date().toISOString();
+    return (input || [])
+      .filter((li) => li.itemId && Number(li.quantity) > 0)
+      .map((li) => {
+        const master = this.findItemRaw(li.itemId);
+        const locationId = li.locationId || this.resolveLocationIdFromName(li.locationName);
+        const quantity = Number(li.quantity) || 0;
+        const rate = Number(li.rate) || 0;
+        return {
+          id: `soi-${saleId}-${Math.random().toString(36).slice(2, 10)}`,
+          saleId,
+          stageId: stageId,
+          itemId: li.itemId,
+          unitId: master?.unitId || this.resolveUnitIdFromCode(master?.unit),
+          quantity,
+          rate,
+          amount: quantity * rate,
+          gstRate: li.gstRate ?? master?.taxRateGst ?? 0,
+          locationId,
+          itemNotes: li.itemNotes,
+          createdAt: now,
+        } as unknown as SalesOrderItem;
+      });
+  }
+
+  private normalizePurchaseItemLines(purchaseId: string, input: PurchaseOrderItemInput[]): PurchaseOrderItem[] {
+    const now = new Date().toISOString();
+    return (input || [])
+      .filter((li) => li.itemId && Number(li.quantity) > 0)
+      .map((li) => {
+        const master = this.findItemRaw(li.itemId);
+        const locationId = li.locationId || this.resolveLocationIdFromName(li.locationName);
+        const ordered = Number(li.quantity) || 0;
+        const rate = Number(li.rate) || 0;
+        const recv =
+          li.receivedQuantity !== undefined && li.receivedQuantity !== null
+            ? Number(li.receivedQuantity)
+            : undefined;
+        return {
+          id: `poi-${purchaseId}-${Math.random().toString(36).slice(2, 10)}`,
+          purchaseId,
+          itemId: li.itemId,
+          unitId: master?.unitId || this.resolveUnitIdFromCode(master?.unit),
+          quantity: ordered,
+          rate,
+          amount: ordered * rate,
+          gstRate: li.gstRate ?? master?.taxRateGst ?? 0,
+          locationId,
+          receivedQuantity: recv,
+          shortageQuantity: recv !== undefined && recv < ordered ? ordered - recv : undefined,
+          overageQuantity: recv !== undefined && recv > ordered ? recv - ordered : undefined,
+          itemNotes: li.itemNotes,
+          createdAt: now,
+        } as unknown as PurchaseOrderItem;
+      });
+  }
+
+  // ---------- stock application (ONCE per master, toggle-gated) ----------
+
+  /**
+   * Posts the sale's dispatch movements (one sale_dispatch row per line,
+   * FIFO: adjustItemStock records the blended consumed rate). Guarded by the
+   * master's inventory_applied flag — the toggle can never double-post.
+   */
+  public applySaleInventory(sale: Sale, referenceNumber?: string, force = false): boolean {
+    if (sale.inventoryApplied && !force) return false;
+    for (const li of sale.items || []) {
+      const master = this.findItemRaw(li.itemId);
+      if (!master) {
+        console.error(`[DB] Sale inventory: item ${li.itemId} not found for sale ${sale.saleNumber}`);
+        continue;
+      }
+      const locName = li.locationId
+        ? this.data.locations.find((l) => l.id === li.locationId)?.name
+        : undefined;
       try {
-        const isPurchase = order.type === 'purchase';
-        const effectiveQty = isPurchase && order.purchaseStage === 'goods_receipt' && item.receivedQuantity !== undefined
-          ? item.receivedQuantity
-          : item.quantity;
-        const delta = isPurchase ? (effectiveQty * multiplier) : (-item.quantity * multiplier);
-        const logType = isPurchase ? (delta >= 0 ? 'purchase_inward' : 'sale_dispatch') : (delta >= 0 ? 'purchase_inward' : 'sale_dispatch');
-        const refNo = isPurchase && order.receiptDetails?.grnNumber ? order.receiptDetails.grnNumber : order.orderNumber;
-        const notes = reverse
-          ? `Reversal of ${order.type} order ${order.orderNumber} (${order.partyName})`
-          : isPurchase
-            ? `${order.purchaseStage === 'goods_receipt' ? 'Goods Receipt / GRN' : 'Purchase Order'} from ${order.partyName} (${refNo})${item.location ? ` [${item.location}]` : ''}${item.shortageQuantity ? ` [Shortage: ${item.shortageQuantity} ${item.unit}]` : ''}`
-            : `Dispatched to ${order.partyName} (Order ${order.orderNumber})${item.location ? ` [${item.location}]` : ''}`;
-        this.adjustItemStock(item.itemId, delta, logType as any, refNo, notes, item.location, order.partyId, isPurchase && delta > 0 ? (Number(item.rate) || undefined) : undefined);
-      } catch (e) {
-        console.error(`Failed to sync inventory for order item ${item.itemId}:`, e);
+        this.adjustItemStock(
+          li.itemId,
+          -Math.abs(Number(li.quantity) || 0),
+          'sale_dispatch',
+          referenceNumber || sale.saleNumber,
+          `Sales dispatch against ${sale.saleNumber}`,
+          locName,
+          sale.partyId,
+          undefined, // outward: FIFO blended consumption rate is computed by the funnel
+          sale.id
+        );
+      } catch (e: any) {
+        console.error(`[DB] Failed to dispatch item ${li.itemId} for sale ${sale.saleNumber}:`, e.message);
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Compensates EVERY sale_dispatch row posted for this sale by writing
+   * dispatch_reversal rows that re-enter stock at the FIFO blended rate the
+   * original movement actually consumed (its recorded `rate`). Reversals are
+   * matched to their originals by referenceNumber = original movement id —
+   * append-only ledger stays idempotent (an already-reversed dispatch is never
+   * reversed twice).
+   */
+  public unapplySaleInventory(sale: Sale, reason = 'Reversal of sales dispatch'): void {
+    const originals = (this.data.stockMovements || []).filter(
+      (m) => m.referenceId === sale.id && m.type === 'sale_dispatch'
+    );
+    const reversalKeys = new Set(
+      (this.data.stockMovements || [])
+        .filter((m) => m.type === 'dispatch_reversal' && m.referenceId === sale.id)
+        .map((m) => m.referenceNumber)
+    );
+    for (const original of originals) {
+      if (reversalKeys.has(original.id)) continue;
+      const master = this.findItemRaw(original.itemId);
+      const locName =
+        original.locationId
+          ? master?.locations?.find((l) => l.locationId === original.locationId)?.locationName ||
+            this.data.locations.find((l) => l.id === original.locationId)?.name
+          : undefined;
+      try {
+        this.adjustItemStock(
+          original.itemId,
+          Math.abs(Number(original.quantity) || 0),
+          'dispatch_reversal',
+          original.id, // reversal key: matching original movement id (idempotency)
+          `${reason} ${sale.saleNumber} (doc ${original.referenceNumber || '—'})`,
+          locName,
+          sale.partyId,
+          Number(original.rate) > 0 ? Number(original.rate) : undefined, // re-enter at the consumed FIFO rate
+          sale.id
+        );
+      } catch (e: any) {
+        console.error(`[DB] Failed to reverse sale dispatch ${original.id}:`, e.message);
       }
     }
   }
 
-  public createOrder(orderData: any): Order {
-    const newId = orderData.id || `ord-${Date.now()}`;
-    const existingIndex = this.data.orders.findIndex((o) => o.id === newId || (orderData.id && o.id === orderData.id));
-
-    let partyName = orderData.partyName;
-    if (!partyName && orderData.partyId) {
-      const p = this.data.parties.find((p) => p.id === orderData.partyId);
-      if (p) partyName = p.name;
+  /**
+   * Posts the purchase's inward movements (receivedQuantity at GRN, ordered
+   * quantity otherwise; every line enters a FIFO lot at its own rate).
+   */
+  public applyPurchaseInventory(purchase: Purchase, referenceNumber?: string, force = false): boolean {
+    if (purchase.inventoryApplied && !force) return false;
+    for (const li of purchase.items || []) {
+      const master = this.findItemRaw(li.itemId);
+      if (!master) {
+        console.error(`[DB] Purchase inventory: item ${li.itemId} not found for purchase ${purchase.purchaseNumber}`);
+        continue;
+      }
+      const locName = li.locationId
+        ? this.data.locations.find((l) => l.id === li.locationId)?.name
+        : undefined;
+      const qty = li.receivedQuantity !== undefined && li.receivedQuantity !== null
+        ? Number(li.receivedQuantity)
+        : Number(li.quantity) || 0;
+      try {
+        this.adjustItemStock(
+          li.itemId,
+          Math.abs(qty),
+          'purchase_inward',
+          referenceNumber || purchase.purchaseNumber,
+          `Goods inward against ${purchase.purchaseNumber}`,
+          locName,
+          purchase.partyId,
+          Number(li.rate) > 0 ? Number(li.rate) : undefined, // inward enters its lot at the line rate
+          purchase.id
+        );
+      } catch (e: any) {
+        console.error(`[DB] Failed to receive item ${li.itemId} for purchase ${purchase.purchaseNumber}:`, e.message);
+      }
     }
+    return true;
+  }
 
+  /**
+   * Compensates EVERY purchase_inward row posted for this purchase by writing
+   * inward_reversal rows that consume the previously-entered lot value (out at
+   * the original line rate). Matching key: reversal.referenceNumber = original
+   * movement id (reversal must consume that exact lot's cost).
+   */
+  public unapplyPurchaseInventory(purchase: Purchase, reason = 'Reversal of goods inward'): void {
+    const originals = (this.data.stockMovements || []).filter(
+      (m) => m.referenceId === purchase.id && m.type === 'purchase_inward'
+    );
+    const reversalKeys = new Set(
+      (this.data.stockMovements || [])
+        .filter((m) => m.type === 'inward_reversal' && m.referenceId === purchase.id)
+        .map((m) => m.referenceNumber)
+    );
+    for (const original of originals) {
+      if (reversalKeys.has(original.id)) continue;
+      const master = this.findItemRaw(original.itemId);
+      const locName =
+        original.locationId
+          ? master?.locations?.find((l) => l.locationId === original.locationId)?.locationName ||
+            this.data.locations.find((l) => l.id === original.locationId)?.name
+          : undefined;
+      try {
+        this.adjustItemStock(
+          original.itemId,
+          -Math.abs(Number(original.quantity) || 0),
+          'inward_reversal',
+          original.id,
+          `${reason} ${purchase.purchaseNumber} (doc ${original.referenceNumber || '—'})`,
+          locName,
+          purchase.partyId,
+          Number(original.rate) > 0 ? Number(original.rate) : undefined,
+          purchase.id
+        );
+      } catch (e: any) {
+        console.error(`[DB] Failed to reverse purchase inward ${original.id}:`, e.message);
+      }
+    }
+  }
+
+  // ---------- MySQL sync fire-and-forget wrappers ----------
+
+  private syncSaleToMysql(sale: Sale, isDelete = false): void {
+    liveSyncSale(sale, isDelete);
+    if (!isDelete) {
+      // Stage-scoped rows: every stage's item set is synced (rows carry
+      // stageId); sale.items alone would only cover the current stage.
+      const allStageItems = (sale.stages || []).flatMap((st) => st.items || []);
+      liveSyncSaleItems(sale.id, allStageItems.length > 0 ? allStageItems : (sale.items || []), false);
+      liveSyncSaleStages(sale.id, sale.stages || [], false);
+    }
+  }
+
+  private syncPurchaseToMysql(purchase: Purchase, isDelete = false): void {
+    liveSyncPurchase(purchase, isDelete);
+    if (!isDelete) {
+      liveSyncPurchaseItems(purchase.id, purchase.items || [], false);
+      liveSyncPurchaseStages(purchase.id, purchase.stages || [], false);
+    }
+  }
+
+  // ---------- SALES ----------
+
+  public getSales(): Sale[] {
+    return (this.data.sales || []).map((s) => this.hydrateSale(s));
+  }
+
+  public getSaleById(id: string): Sale | undefined {
+    const sale = (this.data.sales || []).find((s) => s.id === id);
+    return sale ? this.hydrateSale(sale) : undefined;
+  }
+
+  public createSale(data: any): Sale {
+    const saleId = data.id || `sale-${this.nextLedgerMs()}-${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
-    const newOrder: Order = {
-      orderNumber: orderData.orderNumber,
-      type: orderData.type || 'sales',
-      partyId: orderData.partyId,
-      partyName: partyName || orderData.partyName || 'Party',
-      date: orderData.date || now.split('T')[0],
-      stage: orderData.stage || (orderData.type === 'purchase' ? undefined : 'sales_order'),
-      status: orderData.status || 'pending',
-      items: orderData.items || [],
-      taxRateGst: orderData.taxRateGst !== undefined ? orderData.taxRateGst : 18,
-      taxAmount: orderData.taxAmount || 0,
-      totalAmount: orderData.totalAmount || 0,
-      notes: orderData.notes,
-      vehicleNo: orderData.vehicleNo,
-      driverName: orderData.driverName,
-      transportCharges: orderData.transportCharges || 0,
-      ...orderData,
-      id: newId,
-      createdAt: existingIndex !== -1 ? this.data.orders[existingIndex].createdAt : orderData.createdAt || now,
+    const transportCharges = Number(data.transportCharges) || 0;
+
+    const stageInput: SalesOrderStageInput = data.stage || {
+      stageType: 'sales_order',
+      stageNumber: data.saleNumber,
+      date: data.date,
+    };
+    const masterNumber = data.saleNumber || stageInput.stageNumber || `SALE-${Date.now().toString().slice(-8)}`;
+
+    // The FIRST stage owns the item rows it is saved with (quotation /
+    // sales_order / invoice — a new sale may start at any of the three).
+    const firstStageId = `sos-${saleId}-${Math.random().toString(36).slice(2, 8)}`;
+    const items = this.normalizeSaleItemLines(saleId, data.items || [], firstStageId);
+    const total = this.computeStageTotals(items, transportCharges);
+    const firstStage: SalesOrderStage = {
+      id: firstStageId,
+      saleId,
+      stageType: stageInput.stageType || 'sales_order',
+      stageNumber: stageInput.stageNumber || masterNumber,
+      date: stageInput.date || data.date || now.split('T')[0],
+      subtotal: total.subtotal,
+      taxAmount: total.taxAmount,
+      totalAmount: total.totalAmount,
+      items,
+      notes: stageInput.notes || data.notes,
+      createdAt: now,
+    };
+
+    const sale: Sale = {
+      id: saleId,
+      saleNumber: masterNumber,
+      partyId: data.partyId,
+      date: data.date || now.split('T')[0],
+      status: 'pending',
+      notes: data.notes,
+      vehicleNo: data.vehicleNo,
+      driverName: data.driverName,
+      transportCharges,
+      inventoryApplied: false,
+      cashApplied: false,
+      items,
+      stages: [firstStage],
+      createdAt: now,
       updatedAt: now,
     };
 
-    if (existingIndex !== -1) {
-      const prevOrder = this.data.orders[existingIndex];
-      this.applyOrderStock(prevOrder, true);
-      this.data.orders[existingIndex] = newOrder;
-    } else {
-      this.data.orders.unshift(newOrder);
+    // Toggle-gated one-shot inventory application (cash posting rules pending
+    // user specification — flag is recorded only).
+    if (stageInput.updateInventory || firstStage.stageType === 'sales_invoice') {
+      // Invoice stage: the inventory application is PERMANENT-ON — it applies
+      // at the invoice save even if the toggle was never enabled earlier.
+      if (this.applySaleInventory(sale, firstStage.stageNumber)) {
+        sale.inventoryApplied = true;
+      }
     }
+    if (firstStage.stageType === 'sales_invoice') {
+      // Cash & Bank wiring: a sale created straight at the invoice stage posts
+      // its sale_invoice journal voucher, plus the payment_in receipt voucher
+      // when "Settle Payment Now" was chosen (sets cashApplied + FKs).
+      this.applySaleCash(sale, firstStage, {
+        settle: Boolean(stageInput.updateCash),
+        settlementAccountId: stageInput.settlementAccountId,
+        paymentMode: stageInput.paymentMode,
+      });
+      this.logAudit('CREATE', 'SALE_CASH', saleId, `Invoice voucher posted for ${sale.saleNumber} (settle=${Boolean(stageInput.updateCash)})`);
+    } else if (stageInput.updateCash) {
+      // Cash applies only through settlement at the invoice stage — a flag
+      // request at an earlier stage is noted, not applied.
+      this.logAudit('DISPATCH', 'SALE_CASH', saleId, `Cash application requested at ${firstStage.stageType} stage — applies when the invoice stage is issued`);
+    }
+    sale.status = this.computeSalesStatus(sale);
 
-    this.applyOrderStock(newOrder, false);
-
-    this.logAudit(existingIndex !== -1 ? 'UPDATE' : 'CREATE', 'ORDER', newId, `Booked order ${newOrder.orderNumber} for ${newOrder.partyName} (₹${newOrder.totalAmount})`);
+    this.data.sales.unshift(sale);
+    this.logAudit('CREATE', 'SALE', saleId, `Registered sale ${sale.saleNumber} (stage ${firstStage.stageType})`);
     this.save();
-    liveSyncOrder(newOrder);
-    return newOrder;
+    this.syncSaleToMysql(sale);
+    return this.hydrateSale(sale);
   }
 
-  public updateOrder(id: string, updates: Partial<Order>): Order {
-    const index = this.data.orders.findIndex((o) => o.id === id);
+  public updateSale(id: string, updates: Partial<Sale> & { items?: SalesOrderItemInput[] }): Sale | null {
+    const index = (this.data.sales || []).findIndex((s) => s.id === id);
     if (index === -1) {
-      return this.createOrder({ ...updates, id });
+      return this.createSale({ ...updates, id });
     }
-    const previous = this.data.orders[index];
-    const updated = {
-      ...previous,
-      ...updates,
-      id,
-      updatedAt: new Date().toISOString(),
+    const existing = this.data.sales[index];
+    const stagesArr = existing.stages || [];
+    const latestStage = stagesArr.length > 0 ? stagesArr[stagesArr.length - 1] : undefined;
+
+    // INVOICE LOCK: once the sales_invoice stage is issued the sale is
+    // immutable — no master edits, no item edits, no cancellation.
+    if (latestStage?.stageType === 'sales_invoice') {
+      throw new Error(`Sale ${existing.saleNumber} is locked (invoice issued) — nothing can be edited.`);
+    }
+    const wasCancelled = existing.status === 'cancelled';
+
+    // Master-level fields (stages stay intact; items branch below scopes rows)
+    // PARTY LOCK: the sale is bound to its party at creation — edits and
+    // stage issuances can never change it (user rule; the UI also disables
+    // the field after creation).
+    if (updates.partyId !== undefined && updates.partyId !== existing.partyId) {
+      this.logAudit('UPDATE', 'SALE', id, `Party change attempt ignored on ${existing.saleNumber} — sale is party-locked`);
+    }
+    existing.date = updates.date ?? existing.date;
+    existing.notes = updates.notes ?? existing.notes;
+    existing.vehicleNo = updates.vehicleNo ?? existing.vehicleNo;
+    existing.driverName = updates.driverName ?? existing.driverName;
+    existing.transportCharges = updates.transportCharges !== undefined
+      ? Number(updates.transportCharges) || 0
+      : existing.transportCharges;
+    existing.updatedAt = new Date().toISOString();
+
+    // Master items replaced → the edit applies ONLY to the CURRENT (latest)
+    // stage's rows: editing a quotation writes the quotation rows; editing a
+    // sales order writes the sales-order rows while its sale's quotation rows
+    // remain untouched (stage-scoped items). If stock was already applied,
+    // compensate (reverse the old dispatches) and re-apply the new quantities.
+    if (updates.items !== undefined) {
+      const normalized = this.normalizeSaleItemLines(id, updates.items || [], latestStage?.id);
+      const identical = existing.inventoryApplied && this.areOrderItemLinesEqual(existing.items, normalized);
+      existing.items = normalized;
+      if (latestStage) {
+        latestStage.items = normalized;
+      }
+      if (existing.inventoryApplied && !identical) {
+        this.unapplySaleInventory(existing, 'Edit compensation for sale');
+        if (this.applySaleInventory(existing, existing.saleNumber, true)) {
+          existing.inventoryApplied = true;
+        } else {
+          existing.inventoryApplied = false;
+        }
+      }
+      // Refresh the EDITED stage's document totals from the new prices/GST —
+      // other stages keep their own (stage-scoped) figures.
+      if (latestStage) {
+        const refreshed = this.computeStageTotals(existing.items, Number(existing.transportCharges) || 0);
+        latestStage.subtotal = refreshed.subtotal;
+        latestStage.taxAmount = refreshed.taxAmount;
+        latestStage.totalAmount = refreshed.totalAmount;
+      }
+    }
+
+    // Cancellation reverses the applied dispatch (policy: revisit with user)
+    if (updates.status === 'cancelled' && !wasCancelled && existing.inventoryApplied) {
+      this.unapplySaleInventory(existing, 'Cancellation reversal for sale');
+      existing.inventoryApplied = false;
+    }
+    if (updates.status) existing.status = updates.status;
+    existing.status = this.computeSalesStatus(existing);
+
+    this.logAudit('UPDATE', 'SALE', id, `Updated sale ${existing.saleNumber}`);
+    this.save();
+    this.syncSaleToMysql(existing);
+    return this.hydrateSale(existing);
+  }
+
+  /**
+   * Issues the NEXT stage document for a sale. Stage ladder:
+   *   quotation   -> sales_order (item rows seeded as a copy of the quotation's
+   *                  own rows) | sales_invoice (invoice straight from quotation)
+   *   sales_order -> sales_invoice
+   *   sales_invoice -> LOCKED (sale is immutable, nothing further can be added)
+   * Item rows are PER STAGE (sales_order_items.sales_order_stage_id): the new
+   * stage keeps its own rows — either the caller's lines (stageInput.items)
+   * or an exact copy of the current stage's lines — and previous stage values
+   * remain untouched forever (a quotation cannot be edited after advancing).
+   */
+  public addSaleStage(id: string, stageInput: SalesOrderStageInput): Sale | null {
+    const sale = (this.data.sales || []).find((s) => s.id === id);
+    if (!sale) return null;
+    const stagesArr = sale.stages || [];
+    const latest = stagesArr.length > 0 ? stagesArr[stagesArr.length - 1] : undefined;
+    const currentType = latest?.stageType || 'quotation';
+
+    if (currentType === 'sales_invoice') {
+      throw new Error(`Sale ${sale.saleNumber} is locked (invoice issued) — no further stage documents can be added.`);
+    }
+    if (sale.status === 'cancelled') {
+      throw new Error(`Sale ${sale.saleNumber} is cancelled — no further stage documents can be added.`);
+    }
+    const allowed: SalesStage[] = currentType === 'quotation' ? ['sales_order', 'sales_invoice'] : ['sales_invoice'];
+    if (!allowed.includes(stageInput.stageType as SalesStage)) {
+      throw new Error(`A sale at ${currentType} stage cannot issue a ${stageInput.stageType} document.`);
+    }
+
+    const now = new Date().toISOString();
+    const stageId = `sos-${id}-${Math.random().toString(36).slice(2, 8)}`;
+
+    // The new stage's rows: caller-provided lines, else seeded from the
+    // current stage's rows (copy — ids regenerate; values carry over).
+    const provided = (stageInput as any).items as SalesOrderItemInput[] | undefined;
+    const seedInput: SalesOrderItemInput[] =
+      provided && provided.length > 0
+        ? provided
+        : (latest?.items || sale.items || []).map((li) => ({
+            itemId: li.itemId,
+            quantity: Number(li.quantity) || 0,
+            rate: Number(li.rate) || 0,
+            gstRate: li.gstRate,
+            locationId: li.locationId,
+            itemNotes: li.itemNotes,
+          }));
+    const items = this.normalizeSaleItemLines(id, seedInput, stageId);
+    const total = this.computeStageTotals(items, Number(sale.transportCharges) || 0);
+
+    const stage: SalesOrderStage = {
+      id: stageId,
+      saleId: id,
+      stageType: stageInput.stageType,
+      stageNumber: stageInput.stageNumber || sale.saleNumber,
+      date: stageInput.date || now.split('T')[0],
+      subtotal: total.subtotal,
+      taxAmount: total.taxAmount,
+      totalAmount: total.totalAmount,
+      items,
+      notes: stageInput.notes,
+      createdAt: now,
+    };
+    stagesArr.push(stage);
+    sale.stages = stagesArr;
+    sale.items = items; // master view follows the current stage
+
+    if ((stageInput.updateInventory || (stage.stageType === 'sales_invoice' && !sale.inventoryApplied)) &&
+        this.applySaleInventory(sale, stage.stageNumber)) {
+      // Invoice stage: PERMANENT-ON inventory application (see createSale).
+      sale.inventoryApplied = true;
+    }
+    if (stage.stageType === 'sales_invoice') {
+      // Cash & Bank wiring: issuing the invoice posts the sale_invoice journal
+      // voucher (+ the payment_in receipt voucher when settling now).
+      this.applySaleCash(sale, stage, {
+        settle: Boolean(stageInput.updateCash),
+        settlementAccountId: stageInput.settlementAccountId,
+        paymentMode: stageInput.paymentMode,
+      });
+      this.logAudit('CREATE', 'SALE_CASH', id, `Invoice voucher posted at ${stage.stageNumber} on sale ${sale.saleNumber} (settle=${Boolean(stageInput.updateCash)})`);
+    } else if (stageInput.updateCash) {
+      this.logAudit('DISPATCH', 'SALE_CASH', id, `Cash application requested at ${stage.stageType} stage — applies when the invoice stage is issued`);
+    }
+    sale.status = this.computeSalesStatus(sale);
+    sale.updatedAt = now;
+
+    this.logAudit('UPDATE', 'SALE_STAGE', id, `Issued stage ${stage.stageType} ${stage.stageNumber} on sale ${sale.saleNumber}`);
+    this.save();
+    this.syncSaleToMysql(sale);
+    return this.hydrateSale(sale);
+  }
+
+  public deleteSale(id: string): boolean {
+    const index = (this.data.sales || []).findIndex((s) => s.id === id);
+    if (index === -1) return false;
+    const stagesArr = this.data.sales[index].stages || [];
+    if (stagesArr.length > 0 && stagesArr[stagesArr.length - 1].stageType === 'sales_invoice') {
+      throw new Error(`Sale ${this.data.sales[index].saleNumber} is locked (invoice issued) and cannot be deleted.`);
+    }
+    const sale = this.data.sales[index];
+    if (sale.inventoryApplied) {
+      this.unapplySaleInventory(sale, 'Deletion reversal for sale');
+      sale.inventoryApplied = false;
+    }
+    if (sale.invoiceVoucherId || sale.settlementVoucherId) {
+      // Defensive: an invoice-stage sale is locked, so this is only reachable
+      // for API-side settlement data — un-book the vouchers before deleting.
+      this.deleteLinkedVouchers(sale, `Deletion reversal for sale ${sale.saleNumber}`);
+    }
+    this.data.sales.splice(index, 1);
+    this.logAudit('DELETE', 'SALE', id, `Deleted sale ${sale.saleNumber}`);
+    this.save();
+    this.syncSaleToMysql(sale, true);
+    return true;
+  }
+
+  // ---------- PURCHASES ----------
+
+  public getPurchases(): Purchase[] {
+    return (this.data.purchases || []).map((p) => this.hydratePurchase(p));
+  }
+
+  public getPurchaseById(id: string): Purchase | undefined {
+    const purchase = (this.data.purchases || []).find((p) => p.id === id);
+    return purchase ? this.hydratePurchase(purchase) : undefined;
+  }
+
+  public createPurchase(data: any): Purchase {
+    const purchaseId = data.id || `purc-${this.nextLedgerMs()}-${Math.random().toString(36).slice(2, 8)}`;
+    const now = new Date().toISOString();
+    const items = this.normalizePurchaseItemLines(purchaseId, data.items || []);
+    const total = this.computeStageTotals(items, 0);
+
+    const stageInput: PurchaseOrderStageInput = data.stage || {
+      stageType: 'purchase_order',
+      stageNumber: data.purchaseNumber,
+      date: data.date,
+    };
+    const masterNumber = data.purchaseNumber || stageInput.stageNumber || `PURC-${Date.now().toString().slice(-8)}`;
+    const stage: PurchaseOrderStage = {
+      id: `pos-${purchaseId}-${Math.random().toString(36).slice(2, 8)}`,
+      purchaseId,
+      stageType: stageInput.stageType || 'purchase_order',
+      stageNumber: stageInput.stageNumber || masterNumber,
+      date: stageInput.date || data.date || now.split('T')[0],
+      subtotal: total.subtotal,
+      taxAmount: total.taxAmount,
+      totalAmount: total.totalAmount,
+      rfqDetails: stageInput.rfqDetails,
+      poDetails: stageInput.poDetails,
+      receiptDetails: stageInput.receiptDetails,
+      notes: stageInput.notes || data.notes,
+      createdAt: now,
     };
 
-    // Reverse previous stock effect if completed
-    this.applyOrderStock(previous, true);
+    const purchase: Purchase = {
+      id: purchaseId,
+      purchaseNumber: masterNumber,
+      partyId: data.partyId, // nullable — RFQ ingestion may have no vendor yet
+      date: data.date || now.split('T')[0],
+      status: 'pending',
+      notes: data.notes,
+      inventoryApplied: false,
+      cashApplied: false,
+      items,
+      stages: [stage],
+      createdAt: now,
+      updatedAt: now,
+    };
 
-    this.data.orders[index] = updated;
+    if (stageInput.updateInventory) {
+      if (this.applyPurchaseInventory(purchase, stage.stageNumber)) {
+        purchase.inventoryApplied = true;
+      }
+    }
+    if (stage.stageType === 'goods_receipt') {
+      // Cash & Bank wiring: a purchase whose first stage is the goods receipt
+      // posts its purchase_bill journal voucher (+ payment_out payout voucher
+      // when "Settle Payment Now" was chosen).
+      this.applyPurchaseCash(purchase, stage, {
+        settle: Boolean(stageInput.updateCash),
+        settlementAccountId: stageInput.settlementAccountId,
+        paymentMode: stageInput.paymentMode,
+      });
+      this.logAudit('CREATE', 'PURCHASE_CASH', purchaseId, `Bill voucher posted for ${purchase.purchaseNumber} (settle=${Boolean(stageInput.updateCash)})`);
+    } else if (stageInput.updateCash) {
+      // Cash applies only through settlement at the goods receipt stage.
+      this.logAudit('DISPATCH', 'PURCHASE_CASH', purchaseId, `Cash application requested at ${stage.stageType} stage — applies when the goods receipt is saved`);
+    }
+    purchase.status = this.computePurchaseStatus(purchase);
 
-    // Apply updated stock effect if completed
-    this.applyOrderStock(updated, false);
-
-    this.logAudit('UPDATE', 'ORDER', id, `Updated order ${updated.orderNumber}`);
+    this.data.purchases.unshift(purchase);
+    this.logAudit('CREATE', 'PURCHASE', purchaseId, `Registered purchase ${purchase.purchaseNumber} (stage ${stage.stageType})`);
     this.save();
-    liveSyncOrder(updated);
-    return updated;
+    this.syncPurchaseToMysql(purchase);
+    return this.hydratePurchase(purchase);
   }
 
-  public deleteOrder(id: string): boolean {
-    const index = this.data.orders.findIndex((o) => o.id === id);
-    if (index === -1) return false;
-    const ord = this.data.orders[index];
+  public updatePurchase(id: string, updates: Partial<Purchase> & { items?: PurchaseOrderItemInput[] }): Purchase | null {
+    const index = (this.data.purchases || []).findIndex((p) => p.id === id);
+    if (index === -1) {
+      return this.createPurchase({ ...updates, id });
+    }
+    const existing = this.data.purchases[index];
+    const wasCancelled = existing.status === 'cancelled';
 
-    // Reverse stock effect if completed
-    this.applyOrderStock(ord, true);
+    existing.partyId = updates.partyId !== undefined ? (updates.partyId || undefined) : existing.partyId;
+    existing.date = updates.date ?? existing.date;
+    existing.notes = updates.notes ?? existing.notes;
+    existing.updatedAt = new Date().toISOString();
 
-    this.data.orders.splice(index, 1);
-    this.logAudit('DELETE', 'ORDER', id, `Deleted order ${ord.orderNumber}`);
+    if (updates.items !== undefined) {
+      const normalized = this.normalizePurchaseItemLines(id, updates.items || []);
+      // Identical re-saves (e.g. document re-issue) do NOT churn the ledger:
+      // compensation only fires when the applied quantities/rates changed.
+      const identical = this.areOrderItemLinesEqual(existing.items, normalized);
+      existing.items = normalized;
+      if (existing.inventoryApplied && !identical) {
+        this.unapplyPurchaseInventory(existing, 'Edit compensation for purchase');
+        if (this.applyPurchaseInventory(existing, existing.purchaseNumber, true)) {
+          existing.inventoryApplied = true;
+        } else {
+          existing.inventoryApplied = false;
+        }
+      }
+      // Voucher compensation: keep the posted purchase_bill journal voucher in
+      // step with the edited lines (the payout voucher records cash that has
+      // already left the account, so it is intentionally NOT adjusted — the
+      // difference simply stays as outstanding payable on the party).
+      if (existing.invoiceVoucherId && !identical) {
+        const refreshed = this.computeStageTotals(existing.items, 0);
+        const bill = (this.data.transactions || []).find((t) => t.id === existing.invoiceVoucherId);
+        if (bill && this.roundMoney(bill.amount) !== this.roundMoney(refreshed.totalAmount)) {
+          this.updateTransaction(bill.id, { amount: this.roundMoney(refreshed.totalAmount) });
+          this.logAudit('UPDATE', 'PURCHASE_CASH', id, `Bill voucher ${bill.voucherNumber} amount refreshed to ₹${refreshed.totalAmount} after purchase edit`);
+        }
+        this.syncLedgerBalances(existing.partyId);
+      }
+    }
+
+    if (updates.status === 'cancelled' && !wasCancelled && existing.inventoryApplied) {
+      this.unapplyPurchaseInventory(existing, 'Cancellation reversal for purchase');
+      existing.inventoryApplied = false;
+    }
+    if (updates.status === 'cancelled' && !wasCancelled && (existing.invoiceVoucherId || existing.settlementVoucherId)) {
+      // Cancellation of a GRN'd purchase also un-books its Cash & Bank entries.
+      this.deleteLinkedVouchers(existing, `Cancellation reversal for purchase ${existing.purchaseNumber}`);
+    }
+    if (updates.status) existing.status = updates.status;
+    existing.status = this.computePurchaseStatus(existing);
+
+    this.logAudit('UPDATE', 'PURCHASE', id, `Updated purchase ${existing.purchaseNumber}`);
     this.save();
-    liveSyncOrder(ord, true);
+    this.syncPurchaseToMysql(existing);
+    return this.hydratePurchase(existing);
+  }
+
+  /**
+   * Saves a stage against the purchase (RFQ / PO / GRN — one row per stage
+   * type; re-saving a stage type UPDATES its existing row). `updateInventory`
+   * applies the one-shot goods inward (receivedQuantity at GRN).
+   */
+  public addPurchaseStage(id: string, stageInput: PurchaseOrderStageInput): Purchase | null {
+    const purchase = (this.data.purchases || []).find((p) => p.id === id);
+    if (!purchase) return null;
+    const now = new Date().toISOString();
+    const total = this.computeStageTotals(purchase.items || [], 0);
+    const stageType = stageInput.stageType;
+
+    const existingStageIdx = (purchase.stages || []).findIndex((s) => s.stageType === stageType);
+    const stageNumber = stageInput.stageNumber || purchase.purchaseNumber;
+    if (existingStageIdx >= 0) {
+      // Stage re-save: update the existing row (UNIQUE(purchase_id, stage_type))
+      const s = purchase.stages[existingStageIdx];
+      s.stageNumber = stageNumber || s.stageNumber;
+      s.date = stageInput.date || s.date;
+      s.subtotal = total.subtotal;
+      s.taxAmount = total.taxAmount;
+      s.totalAmount = total.totalAmount;
+      s.notes = stageInput.notes ?? s.notes;
+      s.rfqDetails = stageInput.rfqDetails ?? s.rfqDetails;
+      s.poDetails = stageInput.poDetails ?? s.poDetails;
+      s.receiptDetails = stageInput.receiptDetails ?? s.receiptDetails;
+    } else {
+      purchase.stages.push({
+        id: `pos-${id}-${Math.random().toString(36).slice(2, 8)}`,
+        purchaseId: id,
+        stageType,
+        stageNumber: stageNumber || purchase.purchaseNumber,
+        date: stageInput.date || now.split('T')[0],
+        subtotal: total.subtotal,
+        taxAmount: total.taxAmount,
+        totalAmount: total.totalAmount,
+        rfqDetails: stageInput.rfqDetails,
+        poDetails: stageInput.poDetails,
+        receiptDetails: stageInput.receiptDetails,
+        notes: stageInput.notes,
+        createdAt: now,
+      });
+    }
+
+    // Stage item quantities (receivedQuantity at GRN) live on the master items
+    // and are applied via updatePurchase — the stage save reuses those totals.
+
+    if (stageInput.updateInventory && this.applyPurchaseInventory(purchase, stageNumber)) {
+      purchase.inventoryApplied = true;
+    }
+    if (stageType === 'goods_receipt') {
+      // Cash & Bank wiring: saving the goods receipt posts the purchase_bill
+      // journal voucher (+ the payment_out payout voucher when settling now).
+      // GRN is a UNIQUE-per-purchase stage row, so a re-save upserts its own
+      // vouchers (deterministic ids) instead of duplicating them.
+      const grnStage = (purchase.stages || []).find((s) => s.stageType === 'goods_receipt');
+      if (grnStage) {
+        this.applyPurchaseCash(purchase, grnStage, {
+          settle: Boolean(stageInput.updateCash),
+          settlementAccountId: stageInput.settlementAccountId,
+          paymentMode: stageInput.paymentMode,
+        });
+        this.logAudit('CREATE', 'PURCHASE_CASH', id, `Bill voucher posted at ${stageNumber} on purchase ${purchase.purchaseNumber} (settle=${Boolean(stageInput.updateCash)})`);
+      }
+    } else if (stageInput.updateCash) {
+      this.logAudit('DISPATCH', 'PURCHASE_CASH', id, `Cash application requested at ${stageType} stage — applies when the goods receipt is saved`);
+    }
+    purchase.status = this.computePurchaseStatus(purchase);
+    purchase.updatedAt = now;
+
+    this.logAudit('UPDATE', 'PURCHASE_STAGE', id, `Added stage ${stageType} ${stageNumber} to purchase ${purchase.purchaseNumber}`);
+    this.save();
+    this.syncPurchaseToMysql(purchase);
+    return this.hydratePurchase(purchase);
+  }
+
+  public deletePurchase(id: string): boolean {
+    const index = (this.data.purchases || []).findIndex((p) => p.id === id);
+    if (index === -1) return false;
+    const purchase = this.data.purchases[index];
+    if (purchase.inventoryApplied) {
+      this.unapplyPurchaseInventory(purchase, 'Deletion reversal for purchase');
+      purchase.inventoryApplied = false;
+    }
+    if (purchase.invoiceVoucherId || purchase.settlementVoucherId) {
+      // Deleting a GRN'd purchase un-books its Cash & Bank vouchers.
+      this.deleteLinkedVouchers(purchase, `Deletion reversal for purchase ${purchase.purchaseNumber}`);
+    }
+    this.data.purchases.splice(index, 1);
+    this.logAudit('DELETE', 'PURCHASE', id, `Deleted purchase ${purchase.purchaseNumber}`);
+    this.save();
+    this.syncPurchaseToMysql(purchase, true);
     return true;
   }
 

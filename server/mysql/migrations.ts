@@ -1192,6 +1192,308 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         console.warn('[MySQL Migration] item_location_mapping normalization notice:', ilmNormErr.message);
       }
 
+      // 16. SALES & PURCHASE — RELATIONAL ORDER MODEL (Phase 1 redesign)
+      // The legacy `orders` JSON-blob table is retired (kept, never written):
+      // split into sale/purchase masters + items child tables + stage-history
+      // child tables. Child tables are FK-only (Golden Rule §2); document
+      // numbers + stage totals are the §2 exception-1 statutory snapshots.
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS sales_orders (
+          id VARCHAR(64) PRIMARY KEY,
+          sale_number VARCHAR(64) NOT NULL,
+          party_id VARCHAR(64) NOT NULL,
+          date VARCHAR(32) NOT NULL,
+          status VARCHAR(32) DEFAULT 'pending',
+          notes TEXT,
+          vehicle_no VARCHAR(64),
+          driver_name VARCHAR(128),
+          transport_charges DECIMAL(12,2) DEFAULT 0.00,
+          inventory_applied BOOLEAN DEFAULT FALSE,
+          cash_applied BOOLEAN DEFAULT FALSE,
+          settlement_account_id VARCHAR(64) COMMENT 'FK cash_bank_accounts — where the invoice payment was deposited',
+          payment_mode VARCHAR(64) COMMENT 'bank_transfer | neft_rtgs | upi | cheque | cash',
+          invoice_voucher_id VARCHAR(64) COMMENT 'FK transactions — the sale_invoice journal voucher',
+          settlement_voucher_id VARCHAR(64) COMMENT 'FK transactions — the payment_in receipt voucher',
+          settled_amount DECIMAL(15,2) COMMENT 'statutory snapshot of the settled total',
+          settled_date VARCHAR(32) COMMENT 'date of the settlement stage',
+          created_at VARCHAR(64) NOT NULL,
+          updated_at VARCHAR(64),
+          INDEX idx_sales_number (sale_number),
+          INDEX idx_sales_party (party_id),
+          INDEX idx_sales_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS sales_order_items (
+          id VARCHAR(64) PRIMARY KEY,
+          sale_id VARCHAR(64) NOT NULL,
+          item_id VARCHAR(64) NOT NULL,
+          unit_id VARCHAR(64) COMMENT 'FK item_units — display JOINed at read',
+          quantity DECIMAL(15,3) NOT NULL DEFAULT 0.000,
+          rate DECIMAL(15,4) NOT NULL DEFAULT 0.0000,
+          gst_rate DECIMAL(5,2) DEFAULT NULL,
+          location_id VARCHAR(64) COMMENT 'FK item_locations — dispatched from',
+          item_notes TEXT,
+          INDEX idx_soi_sale (sale_id),
+          INDEX idx_soi_item (item_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS sales_order_stages (
+          id VARCHAR(64) PRIMARY KEY,
+          sale_id VARCHAR(64) NOT NULL,
+          stage_type VARCHAR(32) NOT NULL,
+          stage_number VARCHAR(64) NOT NULL,
+          date VARCHAR(32) NOT NULL,
+          subtotal DECIMAL(15,2) DEFAULT 0.00,
+          tax_amount DECIMAL(15,2) DEFAULT 0.00,
+          total_amount DECIMAL(15,2) DEFAULT 0.00,
+          notes TEXT,
+          created_at VARCHAR(64) NOT NULL,
+          INDEX idx_sost_sale (sale_id),
+          INDEX idx_sost_type (stage_type)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS purchase_orders (
+          id VARCHAR(64) PRIMARY KEY,
+          purchase_number VARCHAR(64) NOT NULL,
+          party_id VARCHAR(64) NULL COMMENT 'nullable: RFQ ingestion may have no vendor yet',
+          date VARCHAR(32) NOT NULL,
+          status VARCHAR(32) DEFAULT 'pending',
+          notes TEXT,
+          inventory_applied BOOLEAN DEFAULT FALSE,
+          cash_applied BOOLEAN DEFAULT FALSE,
+          settlement_account_id VARCHAR(64) COMMENT 'FK cash_bank_accounts — account the vendor was paid from',
+          payment_mode VARCHAR(64) COMMENT 'bank_transfer | neft_rtgs | upi | cheque | cash',
+          invoice_voucher_id VARCHAR(64) COMMENT 'FK transactions — the purchase_bill journal voucher',
+          settlement_voucher_id VARCHAR(64) COMMENT 'FK transactions — the payment_out payout voucher',
+          settled_amount DECIMAL(15,2) COMMENT 'statutory snapshot of the settled total',
+          settled_date VARCHAR(32) COMMENT 'date of the settlement stage',
+          created_at VARCHAR(64) NOT NULL,
+          updated_at VARCHAR(64),
+          INDEX idx_purch_number (purchase_number),
+          INDEX idx_purch_party (party_id),
+          INDEX idx_purch_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS purchase_order_items (
+          id VARCHAR(64) PRIMARY KEY,
+          purchase_id VARCHAR(64) NOT NULL,
+          item_id VARCHAR(64) NOT NULL,
+          unit_id VARCHAR(64) COMMENT 'FK item_units — display JOINed at read',
+          quantity DECIMAL(15,3) NOT NULL DEFAULT 0.000,
+          rate DECIMAL(15,4) NOT NULL DEFAULT 0.0000,
+          gst_rate DECIMAL(5,2) DEFAULT NULL,
+          location_id VARCHAR(64) COMMENT 'FK item_locations — received into',
+          received_quantity DECIMAL(15,3) DEFAULT NULL,
+          shortage_quantity DECIMAL(15,3) DEFAULT NULL,
+          overage_quantity DECIMAL(15,3) DEFAULT NULL,
+          item_notes TEXT,
+          INDEX idx_poi_purchase (purchase_id),
+          INDEX idx_poi_item (item_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS purchase_order_stages (
+          id VARCHAR(64) PRIMARY KEY,
+          purchase_id VARCHAR(64) NOT NULL,
+          stage_type VARCHAR(32) NOT NULL,
+          stage_number VARCHAR(64) NOT NULL,
+          date VARCHAR(32) NOT NULL,
+          subtotal DECIMAL(15,2) DEFAULT 0.00,
+          tax_amount DECIMAL(15,2) DEFAULT 0.00,
+          total_amount DECIMAL(15,2) DEFAULT 0.00,
+          stage_details JSON COMMENT 'rfqDetails / poDetails / receiptDetails snapshot',
+          notes TEXT,
+          created_at VARCHAR(64) NOT NULL,
+          INDEX idx_post_purchase (purchase_id),
+          INDEX idx_post_type (stage_type),
+          UNIQUE KEY uk_post_stage (purchase_id, stage_type)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      // stock_movements.reference_id: FK to the source sale/purchase master —
+      // reversal lookups key on the id, not the reference-number string.
+      try {
+        const [smrCols]: any = await conn.query('SHOW COLUMNS FROM stock_movements');
+        const smrColNames = (smrCols || []).map((c: any) => c.Field);
+        if (smrColNames.length > 0 && !smrColNames.includes('reference_id')) {
+          await conn.query('ALTER TABLE stock_movements ADD COLUMN reference_id VARCHAR(64) NULL AFTER reference_number');
+          console.log('[MySQL Migration] Added stock_movements.reference_id column.');
+        }
+      } catch (smRefErr: any) {
+        console.warn('[MySQL Migration] stock_movements reference_id notice:', smRefErr.message);
+      }
+
+      // SALE/PURCHASE MASTER settlement FKs (cash posting to Cash & Bank):
+      // settlement_account_id → cash_bank_accounts; *_voucher_id →
+      // transactions (Golden Rule §2 — FK only, names JOINed at read time).
+      const settlementCols: Array<[string, string]> = [
+        ['settlement_account_id', "VARCHAR(64) NULL COMMENT 'FK cash_bank_accounts'"],
+        ['payment_mode', "VARCHAR(64) NULL COMMENT 'bank_transfer | neft_rtgs | upi | cheque | cash'"],
+        ['invoice_voucher_id', "VARCHAR(64) NULL COMMENT 'FK transactions — invoice/bill journal voucher'"],
+        ['settlement_voucher_id', "VARCHAR(64) NULL COMMENT 'FK transactions — payment receipt/payout voucher'"],
+        ['settled_amount', "DECIMAL(15,2) NULL COMMENT 'statutory snapshot of the settled total'"],
+        ['settled_date', "VARCHAR(32) NULL COMMENT 'date of the settlement stage'"],
+      ];
+      for (const masterTable of ['sales_orders', 'purchase_orders'] as const) {
+        try {
+          const [msCols]: any = await conn.query(`SHOW COLUMNS FROM ${masterTable}`);
+          const msColNames = (msCols || []).map((c: any) => c.Field);
+          if (msColNames.length === 0) continue;
+          for (const [col, def] of settlementCols) {
+            if (!msColNames.includes(col)) {
+              const lastCol = msColNames[msColNames.length - 1];
+              await conn.query(`ALTER TABLE ${masterTable} ADD COLUMN ${col} ${def} AFTER ${lastCol}`);
+            }
+          }
+        } catch (mSettleErr: any) {
+          console.warn(`[MySQL Migration] ${masterTable} settlement columns notice:`, mSettleErr.message);
+        }
+      }
+
+      // One-time legacy backfill: split `orders` rows into the new tables.
+      // Runs ONLY while both sales_orders and purchase_orders are completely
+      // empty. Masters keep the legacy order ids; stages are synthesized from
+      // the columns that WERE persisted (stage for sales; purchases derive GRN
+      // only when the items JSON carries receivedQuantity — purchaseStage was
+      // never persisted on the legacy table).
+      try {
+        const [soCnt]: any = await conn.query('SELECT COUNT(*) as cnt FROM sales_orders');
+        const [poCnt]: any = await conn.query('SELECT COUNT(*) as cnt FROM purchase_orders');
+        const [ordCnt]: any = await conn.query('SELECT COUNT(*) as cnt FROM orders');
+        if ((soCnt[0]?.cnt || 0) === 0 && (poCnt[0]?.cnt || 0) === 0 && (ordCnt[0]?.cnt || 0) > 0) {
+          const [legacyOrders]: any = await conn.query('SELECT * FROM orders');
+          let splitCount = 0;
+          for (const o of legacyOrders || []) {
+            let lineItems: any[] = [];
+            try {
+              lineItems = typeof o.items === 'string' ? JSON.parse(o.items) : o.items;
+            } catch {
+              lineItems = [];
+            }
+            const type = o.type === 'purchase' ? 'purchase' : 'sales';
+            const hasReceived = Array.isArray(lineItems) && lineItems.some((li) => li && li.receivedQuantity !== undefined && li.receivedQuantity !== null);
+            const legacyStage =
+              type === 'purchase'
+                ? hasReceived ? 'goods_receipt' : 'purchase_order'
+                : o.stage || 'sales_order';
+            // Legacy stock application: automatic for everything except sales
+            // quotations / purchase RFQs (the legacy applyOrderStock gating).
+            const legacyInventoryApplied =
+              (Array.isArray(lineItems) && lineItems.length > 0 && !['quotation', 'rfq'].includes(legacyStage) && o.status !== 'cancelled') ? 1 : 0;
+            const subtotal = Math.max(0, Number(o.total_amount) - Number(o.tax_amount));
+            const createdAt = o.created_at || new Date().toISOString();
+
+            if (type === 'sales') {
+              await conn.query(
+                `INSERT IGNORE INTO sales_orders (id, sale_number, party_id, date, status, notes, vehicle_no, driver_name, transport_charges, inventory_applied, cash_applied, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, ?, ?)`,
+                [o.id, o.order_number, o.party_id, o.date, o.status || 'pending', o.notes || null, o.vehicle_no || null, o.driver_name || null, o.transport_charges || 0, legacyInventoryApplied, createdAt, o.updated_at || createdAt]
+              );
+              for (const li of lineItems || []) {
+                if (!li?.itemId) continue;
+                await conn.query(
+                  `INSERT IGNORE INTO sales_order_items (id, sale_id, item_id, unit_id, quantity, rate, gst_rate, location_id, item_notes)
+                   VALUES (?, ?, ?, (SELECT id FROM item_units WHERE LOWER(TRIM(code)) = LOWER(TRIM(?)) LIMIT 1), ?, ?, ?, (SELECT id FROM item_locations WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1), ?)`,
+                  [`soi-${o.id}-${(li.itemId || '').slice(-12)}`, o.id, li.itemId, li.unit || null, Number(li.quantity) || 0, Number(li.rate) || 0, li.gstRate ?? null, li.location || null, li.itemNotes || null]
+                );
+              }
+              await conn.query(
+                `INSERT IGNORE INTO sales_order_stages (id, sale_id, stage_type, stage_number, date, subtotal, tax_amount, total_amount, notes, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [`sos-${o.id}`, o.id, legacyStage, o.order_number, o.date, subtotal, Number(o.tax_amount) || 0, Number(o.total_amount) || 0, o.notes || null, createdAt]
+              );
+            } else {
+              await conn.query(
+                `INSERT IGNORE INTO purchase_orders (id, purchase_number, party_id, date, status, notes, inventory_applied, cash_applied, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, FALSE, ?, ?)`,
+                [o.id, o.order_number, o.party_id, o.date, o.status || 'pending', o.notes || null, legacyInventoryApplied, createdAt, o.updated_at || createdAt]
+              );
+              for (const li of lineItems || []) {
+                if (!li?.itemId) continue;
+                const ordered = Number(li.quantity) || 0;
+                const recv = li.receivedQuantity !== undefined && li.receivedQuantity !== null ? Number(li.receivedQuantity) : null;
+                await conn.query(
+                  `INSERT IGNORE INTO purchase_order_items (id, purchase_id, item_id, unit_id, quantity, rate, gst_rate, location_id, received_quantity, shortage_quantity, overage_quantity, item_notes)
+                   VALUES (?, ?, ?, (SELECT id FROM item_units WHERE LOWER(TRIM(code)) = LOWER(TRIM(?)) LIMIT 1), ?, ?, ?, (SELECT id FROM item_locations WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1), ?, ?, ?, ?)`,
+                  [`poi-${o.id}-${(li.itemId || '').slice(-12)}`, o.id, li.itemId, li.unit || null, ordered, Number(li.rate) || 0, li.gstRate ?? null, li.location || null, recv, recv !== null && recv < ordered ? ordered - recv : null, recv !== null && recv > ordered ? recv - ordered : null, li.itemNotes || null]
+                );
+              }
+              await conn.query(
+                `INSERT IGNORE INTO purchase_order_stages (id, purchase_id, stage_type, stage_number, date, subtotal, tax_amount, total_amount, stage_details, notes, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+                [`pos-${o.id}`, o.id, legacyStage, o.order_number, o.date, subtotal, Number(o.tax_amount) || 0, Number(o.total_amount) || 0, o.notes || null, createdAt]
+              );
+            }
+            splitCount++;
+          }
+          // Link historical ledger rows to the new masters by reference number
+          await conn.query(
+            `UPDATE stock_movements sm LEFT JOIN sales_orders so ON so.sale_number = sm.reference_number
+             SET sm.reference_id = so.id
+             WHERE sm.reference_id IS NULL AND so.id IS NOT NULL`
+          );
+          await conn.query(
+            `UPDATE stock_movements sm LEFT JOIN purchase_orders po ON po.purchase_number = sm.reference_number
+             SET sm.reference_id = po.id
+             WHERE sm.reference_id IS NULL AND po.id IS NOT NULL`
+          );
+          console.log(`[MySQL Migration] Split ${splitCount} legacy orders into sales_orders/purchase_orders (+items, +stages).`);
+        }
+      } catch (splitErr: any) {
+        console.warn('[MySQL Migration] orders split backfill notice:', splitErr.message);
+      }
+
+      // 16b. STAGE-SCOPED SALE ITEMS: sales_order_items.sales_order_stage_id
+      // (per-stage item sets — quotation lines freeze when the sale advances;
+      // a sales order edit touches only its own stage rows)
+      try {
+        const [soiCols]: any = await conn.query('SHOW COLUMNS FROM sales_order_items');
+        const soiColNames = (soiCols || []).map((c: any) => c.Field);
+        if (soiColNames.length > 0) {
+          if (!soiColNames.includes('sales_order_stage_id')) {
+            await conn.query('ALTER TABLE sales_order_items ADD COLUMN sales_order_stage_id VARCHAR(64) NULL AFTER sale_id');
+            console.log('[MySQL Migration] Added sales_order_items.sales_order_stage_id column.');
+          }
+          // Backfill: attach stage-less item rows to their sale's EFFECTIVE
+          // (latest issued) stage so legacy masters map onto the new model.
+          const [orphanItems]: any = await conn.query(
+            'SELECT id, sale_id FROM sales_order_items WHERE sales_order_stage_id IS NULL'
+          );
+          let linked = 0;
+          const bySale = new Map<string, string[]>();
+          for (const it of orphanItems || []) {
+            const key = it.sale_id;
+            if (!bySale.has(key)) bySale.set(key, []);
+            bySale.get(key)!.push(it.id);
+          }
+          for (const [saleId, itemIds] of bySale) {
+            const [stRows]: any = await conn.query(
+              'SELECT id, stage_type FROM sales_order_stages WHERE sale_id = ? ORDER BY created_at ASC',
+              [saleId]
+            );
+            if (!stRows || stRows.length === 0) continue;
+            // Effective stage = first quotation if it's the ONLY stage; else the
+            // highest one present (sales_order, then sales_invoice)
+            const types = stRows.map((st: any) => st.stage_type);
+            const eff = types.length === 1 ? stRows[0] : (stRows.find((s: any) => s.stage_type === 'sales_invoice') || stRows.find((s: any) => s.stage_type === 'sales_order') || stRows[0]);
+            await conn.query('UPDATE sales_order_items SET sales_order_stage_id = ? WHERE id IN (?)', [eff.id, itemIds]);
+            linked += itemIds.length;
+          }
+          if (linked > 0) console.log(`[MySQL Migration] Linked ${linked} sales_order_items rows to their stage documents.`);
+        }
+      } catch (soiErr: any) {
+        console.warn('[MySQL Migration] stage-scoped sale items notice:', soiErr.message);
+      }
+
       console.log('[MySQL Migration] All tables verified successfully.');
       return { success: true, message: 'All MySQL schema tables created or verified.' };
     } finally {

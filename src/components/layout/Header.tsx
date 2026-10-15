@@ -60,85 +60,12 @@ export function Header({
   const renderActionButtons = () => {
     switch (activeTab) {
       case 'dashboard':
-        return hasPermission('record_payments') ? (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => onOpenRecordPayment('payment_in')}
-              className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-[var(--color-primary-container)] hover:opacity-90 text-[var(--color-on-primary-container)] border border-[var(--color-primary)]/20 font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-2xs"
-            >
-              <CreditCard className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-              <span className="hidden sm:inline">Record Payment</span>
-              <span className="sm:hidden">Payment</span>
-            </button>
-          </div>
-        ) : null;
-      case 'cash-bank':
-        return hasPermission('record_payments') ? (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => onOpenRecordPayment('payment_in')}
-              className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-[var(--color-primary-container)] hover:opacity-90 text-[var(--color-on-primary-container)] border border-[var(--color-primary)]/20 font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-2xs"
-            >
-              <CreditCard className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-              <span className="hidden sm:inline">Record Payment</span>
-              <span className="sm:hidden">Payment</span>
-            </button>
-          </div>
-        ) : null;
+        return  null;
       case 'parties':
-        return (
-          <div className="flex items-center gap-2">
-            {hasPermission('record_payments') && (
-              <button
-                onClick={() => onOpenRecordPayment('payment_in')}
-                className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-[var(--color-primary-container)] hover:opacity-90 text-[var(--color-on-primary-container)] border border-[var(--color-primary)]/20 font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-2xs"
-              >
-                <CreditCard className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-                <span className="hidden sm:inline">Record Payment</span>
-                <span className="sm:hidden">Payment</span>
-              </button>
-            )}
-            {hasPermission('manage_parties') && (
-              <button
-                onClick={onOpenAddParty}
-                className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-xs"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Add New Party</span>
-                <span className="sm:hidden">Party</span>
-              </button>
-            )}
-          </div>
-        );
+        return null;
       case 'items':
         if (!hasPermission('manage_inventory')) return null;
-        return (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => window.dispatchEvent(new CustomEvent('app-header-action', { detail: 'manage-categories' }))}
-              className="inline-flex items-center gap-1.5 px-3 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-2xs"
-            >
-              <Layers className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-              <span className="hidden sm:inline">Categories</span>
-              <span className="sm:hidden">Cats</span>
-            </button>
-            <button
-              onClick={() => window.dispatchEvent(new CustomEvent('app-header-action', { detail: 'manage-units' }))}
-              className="inline-flex items-center gap-1.5 px-3 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-2xs"
-            >
-              <Scale className="w-3.5 h-3.5 text-[var(--color-success)]" />
-              <span className="hidden sm:inline">Units</span>
-              <span className="sm:hidden">Units</span>
-            </button>
-            <button
-              onClick={() => window.dispatchEvent(new CustomEvent('app-header-action', { detail: 'add-item' }))}
-              className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-xs"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Add Item</span>
-            </button>
-          </div>
-        );
+        return null
       case 'production':
         if (!hasPermission('manage_production')) return null;
         return (
@@ -154,17 +81,7 @@ export function Header({
         );
       case 'sales':
         if (!hasPermission('manage_sales')) return null;
-        return (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => window.dispatchEvent(new CustomEvent('app-header-action', { detail: 'book-order' }))}
-              className="inline-flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-xs"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Book Sales Order</span>
-            </button>
-          </div>
-        );
+        return null
       case 'purchases':
         if (!hasPermission('manage_purchases')) return null;
         return (

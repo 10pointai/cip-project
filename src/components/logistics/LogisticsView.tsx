@@ -290,9 +290,9 @@ export const LogisticsView: React.FC = () => {
 
     localDb.addTripSlip(newSlip);
 
-    // Automatically sync logistics vehicle, driver, and advance to sales order so it populates in the Invoice
+    // Automatically sync logistics vehicle, driver, and advance to a legacy sales order so it populates in the Invoice
     if (selectedOrder) {
-      localDb.updateOrder(selectedOrder.id, {
+      localDb.updateLegacyOrder(selectedOrder.id, {
         vehicleNo: selectedVehicle.vehicleNo,
         driverName: selectedDriver.name,
         transportCharges: selectedOrder.transportCharges || Number(formSlipAdvance) || 0,

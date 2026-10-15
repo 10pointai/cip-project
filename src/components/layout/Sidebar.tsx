@@ -331,20 +331,6 @@ export function Sidebar({
           )}
         </div>
 
-        {/* Footer Plant Badge */}
-        <div className="p-3 border-t border-[var(--color-outline-variant)] bg-[var(--color-surface-container-lowest)]/60">
-          <div className="flex items-center gap-2.5">
-            <div className="w-2.5 h-2.5 rounded-full bg-[var(--color-success)] animate-pulse"></div>
-            <div className="min-w-0">
-              <p className="text-[11px] font-bold text-[var(--color-on-surface)] truncate">
-                Local Database Active
-              </p>
-              <p className="text-[10px] text-[var(--color-on-surface-variant)] truncate">
-                GSTIN: {settings.gstin}
-              </p>
-            </div>
-          </div>
-        </div>
       </aside>
     </>
   );

@@ -519,7 +519,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
             className="flex items-center gap-1.5 px-5 py-2.5 bg-[var(--color-primary)] hover:opacity-95 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-md transition-all hover:scale-[1.02] active:scale-[0.98]"
           >
             <Plus className="w-4 h-4" />
-            Add Master Item
+            Add Item
           </button>
         </div>
       </div>
@@ -543,7 +543,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
               </div>
               <p className="text-2xl font-black text-[var(--color-on-surface)] mt-2">{catalogStats.totalItems}</p>
               <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                Active billable items & services
+                Active items & services
               </p>
             </div>
 
@@ -561,7 +561,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                 {currencySymbol} {catalogStats.totalInventoryValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
               </p>
               <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                Valued at item master cost rate
+                Valued at item's cost rate
               </p>
             </div>
           </div>
@@ -671,14 +671,14 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                   >
                     <FileSpreadsheet className="w-4 h-4" />
                   </button>
-                  <button
+                  {/* <button
                     type="button"
                     onClick={handlePrint}
                     className="p-2 text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)] hover:bg-[var(--color-surface-container)] rounded-full transition-colors border border-[var(--color-outline-variant)]"
                     title="Print Catalog"
                   >
                     <Printer className="w-4 h-4" />
-                  </button>
+                  </button> */}
                 </div>
               </div>
             </div>
@@ -715,7 +715,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                       <th className="py-3.5 px-4 min-w-[240px]">Item Details & SKU</th>
                       <th className="py-3.5 px-3">Type & Category</th>
                       <th className="py-3.5 px-3 text-right">Opening Stock</th>
-                      <th className="py-3.5 px-3 text-right">Current Stock</th>
+                      <th className="py-3.5 px-3 text-right min-w-[200px]">Current Stock</th>
                       <th className="py-3.5 px-3">HSN / SAC</th>
                       <th className="py-3.5 px-3 text-right">Selling Rate</th>
                       <th className="py-3.5 px-3 text-right">Opening / Cost Rate</th>
@@ -836,7 +836,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                           </td>
 
                           {/* Current Stock */}
-                          <td className="py-3 px-3 text-right">
+                          <td className="py-3 px-3 text-right min-w-[200px]">
                             {item.type === 'product' ? (
                               <div>
                                 <div className="flex items-baseline justify-end gap-1">

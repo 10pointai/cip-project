@@ -20,6 +20,8 @@ import {
   InternalTransfer,
   AccountAdjustment,
   ItemStockAdjustment,
+  Sale,
+  Purchase,
   EvidenceFolder,
   EvidenceFile,
 } from '../types';
@@ -75,7 +77,9 @@ class CloudStore {
   private units: ItemUnit[] = [];
   private locations: ItemLocation[] = [];
   private productionBatches: ProductionBatchRun[] = [];
-  private orders: Order[] = [];
+  private orders: Order[] = []; // legacy rows (retired table) — read-only
+  private sales: Sale[] = [];
+  private purchases: Purchase[] = [];
   private vehicles: Vehicle[] = [];
   private drivers: Driver[] = [];
   private tripSlips: TripSlip[] = [];
@@ -148,6 +152,8 @@ class CloudStore {
         if (d.locations) this.locations = d.locations;
         if (d.productionBatches) this.productionBatches = d.productionBatches;
         if (d.orders) this.orders = d.orders;
+        if (d.sales) this.sales = d.sales;
+        if (d.purchases) this.purchases = d.purchases;
         if (d.vehicles) this.vehicles = d.vehicles;
         if (d.drivers) this.drivers = d.drivers;
         if (d.tripSlips) this.tripSlips = d.tripSlips;
@@ -198,7 +204,27 @@ class CloudStore {
   public getUnits(): ItemUnit[] { return [...this.units]; }
   public getLocations(): ItemLocation[] { return [...this.locations]; }
   public getProductionBatches(): ProductionBatchRun[] { return [...this.productionBatches]; }
+  /** @deprecated legacy `orders` rows (retired table) — read-only */
   public getOrders(): Order[] { return [...this.orders]; }
+
+  /** @deprecated legacy `orders` are retired writers; this only patches the
+   *  in-memory legacy mirror (e.g. logistics vehicle sync on old rows). */
+  public updateLegacyOrder(id: string, updates: Partial<Order>): Order | null {
+    let updated: Order | null = null;
+    this.orders = this.orders.map((o) => {
+      if (o.id === id) {
+        updated = { ...o, ...updates };
+        return updated;
+      }
+      return o;
+    });
+    if (updated) this.notify();
+    return updated;
+  }
+  public getSales(): Sale[] { return [...this.sales]; }
+  public getPurchaseById(id: string) { return this.purchases.find((p) => p.id === id); }
+  public getSaleById(id: string) { return this.sales.find((s) => s.id === id); }
+  public getPurchases(): Purchase[] { return [...this.purchases]; }
   public getVehicles(): Vehicle[] { return [...this.vehicles]; }
   public getDrivers(): Driver[] { return [...this.drivers]; }
   public getTripSlips(): TripSlip[] { return [...this.tripSlips]; }
@@ -701,56 +727,263 @@ class CloudStore {
     return false;
   }
 
-  // Orders
-  public addOrder(orderData: any): Order {
-    const newOrder: Order = {
-      id: orderData.id || `ord-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-      orderNumber: orderData.orderNumber || `ORD-${Date.now().toString().substr(-6)}`,
-      type: orderData.type || 'sales',
-      partyId: orderData.partyId || '',
-      partyName: orderData.partyName || '',
-      date: orderData.date || orderData.orderDate || new Date().toISOString().split('T')[0],
-      status: orderData.status || 'pending',
-      stage: orderData.stage || orderData.salesStage || 'quotation',
-      purchaseStage: orderData.purchaseStage,
-      items: orderData.items || [],
-      taxRateGst: orderData.taxRateGst ?? 18,
-      taxAmount: orderData.taxAmount || 0,
-      totalAmount: orderData.totalAmount || orderData.grandTotal || 0,
-      paymentMode: orderData.paymentMode || 'bank_transfer',
-      accountId: orderData.accountId || '',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      ...orderData,
+  // Sales & Purchases — relational order model.
+  // Mutations post to the REST API and swap in the SERVER-minted record
+  // (authoritative id, stage history, computed status + inventory flag),
+  // then re-sync so ledger-driven stock levels land everywhere.
+
+  // Sales
+  public addSale(payload: any): Sale {
+    const now = new Date().toISOString();
+    const stage = payload.stage || undefined;
+    const optimistic: Sale = {
+      id: payload.id || `sale-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      saleNumber: payload.saleNumber || stage?.stageNumber || `SALE-${Date.now().toString().substr(-6)}`,
+      partyId: payload.partyId || '',
+      date: payload.date || now.split('T')[0],
+      status: 'pending',
+      notes: payload.notes,
+      vehicleNo: payload.vehicleNo,
+      driverName: payload.driverName,
+      transportCharges: Number(payload.transportCharges) || 0,
+      inventoryApplied: Boolean(stage?.updateInventory),
+      cashApplied: Boolean(stage?.updateCash),
+      settlementAccountId: stage?.settlementAccountId,
+      paymentMode: stage?.paymentMode,
+      settledAmount: stage?.updateCash ? payload.totalAmount ?? payload.grandTotal : undefined,
+      settledDate: stage?.updateCash ? (stage.date || payload.date) : undefined,
+      items: payload.items || [],
+      stages: stage
+        ? [{
+            id: `sos-${Date.now()}`,
+            saleId: payload.id || '',
+            stageType: stage.stageType || 'sales_order',
+            stageNumber: stage.stageNumber || payload.saleNumber || '',
+            date: stage.date || payload.date || now.split('T')[0],
+            subtotal: payload.subtotal ?? 0,
+            taxAmount: payload.taxAmount ?? 0,
+            totalAmount: payload.totalAmount ?? payload.grandTotal ?? 0,
+            notes: stage.notes,
+            createdAt: now,
+          }]
+        : [],
+      createdAt: now,
+      updatedAt: now,
     };
-    this.orders.unshift(newOrder);
+    this.sales.unshift(optimistic);
     this.notify();
-    api.createOrder(orderData).catch((err) => console.error('[CloudStore] addOrder cloud error:', err));
-    return newOrder;
+    // Capture the SERVER-minted sale (authoritative id + stage rows + flags)
+    api
+      .createSale(payload)
+      .then(async (res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.sales = this.sales.map((s) => (s.id === optimistic.id ? { ...created } : s));
+          this.notify();
+        }
+        await this.syncWithServer(true);
+      })
+      .catch((err) => console.error('[CloudStore] addSale cloud error:', err));
+    return optimistic;
   }
 
-  public updateOrder(id: string, updates: any): Order | null {
-    let updated: Order | null = null;
-    this.orders = this.orders.map((o) => {
-      if (o.id === id) {
-        updated = { ...o, ...updates, updatedAt: new Date().toISOString() };
+  public updateSale(id: string, updates: any): Sale | null {
+    let updated: Sale | null = null;
+    this.sales = this.sales.map((s) => {
+      if (s.id === id) {
+        updated = { ...s, ...updates, updatedAt: new Date().toISOString() };
         return updated;
       }
-      return o;
+      return s;
     });
     if (updated) {
       this.notify();
-      api.updateOrder(id, updates).catch((err) => console.error('[CloudStore] updateOrder cloud error:', err));
+      api
+        .updateSale(id, updates)
+        .then(() => this.syncWithServer(true))
+        .catch((err) => console.error('[CloudStore] updateSale cloud error:', err));
     }
     return updated;
   }
 
-  public deleteOrder(id: string): boolean {
-    const exists = this.orders.some((o) => o.id === id);
+  public addSaleStage(id: string, stageInput: any): Sale | null {
+    const existing = this.sales.find((s) => s.id === id);
+    if (!existing) return null;
+    const now = new Date().toISOString();
+    const optimisticStage = {
+      id: `sos-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      saleId: id,
+      stageType: stageInput.stageType,
+      stageNumber: stageInput.stageNumber || existing.saleNumber,
+      date: stageInput.date || now.split('T')[0],
+      subtotal: stageInput.subtotal ?? 0,
+      taxAmount: stageInput.taxAmount ?? 0,
+      totalAmount: stageInput.totalAmount ?? stageInput.grandTotal ?? 0,
+      notes: stageInput.notes,
+      createdAt: now,
+    };
+    this.sales = this.sales.map((s) =>
+      s.id === id
+        ? {
+            ...s,
+            stages: [...s.stages, optimisticStage],
+            inventoryApplied: s.inventoryApplied || Boolean(stageInput.updateInventory),
+            cashApplied: s.cashApplied || Boolean(stageInput.updateCash),
+            updatedAt: now,
+          }
+        : s
+    );
+    this.notify();
+    api
+      .addSaleStage(id, stageInput)
+      .then(() => this.syncWithServer(true))
+      .catch((err) => console.error('[CloudStore] addSaleStage cloud error:', err));
+    return this.sales.find((s) => s.id === id) || null;
+  }
+
+  public deleteSale(id: string): boolean {
+    const exists = this.sales.some((s) => s.id === id);
     if (exists) {
-      this.orders = this.orders.filter((o) => o.id !== id);
+      this.sales = this.sales.filter((s) => s.id !== id);
       this.notify();
-      api.deleteOrder(id).catch((err) => console.error('[CloudStore] deleteOrder cloud error:', err));
+      api
+        .deleteSale(id)
+        .then(() => this.syncWithServer(true))
+        .catch((err) => {
+          console.error('[CloudStore] deleteSale cloud error:', err);
+          this.syncWithServer(true);
+        });
+      return true;
+    }
+    return false;
+  }
+
+  // Purchases
+  public addPurchase(payload: any): Purchase {
+    const now = new Date().toISOString();
+    const stage = payload.stage || undefined;
+    const optimistic: Purchase = {
+      id: payload.id || `purc-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      purchaseNumber: payload.purchaseNumber || stage?.stageNumber || `PURC-${Date.now().toString().substr(-6)}`,
+      partyId: payload.partyId || undefined,
+      date: payload.date || now.split('T')[0],
+      status: 'pending',
+      notes: payload.notes,
+      inventoryApplied: Boolean(stage?.updateInventory),
+      cashApplied: Boolean(stage?.updateCash),
+      settlementAccountId: stage?.settlementAccountId,
+      paymentMode: stage?.paymentMode,
+      settledAmount: stage?.updateCash ? payload.totalAmount ?? payload.grandTotal : undefined,
+      settledDate: stage?.updateCash ? (stage.date || payload.date) : undefined,
+      items: payload.items || [],
+      stages: stage
+        ? [{
+            id: `pos-${Date.now()}`,
+            purchaseId: payload.id || '',
+            stageType: stage.stageType || 'purchase_order',
+            stageNumber: stage.stageNumber || payload.purchaseNumber || '',
+            date: stage.date || payload.date || now.split('T')[0],
+            subtotal: payload.subtotal ?? 0,
+            taxAmount: payload.taxAmount ?? 0,
+            totalAmount: payload.totalAmount ?? payload.grandTotal ?? 0,
+            rfqDetails: stage.rfqDetails,
+            poDetails: stage.poDetails,
+            receiptDetails: stage.receiptDetails,
+            notes: stage.notes,
+            createdAt: now,
+          }]
+        : [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.purchases.unshift(optimistic);
+    this.notify();
+    api
+      .createPurchase(payload)
+      .then(async (res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.purchases = this.purchases.map((p) => (p.id === optimistic.id ? { ...created } : p));
+          this.notify();
+        }
+        await this.syncWithServer(true);
+      })
+      .catch((err) => console.error('[CloudStore] addPurchase cloud error:', err));
+    return optimistic;
+  }
+
+  public updatePurchase(id: string, updates: any): Purchase | null {
+    let updated: Purchase | null = null;
+    this.purchases = this.purchases.map((p) => {
+      if (p.id === id) {
+        updated = { ...p, ...updates, updatedAt: new Date().toISOString() };
+        return updated;
+      }
+      return p;
+    });
+    if (updated) {
+      this.notify();
+      api
+        .updatePurchase(id, updates)
+        .then(() => this.syncWithServer(true))
+        .catch((err) => console.error('[CloudStore] updatePurchase cloud error:', err));
+    }
+    return updated;
+  }
+
+  public addPurchaseStage(id: string, stageInput: any): Purchase | null {
+    const existing = this.purchases.find((p) => p.id === id);
+    if (!existing) return null;
+    const now = new Date().toISOString();
+    this.purchases = this.purchases.map((p) =>
+      p.id === id
+        ? {
+            ...p,
+            stages: [
+              ...p.stages.filter((s) => s.stageType !== stageInput.stageType),
+              {
+                id: `pos-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                purchaseId: id,
+                stageType: stageInput.stageType,
+                stageNumber: stageInput.stageNumber || p.purchaseNumber,
+                date: stageInput.date || now.split('T')[0],
+                subtotal: stageInput.subtotal ?? 0,
+                taxAmount: stageInput.taxAmount ?? 0,
+                totalAmount: stageInput.totalAmount ?? stageInput.grandTotal ?? 0,
+                rfqDetails: stageInput.rfqDetails,
+                poDetails: stageInput.poDetails,
+                receiptDetails: stageInput.receiptDetails,
+                notes: stageInput.notes,
+                createdAt: now,
+              },
+            ],
+            inventoryApplied: p.inventoryApplied || Boolean(stageInput.updateInventory),
+            cashApplied: p.cashApplied || Boolean(stageInput.updateCash),
+            items: stageInput.items ? stageInput.items : p.items,
+            updatedAt: now,
+          }
+        : p
+    );
+    this.notify();
+    api
+      .addPurchaseStage(id, stageInput)
+      .then(() => this.syncWithServer(true))
+      .catch((err) => console.error('[CloudStore] addPurchaseStage cloud error:', err));
+    return this.purchases.find((p) => p.id === id) || null;
+  }
+
+  public deletePurchase(id: string): boolean {
+    const exists = this.purchases.some((p) => p.id === id);
+    if (exists) {
+      this.purchases = this.purchases.filter((p) => p.id !== id);
+      this.notify();
+      api
+        .deletePurchase(id)
+        .then(() => this.syncWithServer(true))
+        .catch((err) => {
+          console.error('[CloudStore] deletePurchase cloud error:', err);
+          this.syncWithServer(true);
+        });
       return true;
     }
     return false;
@@ -1219,6 +1452,8 @@ class CloudStore {
       locations: this.locations,
       productionBatches: this.productionBatches,
       orders: this.orders,
+      sales: this.sales,
+      purchases: this.purchases,
       vehicles: this.vehicles,
       drivers: this.drivers,
       tripSlips: this.tripSlips,
