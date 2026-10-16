@@ -40,6 +40,16 @@ import { Order, OrderItem, OrderType, SalesStage, PurchaseStage, Party, Item, Co
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { AddPurchaseModal } from './AddPurchaseModal';
 import { SearchableSelect } from './SearchableSelect';
+import {
+  SALES_STAGE_META,
+  PURCHASE_STAGE_META,
+  StageDocDisplay,
+  PurchaseStageDocDisplay,
+  OrderDisplay,
+  saleToDisplay,
+  purchaseToDisplay,
+} from './orderDisplay';
+import { SaleStageDocCard, PurchaseStageDocCard } from './StageDocumentCards';
 
 function numberToWords(num: number): string {
   if (num === 0) return 'Zero Rupees Only';
@@ -67,208 +77,6 @@ function numberToWords(num: number): string {
   } catch {
     return 'Rupees ' + num.toLocaleString('en-IN') + ' Only';
   }
-}
-
-/**
- * Adapter: shapes the relational Sale/Purchase models (masters + items +
- * stage-history child tables) into the Order-shaped view used by the card
- * list, the detail panel and the print preview. The LATEST stage drives the
- * displayed document stage; totals fall back to per-line math when a stage
- * has no figures (RFQ).
- */
-// Sales stage document meta (labels + icons for tabs/cards)
-const SALES_STAGE_META: Record<string, { label: string; icon: any; tone: string }> = {
-  quotation: { label: 'Quotation', icon: FileText, tone: 'text-[var(--color-secondary)]' },
-  sales_order: { label: 'Sales Order', icon: ClipboardList, tone: 'text-[var(--color-success)]' },
-  proforma_invoice: { label: 'Proforma Invoice (legacy)', icon: Receipt, tone: 'text-[var(--color-primary)]' },
-  delivery_note: { label: 'Delivery Note (legacy)', icon: Truck, tone: 'text-[var(--color-warning)]' },
-  sales_invoice: { label: 'GST Tax Invoice', icon: FileCheck, tone: 'text-[var(--color-success)]' },
-};
-
-// Purchase stage document meta (labels + icons for detail tabs/cards — mirror
-// of the sales detail modal's Stage Documents section)
-const PURCHASE_STAGE_META: Record<string, { label: string; icon: any; tone: string }> = {
-  rfq: { label: 'Request Quotation', icon: FileText, tone: 'text-[var(--color-secondary)]' },
-  purchase_order: { label: 'Purchase Order', icon: ClipboardList, tone: 'text-[var(--color-primary)]' },
-  goods_receipt: { label: 'Goods Receiving', icon: FileCheck, tone: 'text-[var(--color-success)]' },
-};
-
-// Purchase stage document as shown in the detail modal (per-stage totals;
-// items live on the master so they render from the purchase's own rows)
-interface PurchaseStageDocDisplay {
-  stageType: PurchaseStage;
-  stageNumber: string;
-  date: string;
-  notes?: string;
-  subtotal: number;
-  taxAmount: number;
-  totalAmount: number;
-}
-
-interface StageDocDisplay {
-  stageType: SalesStage;
-  stageNumber: string;
-  date: string;
-  notes?: string;
-  subtotal: number;
-  taxAmount: number;
-  totalAmount: number;
-  items: OrderItem[];
-}
-
-interface OrderDisplay extends Order {
-  inventoryApplied: boolean;
-  cashApplied: boolean;
-  // Which payment flow was applied: 'credit' (party ledger, no cash) /
-  // 'account' (Cash/Bank); undefined = never applied.
-  settlementType?: 'credit' | 'account';
-  // Cash & Bank settlement (hydrated sale/purchase master fields)
-  settlementAccountId?: string;
-  settlementAccountName?: string;
-  invoiceVoucherNumber?: string;
-  settlementVoucherNumber?: string;
-  settledAmount?: number;
-  settledDate?: string;
-  /** paymentMode: inherited from Order (kept for the settlement record) */
-  /** Stage document numbers as issued (chronological) */
-  stageNumbers?: Array<{ type: string; number: string; date: string }>;
-  /** Purchase per-stage documents (RFQ / PO / GRN with their own totals) */
-  purchaseStageDocs?: PurchaseStageDocDisplay[];
-  /** Full stage documents with their OWN line values (quotation vs order...) */
-  stageDocs?: StageDocDisplay[];
-}
-
-function saleToDisplay(s: Sale): OrderDisplay {
-  const items: OrderItem[] = (s.items || []).map((li) => ({
-    itemId: li.itemId,
-    itemName: li.itemName || '',
-    itemCode: (li as any).itemCode,
-    quantity: li.quantity,
-    unit: li.unit || '',
-    rate: li.rate,
-    amount: (li.amount ?? li.quantity * li.rate),
-    gstRate: li.gstRate,
-    location: li.location,
-  }));
-  const subtotal = items.reduce((sum, i) => sum + i.quantity * i.rate, 0);
-  const taxAmount = items.reduce((sum, i) => sum + (i.quantity * i.rate * (i.gstRate || 0)) / 100, 0);
-  const transportCharges = s.transportCharges || 0;
-  const latestStage = (s.stages || []).length > 0 ? s.stages[s.stages.length - 1] : undefined;
-  const stageDocs: StageDocDisplay[] = (s.stages || []).map((st) => ({
-    stageType: st.stageType,
-    stageNumber: st.stageNumber,
-    date: st.date,
-    notes: st.notes,
-    subtotal: st.subtotal,
-    taxAmount: st.taxAmount,
-    totalAmount: st.totalAmount,
-    items: (st.items || []).map((li) => ({
-      itemId: li.itemId,
-      itemName: li.itemName || '',
-      itemCode: (li as any).itemCode,
-      quantity: li.quantity,
-      unit: li.unit || '',
-      rate: li.rate,
-      amount: li.amount ?? li.quantity * li.rate,
-      gstRate: li.gstRate,
-      location: li.location,
-    }) as OrderItem),
-  }));
-  return {
-    id: s.id,
-    orderNumber: s.saleNumber,
-    type: 'sales',
-    partyId: s.partyId,
-    partyName: s.partyName,
-    date: s.date,
-    status: s.status,
-    stage: latestStage?.stageType || 'sales_order',
-    accountId: '',
-    items,
-    taxRateGst: subtotal > 0 ? Math.round((taxAmount / subtotal) * 100) / 100 : 0,
-    taxAmount: latestStage?.taxAmount ?? taxAmount,
-    totalAmount: latestStage?.totalAmount ?? subtotal + taxAmount + transportCharges,
-    notes: s.notes,
-    vehicleNo: s.vehicleNo,
-    driverName: s.driverName,
-    transportCharges,
-    inventoryApplied: s.inventoryApplied,
-    cashApplied: s.cashApplied,
-    settlementType: (s as any).settlementType || undefined,
-    settlementAccountId: (s as any).settlementAccountId || undefined,
-    settlementAccountName: (s as any).settlementAccountName || undefined,
-    paymentMode: (s as any).paymentMode,
-    invoiceVoucherNumber: (s as any).invoiceVoucherNumber,
-    settlementVoucherNumber: (s as any).settlementVoucherNumber,
-    settledAmount: (s as any).settledAmount,
-    settledDate: (s as any).settledDate,
-    stageNumbers: (s.stages || []).map((st) => ({ type: st.stageType, number: st.stageNumber, date: st.date })),
-    stageDocs,
-    createdAt: s.createdAt,
-    updatedAt: s.updatedAt,
-  } as OrderDisplay;
-}
-
-function purchaseToDisplay(p: Purchase): OrderDisplay {
-  const items: OrderItem[] = (p.items || []).map((li) => ({
-    itemId: li.itemId,
-    itemName: li.itemName || '',
-    itemCode: (li as any).itemCode,
-    quantity: li.quantity,
-    unit: li.unit || '',
-    rate: li.rate,
-    amount: li.amount ?? li.quantity * li.rate,
-    gstRate: li.gstRate,
-    location: li.location,
-    receivedQuantity: li.receivedQuantity,
-    shortageQuantity: li.shortageQuantity,
-    overageQuantity: li.overageQuantity,
-  }));
-  const isRfqOnly = !(p.stages || []).some((st) => st.stageType !== 'rfq');
-  const subtotal = items.reduce((sum, i) => sum + i.quantity * i.rate, 0);
-  const taxAmount = items.reduce((sum, i) => sum + (i.quantity * i.rate * (i.gstRate || 0)) / 100, 0);
-  const latestStage = (p.stages || []).length > 0 ? p.stages[p.stages.length - 1] : undefined;
-  const byType = (t: string) => (p.stages || []).find((st) => st.stageType === t);
-  return {
-    id: p.id,
-    orderNumber: p.purchaseNumber,
-    type: 'purchase',
-    partyId: p.partyId || 'unassigned',
-    partyName: p.partyName || (p.partyId ? undefined : 'Unassigned (RFQ Ingestion)'),
-    date: p.date,
-    status: p.status,
-    purchaseStage: latestStage?.stageType,
-    rfqDetails: byType('rfq') ? { rfqNumber: byType('rfq')!.stageNumber, ...((byType('rfq') as any).rfqDetails || {}) } as any : undefined,
-    poDetails: byType('purchase_order') ? { poNumber: byType('purchase_order')!.stageNumber, ...((byType('purchase_order') as any).poDetails || {}) } as any : undefined,
-    receiptDetails: byType('goods_receipt') ? { grnNumber: byType('goods_receipt')!.stageNumber, ...((byType('goods_receipt') as any).receiptDetails || {}) } as any : undefined,
-    items,
-    taxRateGst: subtotal > 0 ? Math.round((taxAmount / subtotal) * 100) / 100 : 0,
-    taxAmount: isRfqOnly ? 0 : (latestStage?.taxAmount ?? taxAmount),
-    totalAmount: isRfqOnly ? 0 : (latestStage?.totalAmount ?? subtotal + taxAmount),
-    notes: p.notes,
-    inventoryApplied: p.inventoryApplied,
-    cashApplied: p.cashApplied,
-    settlementType: (p as any).settlementType || undefined,
-    settlementAccountId: (p as any).settlementAccountId || undefined,
-    settlementAccountName: (p as any).settlementAccountName || undefined,
-    paymentMode: (p as any).paymentMode,
-    invoiceVoucherNumber: (p as any).invoiceVoucherNumber,
-    settlementVoucherNumber: (p as any).settlementVoucherNumber,
-    settledAmount: (p as any).settledAmount,
-    settledDate: (p as any).settledDate,
-    stageNumbers: (p.stages || []).map((st) => ({ type: st.stageType, number: st.stageNumber, date: st.date })),
-    purchaseStageDocs: (p.stages || []).map((st) => ({
-      stageType: st.stageType,
-      stageNumber: st.stageNumber,
-      date: st.date,
-      notes: st.notes,
-      subtotal: st.subtotal,
-      taxAmount: st.taxAmount,
-      totalAmount: st.totalAmount,
-    })),
-    createdAt: p.createdAt,
-    updatedAt: p.updatedAt,
-  } as OrderDisplay;
 }
 
 interface OrdersViewProps {
@@ -561,266 +369,40 @@ export function OrdersView({
     setIsPreviewOpen(true);
   };
 
-  /** Renders ONE stage document card: doc header in its own format, the
-   *  stage's own line values, totals + its document actions. */
-  const renderStageDocCard = (doc: StageDocDisplay) => {
-    const meta = SALES_STAGE_META[doc.stageType] || SALES_STAGE_META.sales_order;
-    const MetaIcon = meta.icon;
-    return (
-      <div className="bg-[var(--color-surface-container)] rounded-2xl border border-[var(--color-outline-variant)] overflow-hidden">
-        {/* Doc header */}
-        <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-2 bg-[var(--color-surface-container-high)]/60 border-b border-[var(--color-outline-variant)]/60">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <MetaIcon className={`w-4 h-4 ${meta.tone} shrink-0`} />
-            <div className="min-w-0">
-              <p className="text-xs font-black text-[var(--color-on-surface)] truncate">
-                {meta.label} <span className="text-[var(--color-on-surface-variant)] font-semibold">· {doc.stageNumber}</span>
-              </p>
-              <p className="text-[10px] text-[var(--color-on-surface-variant)] font-medium">Issued {doc.date}</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            
-            <button
-              type="button"
-              onClick={() => openStageDocPreview(doc)}
-              className="flex items-center gap-1 px-3 py-1.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-[10px] font-bold hover:opacity-90 transition-all"
-            >
-              <Printer className="w-3 h-3" /> Open document
-            </button>
-            {doc.stageType === 'sales_order' && (
-              <button
-                type="button"
-                onClick={() => {
-                  setPreviewOrder(selectedOrder);
-                  setPreviewStage('proforma_invoice');
-                  setIsPreviewOpen(true);
-                }}
-                className="flex items-center gap-1 px-3 py-1.5 border border-[var(--color-primary)]/40 text-[var(--color-primary)] rounded-full text-[10px] font-bold hover:bg-[var(--color-primary-container)]/30 transition-all"
-              >
-                <Receipt className="w-3 h-3" /> View Proforma
-              </button>
-            )}
-          </div>
-        </div>
+  /** Stage document cards (extracted verbatim into StageDocumentCards.tsx so
+   *  the party statement can replay the same presentation read-only). */
+  const renderStageDocCard = (doc: StageDocDisplay) => (
+    <SaleStageDocCard
+      doc={doc}
+      order={selectedOrder}
+      currencyCode={settings.currency?.code}
+      onOpenDocument={openStageDocPreview}
+      onViewProforma={() => {
+        if (!selectedOrder) return;
+        setPreviewOrder(selectedOrder);
+        setPreviewStage('proforma_invoice');
+        setIsPreviewOpen(true);
+      }}
+    />
+  );
 
-        {/* Doc line items (its own values) */}
-        <div className="px-2 py-2">
-          <table className="w-full text-left text-[11px]">
-            <thead>
-              <tr className="text-[var(--color-on-surface-variant)] font-bold text-[9px] uppercase tracking-wider">
-                <th className="py-1.5 px-2">Item</th>
-                <th className="py-1.5 px-2">Location</th>
-                <th className="py-1.5 px-2 text-right">Qty</th>
-                <th className="py-1.5 px-2 text-right">Rate</th>
-                <th className="py-1.5 px-2 text-right">GST</th>
-                <th className="py-1.5 px-2 text-right">Amount</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[var(--color-outline-variant)]/50">
-              {doc.items.map((i, idx) => (
-                <tr key={idx}>
-                  <td className="py-1.5 px-2 font-semibold text-[var(--color-on-surface)] truncate max-w-[220px]">
-                    {i.itemCode ? `${i.itemCode} (${i.itemName})` : i.itemName}
-                  </td>
-                  <td className="py-1.5 px-2 text-[var(--color-on-surface-variant)] font-medium">{i.location || 'Default Yard'}</td>
-                  <td className="py-1.5 px-2 text-right font-bold text-[var(--color-on-surface)]">{i.quantity.toLocaleString('en-IN')} {i.unit}</td>
-                  <td className="py-1.5 px-2 text-right text-[var(--color-on-surface-variant)]">{formatCurrency2(i.rate)}</td>
-                  <td className="py-1.5 px-2 text-right text-[var(--color-on-surface-variant)]">{i.gstRate ?? 0}%</td>
-                  <td className="py-1.5 px-2 text-right font-bold text-[var(--color-on-surface)]">{formatCurrency2(i.amount)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Doc totals */}
-        <div className="px-4 py-2.5 border-t border-[var(--color-outline-variant)]/60 flex items-center justify-end gap-4 text-[11px]">
-          <span className="text-[var(--color-on-surface-variant)]">Subtotal: <strong className="text-[var(--color-on-surface)]">{formatCurrency2(doc.subtotal)}</strong></span>
-          <span className="text-[var(--color-on-surface-variant)]">GST: <strong className="text-[var(--color-on-surface)]">{formatCurrency2(doc.taxAmount)}</strong></span>
-          <span className="text-[var(--color-on-surface-variant)]">Total: <strong className="text-[var(--color-primary)]">{formatCurrency2(doc.totalAmount)}</strong></span>
-        </div>
-
-        {/* Doc settlement info — Cash & Bank wiring for the invoice stage */}
-        {doc.stageType === 'sales_invoice' && selectedOrder && (
-          <div className="px-4 py-2.5 border-t border-[var(--color-outline-variant)]/60 flex flex-wrap items-center justify-between gap-2 text-[10px] bg-[var(--color-surface-container-lowest)]">
-            <span className="text-[var(--color-on-surface-variant)]">
-              Invoice voucher: <strong className="text-[var(--color-on-surface)] font-mono">{selectedOrder.invoiceVoucherNumber || '—'}</strong>
-            </span>
-            {selectedOrder.settlementVoucherNumber ? (
-              <span className="text-[var(--color-on-surface-variant)]">
-                Settled {(selectedOrder.settledAmount !== undefined ? formatCurrency2(selectedOrder.settledAmount) : '')}
-                {(selectedOrder.paymentMode ? ` · ${(selectedOrder.paymentMode === 'upi' ? 'UPI' : selectedOrder.paymentMode === 'bank_transfer' ? 'Bank Transfer / IMPS' : selectedOrder.paymentMode === 'neft_rtgs' ? 'NEFT / RTGS' : selectedOrder.paymentMode === 'cheque' ? 'Cheque / DD' : 'Cash')}` : '')}
-                {' — '}<strong className="text-[var(--color-on-surface)]">{selectedOrder.settlementAccountName || 'Cash/Bank'}</strong>
-                {' · Receipt '}{selectedOrder.settlementVoucherNumber ? <strong className="text-[var(--color-on-surface)] font-mono">{selectedOrder.settlementVoucherNumber}</strong> : '—'}
-              </span>
-            ) : selectedOrder.settlementType === 'credit' ? (
-              <span className="text-[var(--color-on-surface-variant)] italic">Booked on credit — receivable on the Party ledger (receipt —)</span>
-            ) : (
-              <span className="text-[var(--color-on-surface-variant)] italic">Payment flow not applied — nothing posted yet</span>
-            )}
-          </div>
-        )}
-      </div>
-    );
+  /** Opens the purchase stage doc preview (the GRN/PO/RFQ variant) */
+  const openPurchaseStageDocPreview = (doc: PurchaseStageDocDisplay) => {
+    if (!selectedOrder) return;
+    setPreviewOrder({ ...(selectedOrder as any), purchaseStage: doc.stageType });
+    setPreviewStage(doc.stageType as any);
+    setIsPreviewOpen(true);
   };
 
-  // Purchase detail card for one issued stage (mirror of the sales stage doc
-  // card): the stage's own number/date/totals + stage-specific document chips
-  // + the purchase's item rows (Received/Shortage columns on the GRN card).
-  // The old stepper + flat Material Details were replaced by this section
-  // (per user direction, mirroring the sales detail modal).
-  const renderPurchaseDocCard = (doc: PurchaseStageDocDisplay) => {
-    const meta = PURCHASE_STAGE_META[doc.stageType] || PURCHASE_STAGE_META.purchase_order;
-    const MetaIcon = meta.icon;
-    const isGrnCard = doc.stageType === 'goods_receipt';
-    // Request Quotation = pure inquiry: pending vendor rates — no money columns.
-    const isRfqCard = doc.stageType === 'rfq';
-    return (
-      <div className="bg-[var(--color-surface-container)] rounded-2xl border border-[var(--color-outline-variant)] overflow-hidden">
-        {/* Doc header */}
-        <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-2 bg-[var(--color-surface-container-high)]/60 border-b border-[var(--color-outline-variant)]/60">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <MetaIcon className={`w-4 h-4 ${meta.tone} shrink-0`} />
-            <div className="min-w-0">
-              <p className="text-xs font-black text-[var(--color-on-surface)] truncate">
-                {meta.label} <span className="text-[var(--color-on-surface-variant)] font-semibold">· {doc.stageNumber}</span>
-              </p>
-              <p className="text-[10px] text-[var(--color-on-surface-variant)] font-medium">Issued {doc.date}</p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => {
-              if (!selectedOrder) return;
-              setPreviewOrder({ ...(selectedOrder as any), purchaseStage: doc.stageType });
-              setPreviewStage(doc.stageType as any);
-              setIsPreviewOpen(true);
-            }}
-            className="flex items-center gap-1 px-3 py-1.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-[10px] font-bold hover:opacity-90 transition-all"
-          >
-            <Printer className="w-3 h-3" /> Open document
-          </button>
-        </div>
-
-        {/* Stage-specific document chips (only the fields that exist) */}
-        {(() => {
-          const chips: Array<{ label: string; value: string }> = [];
-          if (doc.stageType === 'rfq' && selectedOrder?.rfqDetails?.rfqNumber) {
-            chips.push({ label: 'RFQ No', value: selectedOrder.rfqDetails.rfqNumber });
-          }
-          if (doc.stageType === 'purchase_order' && selectedOrder?.poDetails?.poNumber) {
-            chips.push({ label: 'PO No', value: selectedOrder.poDetails.poNumber });
-          }
-          if (isGrnCard && selectedOrder?.receiptDetails) {
-            const rd: any = selectedOrder.receiptDetails;
-            if (rd.grnNumber) chips.push({ label: 'GRN', value: rd.grnNumber });
-            if (rd.receiptDate) chips.push({ label: 'Inward', value: rd.receiptDate });
-            if (rd.challanNumber) chips.push({ label: 'Challan', value: rd.challanNumber });
-            if (rd.vendorInvoiceNumber) chips.push({ label: 'Vendor Inv', value: rd.vendorInvoiceNumber });
-            if (rd.receivedBy) chips.push({ label: 'Inspector', value: rd.receivedBy });
-          }
-          if (chips.length === 0) return null;
-          return (
-            <div className="px-4 py-2 border-b border-[var(--color-outline-variant)]/60 flex flex-wrap gap-x-4 gap-y-1 text-[10px] bg-[var(--color-surface-container-lowest)]">
-              {chips.map((c) => (
-                <span key={c.label} className="text-[var(--color-on-surface-variant)]">
-                  {c.label}: <strong className="text-[var(--color-on-surface)]">{c.value}</strong>
-                </span>
-              ))}
-            </div>
-          );
-        })()}
-
-        {/* Line rows (the purchase's items; Inward location; Received audit on GRN) */}
-        <div className="px-2 py-2">
-          <table className="w-full text-left text-[11px]">
-            <thead>
-              <tr className="text-[var(--color-on-surface-variant)] font-bold text-[9px] uppercase tracking-wider">
-                <th className="py-1.5 px-2">Item</th>
-                <th className="py-1.5 px-2">Inward Location</th>
-                <th className="py-1.5 px-2 text-right">{isGrnCard ? 'Ordered / Received' : 'Qty'}</th>
-                {!isRfqCard && <th className="py-1.5 px-2 text-right">Rate</th>}
-                {!isRfqCard && <th className="py-1.5 px-2 text-right">GST</th>}
-                {!isRfqCard && <th className="py-1.5 px-2 text-right">Amount</th>}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[var(--color-outline-variant)]/50">
-              {selectedOrder?.items.map((i, idx) => (
-                <tr key={idx}>
-                  <td className="py-1.5 px-2 font-semibold text-[var(--color-on-surface)] truncate max-w-[220px]">
-                    {i.itemCode ? `${i.itemCode} (${i.itemName})` : i.itemName}
-                  </td>
-                  <td className="py-1.5 px-2 text-[var(--color-on-surface-variant)] font-medium">
-                    {i.location || <span className="italic text-[10px]">Default Yard</span>}
-                  </td>
-                  <td className="py-1.5 px-2 text-right font-bold text-[var(--color-on-surface)]">
-                    <div>{i.quantity.toLocaleString('en-IN')} {i.unit}</div>
-                    {isGrnCard && i.receivedQuantity !== undefined && (
-                      <div className="text-[9px] font-semibold mt-0.5">
-                        <span className="text-[var(--color-primary)]">Recv: {i.receivedQuantity} {i.unit}</span>
-                        {i.shortageQuantity ? (
-                          <span className="ml-1 text-[var(--color-error)]">(Short: -{i.shortageQuantity})</span>
-                        ) : i.overageQuantity ? (
-                          <span className="ml-1 text-[var(--color-success)]">(Over: +{i.overageQuantity})</span>
-                        ) : null}
-                      </div>
-                    )}
-                  </td>
-                  {!isRfqCard && (
-                    <td className="py-1.5 px-2 text-right text-[var(--color-on-surface-variant)]">{formatCurrency2(i.rate)}</td>
-                  )}
-                  {!isRfqCard && (
-                    <td className="py-1.5 px-2 text-right text-[var(--color-on-surface-variant)]">{i.gstRate ?? 0}%</td>
-                  )}
-                  {!isRfqCard && (
-                    <td className="py-1.5 px-2 text-right font-bold text-[var(--color-on-surface)]">
-                      {formatCurrency2(
-                        /* The goods receipt bills received qty × PO rate (user rule) */
-                        isGrnCard && i.receivedQuantity !== undefined && i.receivedQuantity !== null
-                          ? Number(i.receivedQuantity) * i.rate
-                          : i.amount ?? i.quantity * i.rate
-                      )}
-                    </td>
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Doc totals — the RFQ carries no vendor rates, so no totals row */}
-        {doc.stageType !== 'rfq' && (
-          <div className="px-4 py-2.5 border-t border-[var(--color-outline-variant)]/60 flex items-center justify-end gap-4 text-[11px]">
-            <span className="text-[var(--color-on-surface-variant)]">Subtotal: <strong className="text-[var(--color-on-surface)]">{formatCurrency2(doc.subtotal)}</strong></span>
-            <span className="text-[var(--color-on-surface-variant)]">GST: <strong className="text-[var(--color-on-surface)]">{formatCurrency2(doc.taxAmount)}</strong></span>
-            <span className="text-[var(--color-on-surface-variant)]">Total: <strong className="text-[var(--color-primary)]">{formatCurrency2(doc.totalAmount)}</strong></span>
-          </div>
-        )}
-
-        {/* Settlement info — mirrored onto the goods-receipt card */}
-        {isGrnCard && selectedOrder && (
-          <div className="px-4 py-2.5 border-t border-[var(--color-outline-variant)]/60 flex flex-wrap items-center justify-between gap-2 text-[10px] bg-[var(--color-surface-container-lowest)]">
-            <span className="text-[var(--color-on-surface-variant)]">
-              Bill voucher: <strong className="text-[var(--color-on-surface)] font-mono">{selectedOrder.invoiceVoucherNumber || '—'}</strong>
-            </span>
-            {selectedOrder.settlementVoucherNumber ? (
-              <span className="text-[var(--color-on-surface-variant)]">
-                Settled {(selectedOrder.settledAmount !== undefined ? formatCurrency2(selectedOrder.settledAmount) : '')}
-                {(selectedOrder.paymentMode ? ` · ${(selectedOrder.paymentMode === 'upi' ? 'UPI' : selectedOrder.paymentMode === 'bank_transfer' ? 'Bank Transfer / IMPS' : selectedOrder.paymentMode === 'neft_rtgs' ? 'NEFT / RTGS' : selectedOrder.paymentMode === 'cheque' ? 'Cheque / DD' : 'Cash')}` : '')}
-                {' — '}<strong className="text-[var(--color-on-surface)]">{selectedOrder.settlementAccountName || 'Cash/Bank'}</strong>
-                {' · Payout '}{<strong className="text-[var(--color-on-surface)] font-mono">{selectedOrder.settlementVoucherNumber}</strong>}
-              </span>
-            ) : selectedOrder.settlementType === 'credit' ? (
-              <span className="text-[var(--color-on-surface-variant)] italic">Booked on credit — payable on the Party ledger (payout —)</span>
-            ) : (
-              <span className="text-[var(--color-on-surface-variant)] italic">Payment flow not applied — nothing posted yet</span>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  };
+  /** Purchase stage document card (shared component wrapper) */
+  const renderPurchaseDocCard = (doc: PurchaseStageDocDisplay) => (
+    <PurchaseStageDocCard
+      doc={doc}
+      order={selectedOrder}
+      currencyCode={settings.currency?.code}
+      onOpenDocument={openPurchaseStageDocPreview}
+    />
+  );
 
   // Currency Formatter
   const formatCurrency = (amount: number) => {
