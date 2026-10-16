@@ -346,15 +346,8 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
         </div>
 
         {/* Footer Actions */}
-        <div className="px-6 py-4 border-t border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] flex items-center justify-between">
-          <button
-            type="button"
-            onClick={() => onDelete(item)}
-            className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-error-container)] hover:opacity-90 text-[var(--color-on-error-container)] font-medium text-xs rounded-full transition-colors"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            Delete Item
-          </button>
+        <div className="px-6 py-4 border-t border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] flex items-center justify-end">
+          
 
           <div className="flex items-center gap-2">
             <button
