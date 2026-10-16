@@ -748,10 +748,11 @@ class CloudStore {
       transportCharges: Number(payload.transportCharges) || 0,
       inventoryApplied: Boolean(stage?.updateInventory),
       cashApplied: Boolean(stage?.updateCash),
+      settlementType: stage?.settlementType && stage.settlementType !== 'none' ? stage.settlementType : undefined,
       settlementAccountId: stage?.settlementAccountId,
       paymentMode: stage?.paymentMode,
-      settledAmount: stage?.updateCash ? payload.totalAmount ?? payload.grandTotal : undefined,
-      settledDate: stage?.updateCash ? (stage.date || payload.date) : undefined,
+      settledAmount: stage?.updateCash && stage.settlementType !== 'credit' ? payload.totalAmount ?? payload.grandTotal : undefined,
+      settledDate: stage?.updateCash && stage.settlementType !== 'credit' ? (stage.date || payload.date) : undefined,
       items: payload.items || [],
       stages: stage
         ? [{
@@ -791,7 +792,10 @@ class CloudStore {
     let updated: Sale | null = null;
     this.sales = this.sales.map((s) => {
       if (s.id === id) {
-        updated = { ...s, ...updates, updatedAt: new Date().toISOString() };
+        // One-shot inventory switch on the edit form: reflect the application
+        // immediately (server response + resync confirm it).
+        const invApplied = Boolean(updates.updateInventory) || s.inventoryApplied;
+        updated = { ...s, ...updates, inventoryApplied: invApplied, updatedAt: new Date().toISOString() };
         return updated;
       }
       return s;
@@ -829,6 +833,7 @@ class CloudStore {
             stages: [...s.stages, optimisticStage],
             inventoryApplied: s.inventoryApplied || Boolean(stageInput.updateInventory),
             cashApplied: s.cashApplied || Boolean(stageInput.updateCash),
+            settlementType: s.settlementType ?? (stageInput.settlementType && stageInput.settlementType !== 'none' ? stageInput.settlementType : undefined),
             updatedAt: now,
           }
         : s
@@ -871,10 +876,11 @@ class CloudStore {
       notes: payload.notes,
       inventoryApplied: Boolean(stage?.updateInventory),
       cashApplied: Boolean(stage?.updateCash),
+      settlementType: stage?.settlementType && stage.settlementType !== 'none' ? stage.settlementType : undefined,
       settlementAccountId: stage?.settlementAccountId,
       paymentMode: stage?.paymentMode,
-      settledAmount: stage?.updateCash ? payload.totalAmount ?? payload.grandTotal : undefined,
-      settledDate: stage?.updateCash ? (stage.date || payload.date) : undefined,
+      settledAmount: stage?.updateCash && stage.settlementType !== 'credit' ? payload.totalAmount ?? payload.grandTotal : undefined,
+      settledDate: stage?.updateCash && stage.settlementType !== 'credit' ? (stage.date || payload.date) : undefined,
       items: payload.items || [],
       stages: stage
         ? [{
@@ -916,7 +922,8 @@ class CloudStore {
     let updated: Purchase | null = null;
     this.purchases = this.purchases.map((p) => {
       if (p.id === id) {
-        updated = { ...p, ...updates, updatedAt: new Date().toISOString() };
+        const invApplied = Boolean(updates.updateInventory) || p.inventoryApplied;
+        updated = { ...p, ...updates, inventoryApplied: invApplied, updatedAt: new Date().toISOString() };
         return updated;
       }
       return p;
@@ -959,6 +966,7 @@ class CloudStore {
             ],
             inventoryApplied: p.inventoryApplied || Boolean(stageInput.updateInventory),
             cashApplied: p.cashApplied || Boolean(stageInput.updateCash),
+            settlementType: p.settlementType ?? (stageInput.settlementType && stageInput.settlementType !== 'none' ? stageInput.settlementType : undefined),
             items: stageInput.items ? stageInput.items : p.items,
             updatedAt: now,
           }

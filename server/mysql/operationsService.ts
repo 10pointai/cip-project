@@ -368,7 +368,8 @@ export async function addSaleStageDirect(id: string, stageInput: any): Promise<S
   if (stageInput.notes !== undefined) masterUpdates.notes = stageInput.notes;
   // Party is LOCKED at creation — stage issuance never touches it.
   if (Object.keys(masterUpdates).length > 0) {
-    serverDb.updateSale(id, masterUpdates);
+    // skipMysqlSync: addSaleStage syncs AFTER the stage save with final state
+  serverDb.updateSale(id, masterUpdates, { skipMysqlSync: true });
   }
   return serverDb.addSaleStage(id, stageInput);
 }
@@ -403,7 +404,8 @@ export async function addPurchaseStageDirect(id: string, stageInput: any): Promi
   if (stageInput.notes !== undefined) masterUpdates.notes = stageInput.notes;
   if (stageInput.items) masterUpdates.items = stageInput.items;
   if (Object.keys(masterUpdates).length > 0) {
-    serverDb.updatePurchase(id, masterUpdates);
+    // skipMysqlSync: addPurchaseStage syncs AFTER the stage save with final state
+  serverDb.updatePurchase(id, masterUpdates, { skipMysqlSync: true });
   }
   return serverDb.addPurchaseStage(id, stageInput);
 }

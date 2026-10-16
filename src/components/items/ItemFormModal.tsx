@@ -15,6 +15,7 @@ import {
   ArrowUpRight,
   Trash2,
   MapPin,
+  Lock,
 } from 'lucide-react';
 import { Item, ItemCategory, ItemUnit, ItemLocation, ItemType, ItemLocationStock } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
@@ -394,13 +395,21 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                   type="text"
                   placeholder="e.g. DBM-GR2"
                   value={code}
+                  disabled={Boolean(initialItem)}
                   onChange={(e) => {
                     setCode(e.target.value.toUpperCase());
                     setError('');
                   }}
-                  className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-mono uppercase font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                  className={`w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-mono uppercase font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${
+                    initialItem ? 'opacity-60 cursor-not-allowed' : ''
+                  }`}
                   required
                 />
+                {initialItem ? (
+                  <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-1 ml-2 flex items-center gap-1">
+                    <Lock className="w-3 h-3" /> Item code is locked once the item is created.
+                  </p>
+                ) : null}
               </div>
             </div>
 

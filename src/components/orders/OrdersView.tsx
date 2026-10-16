@@ -39,6 +39,7 @@ import {
 import { Order, OrderItem, OrderType, SalesStage, PurchaseStage, Party, Item, CompanySettings, Sale, Purchase, PaymentMode } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { AddPurchaseModal } from './AddPurchaseModal';
+import { SearchableSelect } from './SearchableSelect';
 
 function numberToWords(num: number): string {
   if (num === 0) return 'Zero Rupees Only';
@@ -84,6 +85,26 @@ const SALES_STAGE_META: Record<string, { label: string; icon: any; tone: string 
   sales_invoice: { label: 'GST Tax Invoice', icon: FileCheck, tone: 'text-[var(--color-success)]' },
 };
 
+// Purchase stage document meta (labels + icons for detail tabs/cards — mirror
+// of the sales detail modal's Stage Documents section)
+const PURCHASE_STAGE_META: Record<string, { label: string; icon: any; tone: string }> = {
+  rfq: { label: 'Request Quotation', icon: FileText, tone: 'text-[var(--color-secondary)]' },
+  purchase_order: { label: 'Purchase Order', icon: ClipboardList, tone: 'text-[var(--color-primary)]' },
+  goods_receipt: { label: 'Goods Receiving', icon: FileCheck, tone: 'text-[var(--color-success)]' },
+};
+
+// Purchase stage document as shown in the detail modal (per-stage totals;
+// items live on the master so they render from the purchase's own rows)
+interface PurchaseStageDocDisplay {
+  stageType: PurchaseStage;
+  stageNumber: string;
+  date: string;
+  notes?: string;
+  subtotal: number;
+  taxAmount: number;
+  totalAmount: number;
+}
+
 interface StageDocDisplay {
   stageType: SalesStage;
   stageNumber: string;
@@ -98,6 +119,9 @@ interface StageDocDisplay {
 interface OrderDisplay extends Order {
   inventoryApplied: boolean;
   cashApplied: boolean;
+  // Which payment flow was applied: 'credit' (party ledger, no cash) /
+  // 'account' (Cash/Bank); undefined = never applied.
+  settlementType?: 'credit' | 'account';
   // Cash & Bank settlement (hydrated sale/purchase master fields)
   settlementAccountId?: string;
   settlementAccountName?: string;
@@ -108,6 +132,8 @@ interface OrderDisplay extends Order {
   /** paymentMode: inherited from Order (kept for the settlement record) */
   /** Stage document numbers as issued (chronological) */
   stageNumbers?: Array<{ type: string; number: string; date: string }>;
+  /** Purchase per-stage documents (RFQ / PO / GRN with their own totals) */
+  purchaseStageDocs?: PurchaseStageDocDisplay[];
   /** Full stage documents with their OWN line values (quotation vs order...) */
   stageDocs?: StageDocDisplay[];
 }
@@ -168,6 +194,7 @@ function saleToDisplay(s: Sale): OrderDisplay {
     transportCharges,
     inventoryApplied: s.inventoryApplied,
     cashApplied: s.cashApplied,
+    settlementType: (s as any).settlementType || undefined,
     settlementAccountId: (s as any).settlementAccountId || undefined,
     settlementAccountName: (s as any).settlementAccountName || undefined,
     paymentMode: (s as any).paymentMode,
@@ -221,6 +248,7 @@ function purchaseToDisplay(p: Purchase): OrderDisplay {
     notes: p.notes,
     inventoryApplied: p.inventoryApplied,
     cashApplied: p.cashApplied,
+    settlementType: (p as any).settlementType || undefined,
     settlementAccountId: (p as any).settlementAccountId || undefined,
     settlementAccountName: (p as any).settlementAccountName || undefined,
     paymentMode: (p as any).paymentMode,
@@ -229,6 +257,15 @@ function purchaseToDisplay(p: Purchase): OrderDisplay {
     settledAmount: (p as any).settledAmount,
     settledDate: (p as any).settledDate,
     stageNumbers: (p.stages || []).map((st) => ({ type: st.stageType, number: st.stageNumber, date: st.date })),
+    purchaseStageDocs: (p.stages || []).map((st) => ({
+      stageType: st.stageType,
+      stageNumber: st.stageNumber,
+      date: st.date,
+      notes: st.notes,
+      subtotal: st.subtotal,
+      taxAmount: st.taxAmount,
+      totalAmount: st.totalAmount,
+    })),
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
   } as OrderDisplay;
@@ -250,100 +287,6 @@ interface OrdersViewProps {
   onAddPurchaseStage: (id: string, stageInput: any) => any;
   onDeletePurchase: (id: string) => boolean;
   fixedType?: OrderType;
-}
-
-// Typable, searchable picker used by every <select> inside the line-item rows,
-// so all columns feel the same (type-to-filter, option list, escaped dropdown).
-// Renders as a non-interactive text when `disabledText` is given.
-function SearchableSelect({
-  options,
-  value,
-  onChange,
-  closedDisplay,
-  placeholder = 'Type to search...',
-  disabledText,
-}: {
-  options?: Array<{ value: string; label: string; sub?: string }>;
-  value: string;
-  onChange: (value: string) => void;
-  /** What to show in the closed input; defaults to the selected option's label. */
-  closedDisplay?: string;
-  placeholder?: string;
-  /** When set, renders a dimmed non-interactive placeholder instead of the picker. */
-  disabledText?: string;
-}) {
-  const [open, setOpen] = React.useState(false);
-  const [query, setQuery] = React.useState('');
-  const lowerQuery = query.trim().toLowerCase();
-  const matches = (
-    lowerQuery
-      ? (options ?? []).filter(
-          (o) =>
-            o.label.toLowerCase().includes(lowerQuery) ||
-            (o.sub ?? '').toLowerCase().includes(lowerQuery)
-        )
-      : options ?? []
-  ).slice(0, 50);
-
-  if (disabledText !== undefined) {
-    return (
-      <div className="w-full text-xs font-medium text-[var(--color-outline)] cursor-not-allowed select-none truncate">
-        {disabledText}
-      </div>
-    );
-  }
-
-  const display = closedDisplay ?? options.find((o) => o.value === value)?.label ?? '';
-
-  return (
-    <div className="relative">
-      <input
-        type="text"
-        value={open ? query : display}
-        onChange={(e) => {
-          setQuery(e.target.value);
-          setOpen(true);
-        }}
-        onFocus={() => {
-          setQuery('');
-          setOpen(true);
-        }}
-        onBlur={() => setOpen(false)}
-        placeholder={placeholder}
-        className="w-full bg-transparent text-xs font-medium text-[var(--color-on-surface)] placeholder:text-[var(--color-on-surface-variant)] focus:outline-none"
-      />
-      {open && (
-        <div className="absolute left-0 top-full z-30 mt-1 w-max min-w-[200px] max-w-[280px] max-h-56 overflow-y-auto rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] shadow-lg">
-          {matches.length === 0 ? (
-            <p className="px-3 py-2.5 text-[10px] text-[var(--color-on-surface-variant)]">
-              No matches for "{query}"
-            </p>
-          ) : (
-            matches.map((o) => (
-              <button
-                key={o.value}
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => {
-                  onChange(o.value);
-                  setOpen(false);
-                  setQuery('');
-                }}
-                className={`w-full px-3 py-2 text-left text-[11px] hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50 first:border-t-0 ${
-                  o.value === value ? 'bg-[var(--color-primary-container)]/60' : ''
-                }`}
-              >
-                <span className="font-bold text-[var(--color-on-surface)]">{o.label}</span>
-                {o.sub && (
-                  <span className="block text-[9px] text-[var(--color-on-surface-variant)]">{o.sub}</span>
-                )}
-              </button>
-            ))
-          )}
-        </div>
-      )}
-    </div>
-  );
 }
 
 export function OrdersView({
@@ -371,6 +314,11 @@ export function OrdersView({
   const [editingOrder, setEditingOrder] = useState<OrderDisplay | null>(null);
   const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
   const [editingPurchaseOrder, setEditingPurchaseOrder] = useState<OrderDisplay | null>(null);
+  // Purchase mirror of the sales stage machinery: the stage the Add-Purchase
+  // popover picked (new purchase) and the successive stage the row ⋮ menu is
+  // advancing an existing purchase to (RFQ → PO → GRN, never backwards).
+  const [purchaseCreateStage, setPurchaseCreateStage] = useState<PurchaseStage | undefined>('rfq');
+  const [purchaseOpenStage, setPurchaseOpenStage] = useState<PurchaseStage | undefined>(undefined);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<OrderDisplay | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
@@ -396,10 +344,11 @@ export function OrdersView({
   const [updateInventory, setUpdateInventory] = useState<boolean>(false);
   const [updateCash, setUpdateCash] = useState<boolean>(false);
 
-  // Payment settlement toggle — the cash posting rules are being specified
-  // separately; this UI selects mode/account preferences and is NOT persisted
-  // on the sale/purchase model yet.
-  const [includePayment, setIncludePayment] = useState<boolean>(false);
+  // Payment-flow toggle: 'none' = Don't touch payment settlement (nothing
+  // posts — no voucher, no party ledger move, no cash move); 'credit' = book
+  // on credit (party ledger only, no cash); 'account' = full flow (journal +
+  // payment voucher into formAccountId). Once applied the section locks ON.
+  const [formSettlementType, setFormSettlementType] = useState<'none' | 'credit' | 'account'>('none');
   const [includeLogistics, setIncludeLogistics] = useState<boolean>(false);
 
   // Fetch available accounts, vehicles, drivers & storage locations for dropdown selection
@@ -432,7 +381,19 @@ export function OrdersView({
     settlementAccountId?: string;
     settledAmount?: number;
     settledDate?: string;
+    // Which payment flow was applied (echoed verbatim on locked saves)
+    settlementType?: 'credit' | 'account';
   } | null>(null);
+
+  // Payment-flow section locks: once a flow was applied it shows disabled ON
+  // (every save echoes the stored flow); an EDIT whose sale never applied the
+  // flow keeps the toggle ENABLED so the user can book the flow right from the
+  // edit save (the server applies it at the current stage, one-shot).
+  const settleSectionLocked = Boolean(stageIssueCtx?.cashApplied || (editingOrder as any)?.cashApplied);
+  // A payment flow is COMPULSORY at the invoice stage (final document) —
+  // the switch locks ON there and Don't-touch is not offered. 'credit'
+  // applies the flow at applying stage; user can still pick an account.
+  const settleFinalStage = (stageIssueCtx?.stageType || formStage) === 'sales_invoice';
 
   // Row-level ⋮ action popover (sales list). Rendered via PORTAL (fixed
   // position above the page) so the list container's overflow-x-auto /
@@ -495,6 +456,26 @@ export function OrdersView({
   const isSaleLocked = (order: OrderDisplay) => (order.stage || 'sales_order') === 'sales_invoice';
   const editLabelFor = (order: OrderDisplay) =>
     (order.stage || 'sales_order') === 'quotation' ? 'Edit Quotation' : 'Edit Sales Order';
+
+  // Purchase stage ladder (mirror of the sales rules):
+  //   rfq            -> Create Purchase Order, Record Goods Receiving
+  //   purchase_order -> Record Goods Receiving
+  //   goods_receipt  -> purchase LOCKED: goods received, no edit, no stages
+  const purchaseStageActionMenu = (order: OrderDisplay): Array<{ stageType: PurchaseStage; label: string; icon: any }> => {
+    const current = order.purchaseStage || 'purchase_order';
+    if (current === 'goods_receipt' || order.status === 'cancelled') return []; // locked
+    if (current === 'rfq') {
+      return [
+        { stageType: 'purchase_order', label: 'Create Purchase Order', icon: Layers },
+        { stageType: 'goods_receipt', label: 'Record Goods Receiving', icon: FileCheck },
+      ];
+    }
+    return [{ stageType: 'goods_receipt', label: 'Record Goods Receiving', icon: FileCheck }];
+  };
+  const isPurchaseLocked = (order: OrderDisplay) =>
+    (order.purchaseStage || 'purchase_order') === 'goods_receipt' || order.status === 'cancelled';
+  const purchaseEditLabelFor = (order: OrderDisplay) =>
+    (order.purchaseStage || 'purchase_order') === 'rfq' ? 'Edit Request Quotation' : 'Edit Purchase Order';
   const canViewProforma = (order: OrderDisplay) => {
     const c = order.stage || 'sales_order';
     return c === 'sales_order' || c === 'proforma_invoice' || c === 'delivery_note';
@@ -506,6 +487,9 @@ export function OrdersView({
    * stage document (server stores these rows against the new stage).
    */
   const openIssueStageForm = (order: OrderDisplay, stageType: SalesStage) => {
+    // The stage-issue form modal opens on top — close the detail view so the
+    // user never has to dismiss it manually afterwards.
+    setIsDetailOpen(false);
     const sale = sales.find((s) => s.id === order.id);
     const display = sale ? saleToDisplay(sale) : order;
     setStageIssueCtx({
@@ -518,6 +502,7 @@ export function OrdersView({
       settlementAccountId: order.settlementAccountId,
       settledAmount: order.settledAmount,
       settledDate: order.settledDate,
+      settlementType: order.cashApplied ? (order.settlementType || 'account') : undefined,
     });
     setEditingOrder(null);
     setFormType('sales');
@@ -530,7 +515,13 @@ export function OrdersView({
     setFormDriverName(order.driverName || '');
     setFormTransportCharges(String(order.transportCharges || 0));
     setIncludeLogistics(Number(order.transportCharges) > 0 || Boolean(order.vehicleNo || order.driverName));
-    setIncludePayment(false);
+    // Payment flow: once applied, the section locks ON and every later save
+    // echoes the stored flow verbatim (never 'none' — the final-stage journal
+    // voucher must keep upserting). A payment flow is COMPULSORY at the
+    // invoice stage, so issuing one defaults to Book on credit.
+    setFormSettlementType(order.cashApplied
+      ? (order.settlementType || 'account')
+      : (stageType === 'sales_invoice' ? 'credit' : 'none'));
     setFormAccountId(order.settlementAccountId || '');
     setFormPaymentMode((order.paymentMode as any) || 'bank_transfer');
     setUpdateInventory(!order.inventoryApplied);
@@ -663,8 +654,167 @@ export function OrdersView({
                 {' — '}<strong className="text-[var(--color-on-surface)]">{selectedOrder.settlementAccountName || 'Cash/Bank'}</strong>
                 {' · Receipt '}{selectedOrder.settlementVoucherNumber ? <strong className="text-[var(--color-on-surface)] font-mono">{selectedOrder.settlementVoucherNumber}</strong> : '—'}
               </span>
+            ) : selectedOrder.settlementType === 'credit' ? (
+              <span className="text-[var(--color-on-surface-variant)] italic">Booked on credit — receivable on the Party ledger (receipt —)</span>
             ) : (
-              <span className="text-[var(--color-on-surface-variant)] italic">Booked on credit — settle later under Cash &amp; Bank / Party ledger</span>
+              <span className="text-[var(--color-on-surface-variant)] italic">Payment flow not applied — nothing posted yet</span>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Purchase detail card for one issued stage (mirror of the sales stage doc
+  // card): the stage's own number/date/totals + stage-specific document chips
+  // + the purchase's item rows (Received/Shortage columns on the GRN card).
+  // The old stepper + flat Material Details were replaced by this section
+  // (per user direction, mirroring the sales detail modal).
+  const renderPurchaseDocCard = (doc: PurchaseStageDocDisplay) => {
+    const meta = PURCHASE_STAGE_META[doc.stageType] || PURCHASE_STAGE_META.purchase_order;
+    const MetaIcon = meta.icon;
+    const isGrnCard = doc.stageType === 'goods_receipt';
+    // Request Quotation = pure inquiry: pending vendor rates — no money columns.
+    const isRfqCard = doc.stageType === 'rfq';
+    return (
+      <div className="bg-[var(--color-surface-container)] rounded-2xl border border-[var(--color-outline-variant)] overflow-hidden">
+        {/* Doc header */}
+        <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-2 bg-[var(--color-surface-container-high)]/60 border-b border-[var(--color-outline-variant)]/60">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <MetaIcon className={`w-4 h-4 ${meta.tone} shrink-0`} />
+            <div className="min-w-0">
+              <p className="text-xs font-black text-[var(--color-on-surface)] truncate">
+                {meta.label} <span className="text-[var(--color-on-surface-variant)] font-semibold">· {doc.stageNumber}</span>
+              </p>
+              <p className="text-[10px] text-[var(--color-on-surface-variant)] font-medium">Issued {doc.date}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              if (!selectedOrder) return;
+              setPreviewOrder({ ...(selectedOrder as any), purchaseStage: doc.stageType });
+              setPreviewStage(doc.stageType as any);
+              setIsPreviewOpen(true);
+            }}
+            className="flex items-center gap-1 px-3 py-1.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-[10px] font-bold hover:opacity-90 transition-all"
+          >
+            <Printer className="w-3 h-3" /> Open document
+          </button>
+        </div>
+
+        {/* Stage-specific document chips (only the fields that exist) */}
+        {(() => {
+          const chips: Array<{ label: string; value: string }> = [];
+          if (doc.stageType === 'rfq' && selectedOrder?.rfqDetails?.rfqNumber) {
+            chips.push({ label: 'RFQ No', value: selectedOrder.rfqDetails.rfqNumber });
+          }
+          if (doc.stageType === 'purchase_order' && selectedOrder?.poDetails?.poNumber) {
+            chips.push({ label: 'PO No', value: selectedOrder.poDetails.poNumber });
+          }
+          if (isGrnCard && selectedOrder?.receiptDetails) {
+            const rd: any = selectedOrder.receiptDetails;
+            if (rd.grnNumber) chips.push({ label: 'GRN', value: rd.grnNumber });
+            if (rd.receiptDate) chips.push({ label: 'Inward', value: rd.receiptDate });
+            if (rd.challanNumber) chips.push({ label: 'Challan', value: rd.challanNumber });
+            if (rd.vendorInvoiceNumber) chips.push({ label: 'Vendor Inv', value: rd.vendorInvoiceNumber });
+            if (rd.receivedBy) chips.push({ label: 'Inspector', value: rd.receivedBy });
+          }
+          if (chips.length === 0) return null;
+          return (
+            <div className="px-4 py-2 border-b border-[var(--color-outline-variant)]/60 flex flex-wrap gap-x-4 gap-y-1 text-[10px] bg-[var(--color-surface-container-lowest)]">
+              {chips.map((c) => (
+                <span key={c.label} className="text-[var(--color-on-surface-variant)]">
+                  {c.label}: <strong className="text-[var(--color-on-surface)]">{c.value}</strong>
+                </span>
+              ))}
+            </div>
+          );
+        })()}
+
+        {/* Line rows (the purchase's items; Inward location; Received audit on GRN) */}
+        <div className="px-2 py-2">
+          <table className="w-full text-left text-[11px]">
+            <thead>
+              <tr className="text-[var(--color-on-surface-variant)] font-bold text-[9px] uppercase tracking-wider">
+                <th className="py-1.5 px-2">Item</th>
+                <th className="py-1.5 px-2">Inward Location</th>
+                <th className="py-1.5 px-2 text-right">{isGrnCard ? 'Ordered / Received' : 'Qty'}</th>
+                {!isRfqCard && <th className="py-1.5 px-2 text-right">Rate</th>}
+                {!isRfqCard && <th className="py-1.5 px-2 text-right">GST</th>}
+                {!isRfqCard && <th className="py-1.5 px-2 text-right">Amount</th>}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--color-outline-variant)]/50">
+              {selectedOrder?.items.map((i, idx) => (
+                <tr key={idx}>
+                  <td className="py-1.5 px-2 font-semibold text-[var(--color-on-surface)] truncate max-w-[220px]">
+                    {i.itemCode ? `${i.itemCode} (${i.itemName})` : i.itemName}
+                  </td>
+                  <td className="py-1.5 px-2 text-[var(--color-on-surface-variant)] font-medium">
+                    {i.location || <span className="italic text-[10px]">Default Yard</span>}
+                  </td>
+                  <td className="py-1.5 px-2 text-right font-bold text-[var(--color-on-surface)]">
+                    <div>{i.quantity.toLocaleString('en-IN')} {i.unit}</div>
+                    {isGrnCard && i.receivedQuantity !== undefined && (
+                      <div className="text-[9px] font-semibold mt-0.5">
+                        <span className="text-[var(--color-primary)]">Recv: {i.receivedQuantity} {i.unit}</span>
+                        {i.shortageQuantity ? (
+                          <span className="ml-1 text-[var(--color-error)]">(Short: -{i.shortageQuantity})</span>
+                        ) : i.overageQuantity ? (
+                          <span className="ml-1 text-[var(--color-success)]">(Over: +{i.overageQuantity})</span>
+                        ) : null}
+                      </div>
+                    )}
+                  </td>
+                  {!isRfqCard && (
+                    <td className="py-1.5 px-2 text-right text-[var(--color-on-surface-variant)]">{formatCurrency2(i.rate)}</td>
+                  )}
+                  {!isRfqCard && (
+                    <td className="py-1.5 px-2 text-right text-[var(--color-on-surface-variant)]">{i.gstRate ?? 0}%</td>
+                  )}
+                  {!isRfqCard && (
+                    <td className="py-1.5 px-2 text-right font-bold text-[var(--color-on-surface)]">
+                      {formatCurrency2(
+                        /* The goods receipt bills received qty × PO rate (user rule) */
+                        isGrnCard && i.receivedQuantity !== undefined && i.receivedQuantity !== null
+                          ? Number(i.receivedQuantity) * i.rate
+                          : i.amount ?? i.quantity * i.rate
+                      )}
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Doc totals — the RFQ carries no vendor rates, so no totals row */}
+        {doc.stageType !== 'rfq' && (
+          <div className="px-4 py-2.5 border-t border-[var(--color-outline-variant)]/60 flex items-center justify-end gap-4 text-[11px]">
+            <span className="text-[var(--color-on-surface-variant)]">Subtotal: <strong className="text-[var(--color-on-surface)]">{formatCurrency2(doc.subtotal)}</strong></span>
+            <span className="text-[var(--color-on-surface-variant)]">GST: <strong className="text-[var(--color-on-surface)]">{formatCurrency2(doc.taxAmount)}</strong></span>
+            <span className="text-[var(--color-on-surface-variant)]">Total: <strong className="text-[var(--color-primary)]">{formatCurrency2(doc.totalAmount)}</strong></span>
+          </div>
+        )}
+
+        {/* Settlement info — mirrored onto the goods-receipt card */}
+        {isGrnCard && selectedOrder && (
+          <div className="px-4 py-2.5 border-t border-[var(--color-outline-variant)]/60 flex flex-wrap items-center justify-between gap-2 text-[10px] bg-[var(--color-surface-container-lowest)]">
+            <span className="text-[var(--color-on-surface-variant)]">
+              Bill voucher: <strong className="text-[var(--color-on-surface)] font-mono">{selectedOrder.invoiceVoucherNumber || '—'}</strong>
+            </span>
+            {selectedOrder.settlementVoucherNumber ? (
+              <span className="text-[var(--color-on-surface-variant)]">
+                Settled {(selectedOrder.settledAmount !== undefined ? formatCurrency2(selectedOrder.settledAmount) : '')}
+                {(selectedOrder.paymentMode ? ` · ${(selectedOrder.paymentMode === 'upi' ? 'UPI' : selectedOrder.paymentMode === 'bank_transfer' ? 'Bank Transfer / IMPS' : selectedOrder.paymentMode === 'neft_rtgs' ? 'NEFT / RTGS' : selectedOrder.paymentMode === 'cheque' ? 'Cheque / DD' : 'Cash')}` : '')}
+                {' — '}<strong className="text-[var(--color-on-surface)]">{selectedOrder.settlementAccountName || 'Cash/Bank'}</strong>
+                {' · Payout '}{<strong className="text-[var(--color-on-surface)] font-mono">{selectedOrder.settlementVoucherNumber}</strong>}
+              </span>
+            ) : selectedOrder.settlementType === 'credit' ? (
+              <span className="text-[var(--color-on-surface-variant)] italic">Booked on credit — payable on the Party ledger (payout —)</span>
+            ) : (
+              <span className="text-[var(--color-on-surface-variant)] italic">Payment flow not applied — nothing posted yet</span>
             )}
           </div>
         )}
@@ -778,9 +928,11 @@ export function OrdersView({
   };
 
   // Handle open Form Modal for Create
-  const handleOpenCreate = (type: OrderType, stage?: SalesStage) => {
+  const handleOpenCreate = (type: OrderType, stage?: SalesStage | PurchaseStage) => {
     const resolvedType = fixedType || type;
     if (resolvedType === 'purchase') {
+      setPurchaseCreateStage((stage as PurchaseStage) || 'rfq');
+      setPurchaseOpenStage(undefined);
       setEditingPurchaseOrder(null);
       setIsPurchaseModalOpen(true);
       return;
@@ -799,7 +951,10 @@ export function OrdersView({
     setFormTransportCharges('0');
     setUpdateInventory(false);
     setUpdateCash(false);
-    setIncludePayment(false);
+    // A payment flow is COMPULSORY at the invoice stage — a sale created
+    // straight at the invoice defaults to Book on credit (user can still
+    // switch to a Cash/Bank account); other stages start at Don't touch.
+    setFormSettlementType((stage || 'quotation') === 'sales_invoice' ? 'credit' : 'none');
     setFormAccountId('');
     setFormPaymentMode('bank_transfer' as any);
 
@@ -814,10 +969,10 @@ export function OrdersView({
   React.useEffect(() => {
     const handleHeaderAction = (e: Event) => {
       const customEvent = e as CustomEvent;
-      if (
-        fixedType === 'purchase' &&
-        (customEvent.detail === 'create-po' || customEvent.detail === 'add-purchase')
-      ) {
+      if (fixedType === 'purchase' && customEvent.detail === 'add-purchase') {
+        setIsStageMenuOpen(true); // mirror of the sales popover
+      }
+      if (fixedType === 'purchase' && customEvent.detail === 'create-po') {
         handleOpenCreate('purchase');
       }
     };
@@ -853,6 +1008,10 @@ export function OrdersView({
     e.stopPropagation();
     setStageIssueCtx(null);
     if (order.type === 'purchase') {
+      // Edit opens the modal at the order's CURRENT stage: no create stage
+      // (the modal falls back to the purchase's own latest stage)
+      setPurchaseCreateStage(undefined);
+      setPurchaseOpenStage(undefined);
       setEditingPurchaseOrder(order);
       setIsPurchaseModalOpen(true);
       return;
@@ -869,13 +1028,16 @@ export function OrdersView({
     setFormVehicleNo(order.vehicleNo || '');
     setFormDriverName(order.driverName || '');
     setFormTransportCharges(String(order.transportCharges || 0));
-    setUpdateInventory(order.inventoryApplied ? false : true);
+    // Inventory switch defaults OFF on create AND edit (user rule) — the
+    // user enables it when they want the one-shot dispatch/inward to post.
+    setUpdateInventory(false);
     setUpdateCash(false);
-    // Settlement only exists on the invoice stage — never carry a stale
-    // settle toggle/account from a previously opened invoice form here.
-    setIncludePayment(false);
-    setFormAccountId('');
-    setFormPaymentMode('bank_transfer' as any);
+    // Payment flow mirrors the sale on edit: an applied flow shows locked ON
+    // (echoes its stored type); an unapplied sale starts unchecked but the
+    // toggle stays enabled — the edit save can book the flow at this stage.
+    setFormSettlementType(order.cashApplied ? (order.settlementType || 'account') : 'none');
+    setFormAccountId(order.settlementAccountId || '');
+    setFormPaymentMode((order.paymentMode as any) || 'bank_transfer');
     setFormItems(
       order.items.map((i) => {
         const prod = items.find((it) => it.id === i.itemId);
@@ -982,7 +1144,7 @@ export function OrdersView({
       return;
     }
 
-    if (formStage === 'sales_invoice' && includePayment) {
+    if ((formStage === 'sales_invoice' || formStage === 'sales_order') && formSettlementType === 'account') {
       if (!formPaymentMode) {
         setFormError('Please select a Payment Mode.');
         return;
@@ -1030,6 +1192,22 @@ export function OrdersView({
 
     const { taxAmount, totalAmount } = formCalculations;
 
+    // Payment-flow stage fields: 'none' → Don't touch (nothing posts), 'credit'
+    // → book on credit (party ledger only), 'account' → journal + receipt into
+    // formAccountId. Once applied the section locks ON and prefills the stored
+    // flow, so every save echoes it verbatim (never 'none' — the final-stage
+    // journal voucher must keep upserting). At the invoice stage the flow is
+    // COMPULSORY: an un-decided choice falls back to Book on credit.
+    const settleStageFields = () => {
+      const effType = formSettlementType === 'none' && settleFinalStage ? ('credit' as const) : formSettlementType;
+      return {
+        updateCash: effType !== 'none',
+        settlementType: effType,
+        settlementAccountId: effType === 'account' ? (formAccountId || undefined) : undefined,
+        paymentMode: effType === 'account' ? formPaymentMode : undefined,
+      };
+    };
+
     if (stageIssueCtx) {
       // STAGE-ISSUE mode: submit issues the new stage document; the lines
       // become that stage's own rows (editable copy of the current stage).
@@ -1040,11 +1218,7 @@ export function OrdersView({
         notes: formNotes.trim() || undefined,
         partyId: formPartyId || undefined,
         updateInventory,
-        // "Settle Payment Now" = the cash application one-shot: posts the
-        // payment_in receipt voucher against the chosen account on the server.
-        updateCash: includePayment,
-        settlementAccountId: formAccountId || undefined,
-        paymentMode: formPaymentMode,
+        ...settleStageFields(),
         items: itemsList,
       });
       setStageIssueCtx(null);
@@ -1053,7 +1227,11 @@ export function OrdersView({
     }
 
     if (editingOrder) {
-      // Master edit: items/notes/logistics/date — stages stay untouched.
+      // Master edit: items/notes/logistics/date — stages stay untouched. The
+      // one-shot inventory switch rides along (default OFF; applied on save
+      // only while the dispatch has never posted). The payment-flow toggle is
+      // enabled while the flow was never applied — the edit save can book the
+      // flow at the current stage; an applied flow is locked and never resent.
       onUpdateSale(editingOrder.id, {
         partyId: formPartyId,
         date: formDate,
@@ -1065,6 +1243,8 @@ export function OrdersView({
         subtotal: formCalculations.subtotal,
         taxAmount,
         totalAmount,
+        updateInventory: formStage !== 'quotation' ? updateInventory : false,
+        ...(formStage !== 'quotation' && !(editingOrder as any).cashApplied ? settleStageFields() : {}),
       });
     } else {
       // Create: master + first stage document (+ toggles for the ONE-SHOT
@@ -1087,11 +1267,7 @@ export function OrdersView({
           date: formDate,
           notes: formNotes.trim(),
           updateInventory,
-          // "Settle Payment Now" = the cash application one-shot: posts the
-          // payment_in receipt voucher against the chosen account on the server.
-          updateCash: includePayment,
-          settlementAccountId: formAccountId || undefined,
-          paymentMode: formPaymentMode,
+          ...settleStageFields(),
         },
       });
     }
@@ -1125,10 +1301,18 @@ export function OrdersView({
     return localDb.getTripSlips().find(s => s.orderId === previewOrder.id || s.orderNumber === previewOrder.orderNumber);
   }, [previewOrder, isPreviewOpen]);
 
-  // Explicitly compute calculations to be 100% accurate for printable template
+  // Explicitly compute calculations to be 100% accurate for printable template.
+  // A goods-receipt doc bills RECEIVED quantities at the PO rates (user rule).
   const previewCalculations = useMemo(() => {
     if (!previewOrder) return { subtotal: 0, taxAmount: 0, transportCharges: 0, grandTotal: 0 };
-    const subtotal = previewOrder.items.reduce((sum, item) => sum + (item.quantity * item.rate), 0);
+    const grnPreview = previewOrder.type === 'purchase' && previewOrder.purchaseStage === 'goods_receipt';
+    const subtotal = previewOrder.items.reduce((sum, item) => {
+      const q =
+        grnPreview && item.receivedQuantity !== undefined && item.receivedQuantity !== null
+          ? Number(item.receivedQuantity)
+          : item.quantity;
+      return sum + q * item.rate;
+    }, 0);
     const transportCharges = previewOrder.transportCharges || 0;
     const taxAmount = (subtotal * (previewOrder.taxRateGst || 0)) / 100;
     const grandTotal = subtotal + taxAmount + transportCharges;
@@ -1137,8 +1321,8 @@ export function OrdersView({
 
   return (
     <div className="space-y-6" id="orders-management-container">
-      {/* KPI Stats Banner */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* KPI Stats Banner commented out, keep them commented will work on this later */}
+      {/* <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {fixedType === 'sales' ? (
           <>
             <div className="p-4 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl flex items-center justify-between shadow-xs">
@@ -1286,7 +1470,7 @@ export function OrdersView({
             </div>
           </>
         )}
-      </div>
+      </div> */}
 
       {/* Search and Filters Layout */}
       <div className="p-4 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-xs">
@@ -1335,22 +1519,45 @@ export function OrdersView({
             </div>
           )}
 
-          {/* New Order Button (+ Sales Document Stage Popover) */}
+          {/* New Order Button (+ Sales / Purchase document stage popover) */}
           <div className="relative" ref={stageMenuRef}>
             <button
               type="button"
-              onClick={() => {
-                if (fixedType === 'purchase') {
-                  handleOpenCreate('purchase');
-                } else {
-                  setIsStageMenuOpen((open) => !open);
-                }
-              }}
+              onClick={() => setIsStageMenuOpen((open) => !open)}
               className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-bold text-xs rounded-full transition-all shadow-xs active:scale-95"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>{fixedType === 'sales' ? 'Add Sale' : fixedType === 'purchase' ? 'Add Purchase' : 'New Order'}</span>
             </button>
+
+            {isStageMenuOpen && fixedType === 'purchase' && (
+              <div className="absolute right-0 top-[calc(100%+6px)] z-30 w-56 rounded-2xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] shadow-lg overflow-hidden">
+                <p className="px-3 pt-3 pb-2 text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
+                  Create Purchase Document
+                </p>
+                {[
+                  { id: 'rfq', label: 'Request Quotation', desc: 'Supplier inquiry — starts a new purchase' },
+                  { id: 'purchase_order', label: 'Purchase Order', desc: 'Confirmed procurement' },
+                  { id: 'goods_receipt', label: 'Goods Receiving', desc: 'Gate inward — completes the purchase' },
+                ].map((step) => (
+                  <button
+                    key={step.id}
+                    type="button"
+                    onClick={() => {
+                      setIsStageMenuOpen(false);
+                      handleOpenCreate('purchase', step.id as PurchaseStage);
+                    }}
+                    className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50"
+                  >
+                    <div>
+                      <p className="text-xs font-bold text-[var(--color-on-surface)]">{step.label}</p>
+                      <p className="text-[10px] text-[var(--color-on-surface-variant)]">{step.desc}</p>
+                    </div>
+                    <ChevronRight className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
+                  </button>
+                ))}
+              </div>
+            )}
 
             {isStageMenuOpen && fixedType !== 'purchase' && (
               <div className="absolute right-0 top-[calc(100%+6px)] z-30 w-56 rounded-2xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] shadow-lg overflow-hidden">
@@ -1480,9 +1687,9 @@ export function OrdersView({
                           {(() => {
                             const stage = order.purchaseStage || 'purchase_order';
                             const stageLabels: Record<string, string> = {
-                              rfq: 'Stage 1: RFQ',
-                              purchase_order: 'Stage 2: PO Confirmed',
-                              goods_receipt: 'Stage 3: GRN Received',
+                              rfq: 'Request Quotation',
+                              purchase_order: 'Purchase Order',
+                              goods_receipt: 'Goods Receiving',
                             };
                             const stageColors: Record<string, string> = {
                               rfq: 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] border border-[var(--color-outline-variant)]',
@@ -1498,19 +1705,7 @@ export function OrdersView({
                                 >
                                   {stageLabels[stage] || 'Stage 2: PO'}
                                 </span>
-                                {order.status !== 'cancelled' && stage !== 'goods_receipt' && (
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleOpenEdit(order, e);
-                                    }}
-                                    className="text-[10px] font-bold text-[var(--color-primary)] hover:underline flex items-center gap-0.5"
-                                  >
-                                    <span>Advance Stage</span>
-                                    <span>→</span>
-                                  </button>
-                                )}
+                                
                               </div>
                             );
                           })()}
@@ -1552,15 +1747,19 @@ export function OrdersView({
                           </span>
                           <span
                             title={order.cashApplied
-                              ? `Cash applied — receipt voucher ${order.settlementVoucherNumber || ''} posted to ${order.settlementAccountName || 'Cash & Bank'}`
-                              : 'Cash not applied yet — booked on credit'}
+                              ? order.settlementType === 'credit'
+                                ? 'Booked on credit — the receivable/payable moves to the Party ledger, no Cash/Bank movement'
+                                : `Payment flow applied — receipt/payout voucher ${order.settlementVoucherNumber || ''} posted to ${order.settlementAccountName || 'Cash & Bank'}`
+                              : 'Payment flow not applied yet (Don\'t touch settlement)'}
                             className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide ${
                               order.cashApplied
-                                ? 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
+                                ? order.settlementType === 'credit'
+                                  ? 'bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]'
+                                  : 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
                                 : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
                             }`}
                           >
-                            <Landmark className="w-2.5 h-2.5" /> {order.cashApplied ? 'Cash ✓' : 'Cash —'}
+                            <Landmark className="w-2.5 h-2.5" /> {order.cashApplied ? (order.settlementType === 'credit' ? 'Credit ✓' : 'Cash ✓') : 'Cash —'}
                           </span>
                         </div>
                       </td>
@@ -1590,14 +1789,14 @@ export function OrdersView({
                           <div>
                             <span className="text-[11px] font-bold text-[var(--color-primary)]">Pending Rate & Tax</span>
                             <span className="block text-[9px] text-[var(--color-on-surface-variant)] font-semibold mt-0.5">
-                              Stage 1: RFQ
+                              Request Quotation
                             </span>
                           </div>
                         ) : (
                           <div className="font-bold text-[var(--color-on-surface)]">
                             {formatCurrency(order.totalAmount)}
                             <span className="block text-[9px] text-[var(--color-on-surface-variant)] font-semibold mt-0.5">
-                              GST ({order.taxRateGst}%) Incl.
+                              GST Incl.
                             </span>
                           </div>
                         )}
@@ -1606,46 +1805,35 @@ export function OrdersView({
                       {/* Action buttons — ⋮ opens a portal popover (fixed above the page) */}
                       <td className="py-3.5 px-4 text-center">
                         <div className="flex items-center justify-center gap-2">
-                          {isSales ? (
-                            <div className="relative" ref={rowActionRef}>
-                              <button
-                                type="button"
-                                title="More Actions"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (rowActionMenuFor === order.id) {
-                                    closeRowActionMenu();
-                                    return;
-                                  }
-                                  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                                  // flip above the button when nothing fits underneath
-                                  const flip = rect.bottom + 270 > window.innerHeight;
-                                  setRowActionMenuPos({
-                                    top: flip ? rect.top : rect.bottom,
-                                    right: window.innerWidth - rect.right,
-                                    flip,
-                                  });
-                                  setRowActionMenuFor(order.id);
-                                }}
-                                className={`p-1.5 rounded-full transition-colors ${
-                                  rowActionMenuFor === order.id
-                                    ? 'text-[var(--color-on-surface)] bg-[var(--color-surface-container-highest)]'
-                                    : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)]'
-                                }`}
-                              >
-                                <MoreVertical className="w-4 h-4" />
-                              </button>
-                            </div>
-                          ) : (
+                          <div className="relative" ref={rowActionRef}>
                             <button
                               type="button"
-                              title="Edit Purchase"
-                              onClick={(e) => handleOpenEdit(order, e)}
-                              className="p-1.5 text-[var(--color-primary)] hover:opacity-80 hover:bg-[var(--color-primary-container)]/30 rounded-full transition-colors"
+                              title="More Actions"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (rowActionMenuFor === order.id) {
+                                  closeRowActionMenu();
+                                  return;
+                                }
+                                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                // flip above the button when nothing fits underneath
+                                const flip = rect.bottom + 270 > window.innerHeight;
+                                setRowActionMenuPos({
+                                  top: flip ? rect.top : rect.bottom,
+                                  right: window.innerWidth - rect.right,
+                                  flip,
+                                });
+                                setRowActionMenuFor(order.id);
+                              }}
+                              className={`p-1.5 rounded-full transition-colors ${
+                                rowActionMenuFor === order.id
+                                  ? 'text-[var(--color-on-surface)] bg-[var(--color-surface-container-highest)]'
+                                  : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)]'
+                              }`}
                             >
-                              <Edit3 className="w-4 h-4" />
+                              <MoreVertical className="w-4 h-4" />
                             </button>
-                          )}
+                          </div>
                         </div>
                       </td>
                     </tr>
@@ -1677,11 +1865,54 @@ export function OrdersView({
           {(() => {
             const target = filteredOrders.find((o) => o.id === rowActionMenuFor);
             if (!target) return null;
-            if (isSaleLocked(target)) {
+            const locked = target.type === 'sales' ? isSaleLocked(target) : isPurchaseLocked(target);
+            if (locked) {
               return (
                 <div className="px-3 py-3 border-t border-[var(--color-outline-variant)]/50 text-[10px] font-bold text-[var(--color-error)] flex items-center gap-2">
-                  <Ban className="w-3.5 h-3.5" /> Sale locked — invoice issued
+                  <Ban className="w-3.5 h-3.5" />{' '}
+                  {target.type === 'sales' ? 'Sale locked — invoice issued' : 'Purchase locked — goods received'}
                 </div>
+              );
+            }
+            // Purchase rows: edit + successive-stage actions through the
+            // purchase modal (openStage), mirroring the sales ladder
+            if (target.type !== 'sales') {
+              return (
+                <>
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={(e) => {
+                      closeRowActionMenu();
+                      handleOpenEdit(target, e);
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-left text-[11px] font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50"
+                  >
+                    <Edit3 className="w-3.5 h-3.5 text-[var(--color-primary)]" />
+                    {purchaseEditLabelFor(target)}
+                  </button>
+                  {purchaseStageActionMenu(target).map((sa) => {
+                    const StageIcon = sa.icon;
+                    return (
+                      <button
+                        key={sa.stageType}
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={(e) => {
+                          closeRowActionMenu();
+                          setPurchaseOpenStage(sa.stageType);
+                          setPurchaseCreateStage('rfq');
+                          setEditingPurchaseOrder(target);
+                          setIsPurchaseModalOpen(true);
+                        }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-left text-[11px] font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50"
+                      >
+                        <StageIcon className="w-3.5 h-3.5 text-[var(--color-primary)] shrink-0" />
+                        <span className="flex-1">{sa.label}</span>
+                      </button>
+                    );
+                  })}
+                </>
               );
             }
             return (
@@ -2064,12 +2295,12 @@ export function OrdersView({
               </div>
               )}
 
-              {/* Payment Mode & Cash/Bank Settlement Account (Optional Switch) — Invoice Stage Only */}
-              {formStage === 'sales_invoice' && (
+              {/* Payment Mode & Cash/Bank Settlement Account (Optional Switch) — Sales Order & Invoice stages */}
+              {(formStage === 'sales_invoice' || formStage === 'sales_order') && (
               <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3">
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <div className="flex items-center gap-2">
-                    <div className={`p-2 rounded-xl transition-colors ${includePayment ? 'bg-[var(--color-primary-container)] text-[var(--color-primary)]' : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'}`}>
+                    <div className={`p-2 rounded-xl transition-colors ${formSettlementType !== 'none' ? 'bg-[var(--color-primary-container)] text-[var(--color-primary)]' : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'}`}>
                       <Landmark className="w-4 h-4" />
                     </div>
                     <div>
@@ -2077,32 +2308,42 @@ export function OrdersView({
                         {formType === 'sales' ? 'Payment Settlement & Deposit Account' : 'Payment Disbursement & Source Account'}
                       </h4>
                       <p className="text-[10px] text-[var(--color-on-surface-variant)]">
-                        {includePayment
-                          ? (formType === 'sales' ? 'Deposit received funds directly into a Cash or Bank account' : 'Disburse funds directly from a Cash or Bank account')
-                          : 'Book on credit / unpaid ledger (Cash & Bank balances will not be debited or credited)'}
+                        {settleSectionLocked
+                          ? 'The payment flow was applied at an earlier save and cannot be changed'
+                          : settleFinalStage
+                              ? 'The payment flow must be applied when the invoice is issued — choose Book on credit or settle into a Cash / Bank account'
+                              : formSettlementType !== 'none'
+                                ? 'Update the payment flow — book on credit or settle into a Cash / Bank account'
+                                : "Don't touch — nothing will be posted for this order"}
                       </p>
                     </div>
                   </div>
 
-                  {/* Toggle Switch (locked ON once the payment voucher was posted) */}
+                  {/* Toggle Switch: OFF = Don't touch payment settlement; ON =
+                      Update payment flow. Locked ON once the flow was applied,
+                      or at the invoice stage where the flow is compulsory. */}
                   {(() => {
-                    const cashAlready = Boolean(stageIssueCtx?.cashApplied);
-                    const shown = cashAlready || includePayment;
+                    const flowLocked = settleSectionLocked || settleFinalStage;
+                    const shown = formSettlementType !== 'none' || settleSectionLocked || settleFinalStage;
                     return (
-                    <label className={`inline-flex items-center gap-2.5 select-none ${cashAlready ? 'opacity-70' : 'cursor-pointer'}`}>
+                    <label className={`inline-flex items-center gap-2.5 select-none ${flowLocked ? 'opacity-70' : 'cursor-pointer'}`}>
                     <span className="text-xs font-bold text-[var(--color-on-surface)]">
-                      {cashAlready ? 'Payment Already Settled' : includePayment ? 'Settle Payment Now' : 'Book on Credit (Unpaid)'}
+                      {settleSectionLocked ? 'Payment Flow — Already Done' : 'Update payment flow'}
                     </span>
                     <button
                       type="button"
                       role="switch"
                       aria-checked={shown}
-                      disabled={cashAlready}
-                      title={cashAlready ? 'Payment was already settled for this sale' : undefined}
-                      onClick={() => setIncludePayment(!includePayment)}
+                      disabled={flowLocked}
+                      title={settleSectionLocked
+                        ? `The payment flow for this ${formType === 'sales' ? 'sale' : 'purchase'} was applied at an earlier save and cannot be changed`
+                        : settleFinalStage
+                        ? 'A payment flow must be applied when the invoice is issued — it cannot be switched off at this stage'
+                        : undefined}
+                      onClick={() => setFormSettlementType(formSettlementType === 'none' ? 'credit' : 'none')}
                       className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                         shown ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-surface-container-highest)]'
-                      } ${cashAlready ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                      } ${flowLocked ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                     >
                       <span
                         className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
@@ -2115,41 +2356,28 @@ export function OrdersView({
                   })()}
                 </div>
 
-                {includePayment ? (
+                {formSettlementType !== 'none' ? (
                   <div className="space-y-3 pt-1 border-t border-[var(--color-outline-variant)]/60 animate-in fade-in duration-200">
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      {/* Payment Mode Selection */}
+                      {/* Credit / Account chooser — value '' = Book on credit */}
                       <div>
                         <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                          Payment Mode <span className="text-[var(--color-error)] font-bold">*</span>
+                          Choose Cash / Bank / Credit <span className="text-[var(--color-error)] font-bold">*</span>
                         </label>
                         <select
-                          required={includePayment}
-                          value={formPaymentMode}
-                          onChange={(e) => setFormPaymentMode(e.target.value as PaymentMode)}
-                          className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          // NOTE: no `required` — the empty value is the valid
+                          // "Book on credit" flow (validation happens on save).
+                          value={formSettlementType === 'account' ? formAccountId : ''}
+                          disabled={settleSectionLocked}
+                          onChange={(e) => {
+                            setFormAccountId(e.target.value);
+                            setFormSettlementType(e.target.value ? 'account' : 'credit');
+                          }}
+                          className={`w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${settleSectionLocked ? 'opacity-60 cursor-not-allowed' : ''}`}
                         >
-                          <option value="bank_transfer">Bank Transfer / IMPS</option>
-                          <option value="neft_rtgs">NEFT / RTGS</option>
-                          <option value="upi">UPI / QR Code</option>
-                          <option value="cheque">Cheque / Demand Draft</option>
-                          <option value="cash">Cash Counter / Petty Cash</option>
-                        </select>
-                      </div>
-
-                      {/* Linked Account Selection */}
-                      <div>
-                        <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                          {formType === 'sales' ? 'Deposit To (Account Credited)' : 'Deduct From (Account Debited)'} <span className="text-[var(--color-error)] font-bold">*</span>
-                        </label>
-                        <select
-                          required={includePayment}
-                          value={formAccountId}
-                          disabled={Boolean(stageIssueCtx?.cashApplied)}
-                          onChange={(e) => setFormAccountId(e.target.value)}
-                          className={`w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${stageIssueCtx?.cashApplied ? 'opacity-60 cursor-not-allowed' : ''}`}
-                        >
-                          <option value="">-- Choose Cash / Bank Account --</option>
+                          <option value="">
+                            Book on credit — {formType === 'sales' ? 'Receivable moves to the Party ledger (no cash movement)' : 'Payable moves to the Party ledger (no cash movement)'}
+                          </option>
                           {accounts
                             .filter((a) => a.isActive)
                             .map((acc) => (
@@ -2159,15 +2387,72 @@ export function OrdersView({
                             ))}
                         </select>
                       </div>
+
+                      {/* Mode of payment — only once an account is chosen */}
+                      {formSettlementType === 'account' && formAccountId && (
+                        <div>
+                          <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
+                            Mode of Payment <span className="text-[var(--color-error)] font-bold">*</span>
+                          </label>
+                          <select
+                            required
+                            value={formPaymentMode}
+                            disabled={settleSectionLocked}
+                            onChange={(e) => setFormPaymentMode(e.target.value as PaymentMode)}
+                            className={`w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${settleSectionLocked ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          >
+                            <option value="bank_transfer">Bank Transfer / IMPS</option>
+                            <option value="neft_rtgs">NEFT / RTGS</option>
+                            <option value="upi">UPI / QR Code</option>
+                            <option value="cheque">Cheque / Demand Draft</option>
+                            <option value="cash">Cash Counter / Petty Cash</option>
+                          </select>
+                        </div>
+                      )}
                     </div>
 
-                    {/* Account Linkage Info Note */}
-                    {accounts.length === 0 ? (
+                    {accounts.length === 0 && (
                       <div className="p-2.5 rounded-xl bg-[var(--color-error-container)]/40 border border-[var(--color-error)]/30 flex items-center gap-2 text-[11px] text-[var(--color-error)] font-medium">
                         <AlertTriangle className="w-4 h-4 shrink-0" />
                         <span>No Cash/Bank accounts configured. Please create an account under Cash & Bank to book immediate settlement.</span>
                       </div>
-                    ) : (
+                    )}
+
+                    {/* Locked "already applied" banners vs pre-save banners */}
+                    {settleSectionLocked && formSettlementType === 'account' ? (
+                      <div className="p-3 rounded-xl bg-[var(--color-success-container)]/40 border border-[var(--color-success)]/30 flex items-center justify-between gap-2 text-[11px] text-[var(--color-on-surface-variant)]">
+                        <span>
+                          Payment of <strong className="text-[var(--color-on-surface)]">{formatCurrency(stageIssueCtx?.settledAmount ?? (editingOrder as any)?.settledAmount ?? formCalculations.totalAmount)}</strong>{' '}
+                          was already settled into the sale's Cash/Bank account — no further voucher will be posted.
+                        </span>
+                        <span className="text-[10px] font-bold text-[var(--color-on-success-container)] uppercase bg-[var(--color-success-container)] px-2.5 py-0.5 rounded-full shrink-0">
+                          Flow Applied
+                        </span>
+                      </div>
+                    ) : settleSectionLocked && formSettlementType === 'credit' ? (
+                      <div className="p-3 rounded-xl bg-[var(--color-primary-container)]/40 border border-[var(--color-primary)]/30 flex items-center justify-between gap-2 text-[11px] text-[var(--color-on-surface-variant)]">
+                        <span>
+                          <strong className="text-[var(--color-on-surface)]">Receivable</strong> of{' '}
+                          <strong className="text-[var(--color-on-surface)] font-bold">{formatCurrency(stageIssueCtx?.settledAmount ?? (editingOrder as any)?.settledAmount ?? formCalculations.totalAmount)}</strong>{' '}
+                          is already booked on the party ledger — flow applied; the voucher re-locks to the invoice total when the invoice stage is issued.
+                        </span>
+                        <span className="text-[10px] font-bold text-[var(--color-primary)] uppercase bg-[var(--color-primary-container)]/60 px-2.5 py-0.5 rounded-full shrink-0">
+                          Flow Applied
+                        </span>
+                      </div>
+                    ) : formSettlementType === 'credit' ? (
+                      <div className="p-2.5 rounded-xl bg-[var(--color-primary-container)]/40 border border-[var(--color-primary)]/30 flex items-center justify-between gap-2 text-[11px] text-[var(--color-on-surface-variant)]">
+                        <span>
+                          <strong className="text-[var(--color-on-surface)]">{formType === 'sales' ? 'Receivable' : 'Payable'}</strong> of{' '}
+                          <strong className="text-[var(--color-on-surface)] font-bold">{formatCurrency(formCalculations.totalAmount)}</strong>{' '}
+                          will be booked against the {formType === 'sales' ? 'party' : 'vendor'} on credit — no Cash/Bank movement.
+                          {' '}No {formType === 'sales' ? 'receipt' : 'payout'} voucher will be posted.
+                        </span>
+                        <span className="text-[10px] font-bold text-[var(--color-primary)] uppercase bg-[var(--color-primary-container)]/60 px-2.5 py-0.5 rounded-full shrink-0">
+                          Credit {formType === 'sales' ? 'Sale' : 'Purchase'}
+                        </span>
+                      </div>
+                    ) : formAccountId ? (
                       <div className="p-2.5 rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)]/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-[11px] text-[var(--color-on-surface-variant)]">
                         <div className="flex items-center gap-2">
                           <span className={`w-2 h-2 rounded-full shrink-0 ${formType === 'sales' ? 'bg-[var(--color-success)]' : 'bg-[var(--color-primary)]'}`} />
@@ -2188,33 +2473,51 @@ export function OrdersView({
                           ) : null;
                         })()}
                       </div>
-                    )}
+                    ) : null}
                   </div>
-                ) : (
-                  stageIssueCtx?.cashApplied ? (
+                ) : settleSectionLocked ? (
+                  formSettlementType === 'account' ? (
                   <div className="p-3 rounded-xl bg-[var(--color-success-container)]/40 border border-[var(--color-success)]/30 flex items-center justify-between text-xs text-[var(--color-on-surface-variant)]">
                     <span className="flex items-center gap-2">
                       <span className="w-2 h-2 rounded-full bg-[var(--color-success)]" />
                       <span>
-                        Payment of <strong className="text-[var(--color-on-surface)]">{formatCurrency(stageIssueCtx.settledAmount ?? 0)}</strong>{' '}
+                        Payment of <strong className="text-[var(--color-on-surface)]">{formatCurrency(stageIssueCtx?.settledAmount ?? (editingOrder as any)?.settledAmount ?? 0)}</strong>{' '}
                         was already settled into the sale's Cash/Bank account — no further voucher will be posted.
                       </span>
                     </span>
                     <span className="text-[10px] font-bold text-[var(--color-on-success-container)] uppercase bg-[var(--color-success-container)] px-2.5 py-0.5 rounded-full shrink-0">
-                      Payment Settled
+                      Flow Applied
                     </span>
                   </div>
                   ) : (
-                  <div className="p-3 rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)]/60 flex items-center justify-between text-xs text-[var(--color-on-surface-variant)]">
+                  <div className="p-3 rounded-xl bg-[var(--color-primary-container)]/40 border border-[var(--color-primary)]/30 flex items-center justify-between text-xs text-[var(--color-on-surface-variant)]">
                     <span className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-[var(--color-outline)]" />
-                      <span>This order will be booked on credit without modifying bank/cash balances. Payment can be settled later under Party ledger or Cash & Bank.</span>
+                      <span className="w-2 h-2 rounded-full bg-[var(--color-primary)]" />
+                      <span>
+                        {formType === 'sales' ? 'Receivable' : 'Payable'} of{' '}
+                        <strong className="text-[var(--color-on-surface)]">{formatCurrency(stageIssueCtx?.settledAmount ?? (editingOrder as any)?.settledAmount ?? formCalculations.totalAmount)}</strong>{' '}
+                        is already booked on the party ledger — flow applied; the voucher re-locks to the final document's total at the next {formType === 'sales' ? 'invoice' : 'goods-receipt'} stage.
+                      </span>
                     </span>
-                    <span className="text-[10px] font-bold text-[var(--color-primary)] uppercase bg-[var(--color-primary-container)]/50 px-2.5 py-0.5 rounded-full shrink-0">
-                      Credit {formType === 'sales' ? 'Sale' : 'Purchase'}
+                    <span className="text-[10px] font-bold text-[var(--color-primary)] uppercase bg-[var(--color-primary-container)]/60 px-2.5 py-0.5 rounded-full shrink-0">
+                      Flow Applied
                     </span>
                   </div>
                   )
+                ) : (
+                  <div className="p-3 rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)]/60 flex items-center justify-between text-xs text-[var(--color-on-surface-variant)]">
+                    <span className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-[var(--color-outline)]" />
+                      <span>
+                        {editingOrder
+                          ? 'Nothing will be posted while the flow is switched off — enable the toggle to book this order on credit or settle it into a Cash/Bank account from this edit.'
+                          : "Nothing will be posted — no invoice/bill voucher, no party ledger move, no Cash/Bank movement. You can apply the payment flow later by editing the order or issuing the next document."}
+                      </span>
+                    </span>
+                    <span className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase bg-[var(--color-surface-container-high)] px-2.5 py-0.5 rounded-full shrink-0">
+                      No Entry
+                    </span>
+                  </div>
                 )}
               </div>
               )}
@@ -2224,8 +2527,10 @@ export function OrdersView({
                   stage save the first time the user enables it; the server refuses
                   double application (master flag). Cash applies through the
                   Payment Settlement section on the invoice stage (voucher
-                  posting — once per order). */}
-              {!editingOrder && (
+                  posting — once per order). The inventory switch also shows on
+                  the sales-ORDER EDIT form: checked + disabled once applied,
+                  freely toggleable (and applied on save) while not. */}
+              {formStage !== 'quotation' && (
                 <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3">
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <div className="flex items-center gap-2">
@@ -2237,7 +2542,7 @@ export function OrdersView({
                           {formType === 'sales' ? 'Deduct Stockyard Inventory Now' : 'Receive Into Stockyard Inventory Now'}
                         </h4>
                         <p className="text-[10px] text-[var(--color-on-surface-variant)]">
-                          {stageIssueCtx?.inventoryApplied
+                          {Boolean(stageIssueCtx?.inventoryApplied || (editingOrder as any)?.inventoryApplied)
                             ? 'Inventory is already updated for this sale — no further stock movement will be written.'
                             : stageIssueCtx?.stageType === 'sales_invoice'
                             ? 'Issuing the invoice permanently updates this sale\'s inventory — it was not applied at an earlier stage, so the dispatch posts now and cannot be switched off.'
@@ -2251,11 +2556,11 @@ export function OrdersView({
                     </div>
 
                     {(() => {
-                      const already = Boolean(stageIssueCtx?.inventoryApplied);
-                      // Issuing the invoice: PERMANENT-ON — applies here if it
-                      // was not applied at the sales-order stage; cannot be
-                      // unchecked at this stage.
-                      const invoiceForcedOn = stageIssueCtx?.stageType === 'sales_invoice' && !already;
+                      const already = Boolean(stageIssueCtx?.inventoryApplied || (editingOrder as any)?.inventoryApplied);
+                      // Issuing the invoice (stage-issue OR create): PERMANENT-ON
+                      // — applies here if it was not applied at the sales-order
+                      // stage; cannot be unchecked at this stage.
+                      const invoiceForcedOn = (stageIssueCtx?.stageType || formStage) === 'sales_invoice' && !already;
                       const locked = already || invoiceForcedOn;
                       const shown = locked || updateInventory;
                       return (
@@ -2516,21 +2821,6 @@ export function OrdersView({
                   )}
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                {selectedOrder.type === 'purchase' && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPreviewOrder(selectedOrder);
-                      setPreviewStage(selectedOrder.stage || 'sales_order');
-                      setIsPreviewOpen(true);
-                    }}
-                    title="Print this sale document"
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold hover:opacity-90 transition-all shadow-xs"
-                  >
-                    <Printer className="w-3.5 h-3.5" />
-                    Print
-                  </button>
-                )}
                 <button
                   type="button"
                   onClick={() => setIsDetailOpen(false)}
@@ -2543,104 +2833,6 @@ export function OrdersView({
 
             {/* Body */}
             <div className="p-6 space-y-5">
-              {/* Purchase 3-Stage Stepper & Document Box */}
-              {selectedOrder.type === 'purchase' && (
-                <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3 shadow-xs">
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-                    <div>
-                      <h4 className="text-xs font-black text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-1.5">
-                        <ClipboardList className="w-4 h-4 text-[var(--color-primary)]" />
-                        <span>Procurement Workflow & Documentation</span>
-                      </h4>
-                      <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
-                        RFQ → Purchase Order → Goods Receipt (GRN) with shortage audit
-                      </p>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      {selectedOrder.status !== 'cancelled' && selectedOrder.purchaseStage !== 'goods_receipt' && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingPurchaseOrder(selectedOrder);
-                            setIsPurchaseModalOpen(true);
-                            setIsDetailOpen(false);
-                          }}
-                          className="flex items-center gap-1 px-3 py-1.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold hover:opacity-90 transition-all shadow-xs"
-                        >
-                          <span>Advance Stage</span>
-                          <ArrowUpRight className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setPreviewOrder(selectedOrder);
-                          setPreviewStage('sales_order');
-                          setIsPreviewOpen(true);
-                        }}
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold hover:bg-[var(--color-surface-container-highest)] transition-all shadow-xs"
-                      >
-                        <Printer className="w-3.5 h-3.5" />
-                        <span>Print Document</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* 3-Stage horizontal badge view */}
-                  <div className="grid grid-cols-3 gap-2 text-center text-[10px]">
-                    <div
-                      className={`p-2 rounded-xl border ${
-                        selectedOrder.purchaseStage === 'rfq'
-                          ? 'bg-[var(--color-surface-container-lowest)] border-[var(--color-primary)] text-[var(--color-primary)] font-black'
-                          : 'bg-[var(--color-surface-container-low)] border-[var(--color-outline-variant)]/60 text-[var(--color-on-surface-variant)] font-semibold'
-                      }`}
-                    >
-                      <p className="font-bold">1. RFQ</p>
-                      <p className="text-[9px] mt-0.5 opacity-80">{selectedOrder.rfqDetails?.rfqNumber || 'Completed'}</p>
-                    </div>
-
-                    <div
-                      className={`p-2 rounded-xl border ${
-                        selectedOrder.purchaseStage === 'purchase_order'
-                          ? 'bg-[var(--color-surface-container-lowest)] border-[var(--color-primary)] text-[var(--color-primary)] font-black'
-                          : selectedOrder.purchaseStage === 'goods_receipt'
-                          ? 'bg-[var(--color-surface-container-low)] border-[var(--color-outline-variant)]/60 text-[var(--color-on-surface-variant)] font-semibold'
-                          : 'bg-[var(--color-surface-container-low)]/50 border-dashed border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)]/60'
-                      }`}
-                    >
-                      <p className="font-bold">2. PO Confirmed</p>
-                      <p className="text-[9px] mt-0.5 opacity-80">{selectedOrder.poDetails?.poNumber || selectedOrder.orderNumber}</p>
-                    </div>
-
-                    <div
-                      className={`p-2 rounded-xl border ${
-                        selectedOrder.purchaseStage === 'goods_receipt'
-                          ? 'bg-[var(--color-success-container)] border-[var(--color-success)] text-[var(--color-on-success-container)] font-black'
-                          : 'bg-[var(--color-surface-container-low)]/50 border-dashed border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)]/60'
-                      }`}
-                    >
-                      <p className="font-bold">3. Goods Receipt</p>
-                      <p className="text-[9px] mt-0.5 opacity-80">{selectedOrder.receiptDetails?.grnNumber || 'Pending Gate Inward'}</p>
-                    </div>
-                  </div>
-
-                  {/* Stage-specific doc highlights */}
-                  {selectedOrder.receiptDetails && selectedOrder.purchaseStage === 'goods_receipt' && (
-                    <div className="p-2.5 rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] text-[10px] space-y-1">
-                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[var(--color-on-surface-variant)]">
-                        {selectedOrder.receiptDetails.grnNumber && <span>GRN: <strong className="text-[var(--color-on-surface)]">{selectedOrder.receiptDetails.grnNumber}</strong></span>}
-                        {selectedOrder.receiptDetails.receiptDate && <span>Inward: <strong className="text-[var(--color-on-surface)]">{selectedOrder.receiptDetails.receiptDate}</strong></span>}
-                        {selectedOrder.receiptDetails.challanNumber && <span>Challan: <strong className="text-[var(--color-on-surface)]">{selectedOrder.receiptDetails.challanNumber}</strong></span>}
-                        {selectedOrder.receiptDetails.vendorInvoiceNumber && <span>Vendor Inv: <strong className="text-[var(--color-on-surface)]">{selectedOrder.receiptDetails.vendorInvoiceNumber}</strong></span>}
-                        {selectedOrder.receiptDetails.receivedBy && <span>Inspector: <strong className="text-[var(--color-on-surface)]">{selectedOrder.receiptDetails.receivedBy}</strong></span>}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
               {/* Party (plain — no card) */}
               <div>
                 <p className="text-xs font-black text-[var(--color-on-surface)]">
@@ -2733,66 +2925,90 @@ export function OrdersView({
                 </div>
               )}
 
-              {/* Items List (PURCHASES) */}
+              {/* PURCHASE — Stage Documents: one card per issued stage
+                  (Request Quotation / Purchase Order / Goods Receiving),
+                  mirroring the sales detail modal's per-stage cards */}
               {selectedOrder.type === 'purchase' && (
-              <div className="space-y-2">
-                <h4 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider">Material Details</h4>
-                <div className="border border-[var(--color-outline-variant)] rounded-2xl overflow-hidden">
-                  <table className="w-full text-left text-xs">
-                    <thead>
-                      <tr className="bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] font-bold border-b border-[var(--color-outline-variant)]">
-                        <th className="py-2 px-3">Item Name</th>
-                        <th className="py-2 px-3">{selectedOrder.type === 'sales' ? 'Dispatch Location' : 'Inward Location'}</th>
-                        <th className="py-2 px-3 text-right">
-                          {selectedOrder.type === 'purchase' && selectedOrder.purchaseStage === 'goods_receipt' ? 'Ordered / Received' : 'Qty'}
-                        </th>
-                        <th className="py-2 px-3 text-right">Rate</th>
-                        <th className="py-2 px-3 text-right">Subtotal</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[var(--color-outline-variant)]/60">
-                      {selectedOrder.items.map((i, index) => (
-                        <tr key={index} className="bg-[var(--color-surface-container-lowest)]">
-                          <td className="py-2.5 px-3 font-semibold text-[var(--color-on-surface)]">
-                            {i.itemCode ? `${i.itemCode} (${i.itemName})` : i.itemName}
-                          </td>
-                          <td className="py-2.5 px-3">
-                            {i.location ? (
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]">
-                                {i.location}
-                              </span>
-                            ) : (
-                              <span className="text-[11px] text-[var(--color-on-surface-variant)] italic">Default Yard</span>
-                            )}
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-bold text-[var(--color-on-surface)]">
-                            <div>{i.quantity.toLocaleString('en-IN')} {i.unit}</div>
-                            {selectedOrder.type === 'purchase' && i.receivedQuantity !== undefined && (
-                              <div className="text-[9px] font-semibold mt-0.5">
-                                <span className="text-[var(--color-primary)]">Recv: {i.receivedQuantity} {i.unit}</span>
-                                {i.shortageQuantity ? (
-                                  <span className="ml-1 text-[var(--color-error)]">(Shortage: -{i.shortageQuantity})</span>
-                                ) : i.overageQuantity ? (
-                                  <span className="ml-1 text-[var(--color-success)]">(Overage: +{i.overageQuantity})</span>
-                                ) : null}
-                              </div>
-                            )}
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-medium text-[var(--color-on-surface-variant)]">
-                            {formatCurrency(i.rate)}
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-bold text-[var(--color-on-surface)]">
-                            {formatCurrency(i.amount)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-              )}
+                <div className="space-y-3">
+                  <h4 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
+                    Stage Documents
+                  </h4>
 
-              
+                  {(() => {
+                    const docs = selectedOrder.purchaseStageDocs || [];
+                    if (docs.length === 0) return null;
+                    const active =
+                      docs.find((d) => d.stageType === (detailStageTab || selectedOrder.purchaseStage)) ||
+                      docs[docs.length - 1];
+                    return (
+                      <>
+                        {/* Stage tabs — click a stage to view its document data */}
+                        <div className="flex flex-wrap gap-1.5">
+                          {docs.map((d) => {
+                            const meta = PURCHASE_STAGE_META[d.stageType] || PURCHASE_STAGE_META.purchase_order;
+                            const isActive = d.stageType === active.stageType;
+                            const isCurrent = d.stageType === selectedOrder.purchaseStage;
+                            return (
+                              <button
+                                key={d.stageType + d.stageNumber}
+                                type="button"
+                                onClick={() => setDetailStageTab(d.stageType)}
+                                className={`px-3.5 py-2 rounded-full text-[11px] font-bold transition-all border text-left ${
+                                  isActive
+                                    ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] border-[var(--color-primary)] shadow-xs'
+                                    : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] border-[var(--color-outline-variant)] hover:text-[var(--color-on-surface)]'
+                                }`}
+                              >
+                                <span className="flex items-center gap-1.5">
+                                  <meta.icon className="w-3.5 h-3.5 shrink-0" />
+                                  {meta.label}
+                                  {isCurrent && <span className={`text-[8px] uppercase tracking-wider px-1.5 py-0.5 rounded-full ${isActive ? 'bg-white/25' : 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'}`}>current</span>}
+                                </span>
+                                <span className={`block text-[9px] font-semibold mt-0.5 ${isActive ? 'opacity-80' : 'opacity-70'}`}>
+                                  {d.stageNumber} · {d.date}
+                                </span>
+                              </button>
+                            );
+                          })}
+                          {/* Next stages — dashed create buttons in the tab row */}
+                          {!isPurchaseLocked(selectedOrder) && purchaseStageActionMenu(selectedOrder).map((sa) => {
+                            const StageIcon = sa.icon;
+                            return (
+                              <button
+                                key={sa.stageType}
+                                type="button"
+                                title={`Issue ${sa.label}`}
+                                onClick={() => {
+                                  // Advance to the next purchase stage document —
+                                  // mirror of the sales issue-stage flow
+                                  setPurchaseOpenStage(sa.stageType);
+                                  setPurchaseCreateStage('rfq');
+                                  setEditingPurchaseOrder(selectedOrder);
+                                  setIsPurchaseModalOpen(true);
+                                  setIsDetailOpen(false);
+                                }}
+                                className="flex flex-col items-start px-3.5 py-2 rounded-full text-[11px] font-bold border border-dashed border-[var(--color-primary)]/50 text-[var(--color-primary)] hover:bg-[var(--color-primary-container)]/30 transition-all"
+                              >
+                                <span className="flex items-center gap-1">
+                                  <StageIcon className="w-3.5 h-3.5" />+ {sa.label}
+                                </span>
+                              </button>
+                            );
+                          })}
+                          {isPurchaseLocked(selectedOrder) && (
+                            <span className="flex items-center gap-1.5 px-3 py-2 rounded-full text-[10px] font-bold text-[var(--color-error)] bg-[var(--color-error-container)]/25 border border-[var(--color-error)]/30">
+                              <Ban className="w-3 h-3" /> {selectedOrder.status === 'cancelled' ? 'Purchase cancelled' : 'Purchase locked — goods received'}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* The active stage document */}
+                        {renderPurchaseDocCard(active)}
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
 
               {/* Actions Footer */}
               <div className="flex items-center justify-end pt-3 border-t border-[var(--color-outline-variant)]">
@@ -2804,7 +3020,11 @@ export function OrdersView({
                   >
                     Close
                   </button>
-                  {selectedOrder.type === 'sales' && isSaleLocked(selectedOrder) ? null : (
+                  {/* Locked orders offer no edit: invoiced sales, and purchases
+                      at the goods-receipt stage (or cancelled) — the GRN locks
+                      the purchase. */}
+                  {(selectedOrder.type === 'sales' && isSaleLocked(selectedOrder)) ||
+                  (selectedOrder.type === 'purchase' && isPurchaseLocked(selectedOrder)) ? null : (
                     <button
                       type="button"
                       onClick={(e) => {
@@ -3040,7 +3260,18 @@ export function OrdersView({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#e1e2ec]">
-                    {previewOrder.items.map((item, idx) => (
+                    {previewOrder.items.map((item, idx) => {
+                      const grnPreview =
+                        previewOrder.type === 'purchase' && previewOrder.purchaseStage === 'goods_receipt';
+                      const billQty =
+                        grnPreview && item.receivedQuantity !== undefined && item.receivedQuantity !== null
+                          ? Number(item.receivedQuantity)
+                          : item.quantity;
+                      const lineAmount =
+                        grnPreview && item.receivedQuantity !== undefined && item.receivedQuantity !== null
+                          ? Number(item.receivedQuantity) * item.rate
+                          : item.amount;
+                      return (
                       <tr key={idx} className="bg-white font-medium text-[11px] text-[#1c1b1f]">
                         <td className="py-3 px-3 border-r border-[#e1e2ec] text-center">{idx + 1}</td>
                         <td className="py-3 px-3 border-r border-[#e1e2ec]">
@@ -3062,16 +3293,22 @@ export function OrdersView({
                           })()}
                         </td>
                         <td className="py-3 px-3 border-r border-[#e1e2ec] text-right font-bold">
-                          {item.quantity.toLocaleString('en-IN')} {item.unit}
+                          {billQty.toLocaleString('en-IN')} {item.unit}
+                          {grnPreview && item.receivedQuantity !== undefined && Number(item.receivedQuantity) !== item.quantity && (
+                            <p className="text-[9px] font-semibold text-[#44474e] mt-0.5">
+                              Ordered: {item.quantity.toLocaleString('en-IN')} {item.unit}
+                            </p>
+                          )}
                         </td>
                         <td className="py-3 px-3 border-r border-[#e1e2ec] text-right font-bold text-[#44474e]">
                           {formatCurrency(item.rate)}
                         </td>
                         <td className="py-3 px-3 text-right font-black text-[#1c1b1f]">
-                          {formatCurrency(item.amount)}
+                          {formatCurrency(lineAmount)}
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -3223,8 +3460,12 @@ export function OrdersView({
           onClose={() => {
             setIsPurchaseModalOpen(false);
             setEditingPurchaseOrder(null);
+            setPurchaseCreateStage('rfq');
+            setPurchaseOpenStage(undefined);
           }}
           existingOrder={editingPurchaseOrder}
+          createStage={purchaseCreateStage}
+          openStage={purchaseOpenStage}
           parties={parties}
           items={items}
           settings={settings}

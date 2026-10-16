@@ -15,9 +15,9 @@ purchasesRouter.use(authenticateToken);
 
 // GET /api/purchases
 // Stage/cash business-rule errors are 400 (locked ladder, missing settlement
-// account for a "Settle Payment Now" save)
+// account for a "Settle Payment Now" save, goods receipt without a vendor)
 const bizStatus = (msg: string) =>
-  /locked|cannot|cancelled|settlement account is required|disbursement/i.test(msg || '') ? 400 : 500;
+  /locked|cannot|cancelled|settlement account is required|disbursement|supplier \/ vendor is required/i.test(msg || '') ? 400 : 500;
 
 purchasesRouter.get('/', async (req: Request, res: Response) => {
   try {

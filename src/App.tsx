@@ -292,17 +292,17 @@ function AppContent() {
       case 'parties':
         return {
           title: 'Parties',
-          subtitle: 'All customer buyers, aggregate quarries, bitumen refineries & transporters',
+          subtitle: 'All customers, buyers and suppliers',
         };
       case 'cash-bank':
         return {
           title: 'Cash & Bank Management',
-          subtitle: 'Bank accounts, cash registers, contra transfers & account reconciliations',
+          subtitle: 'Bank accounts and cash registers.',
         };
       case 'items':
         return {
           title: 'Inventory',
-          subtitle: 'Products, raw materials, stock levels, and services catalog',
+          subtitle: 'Products, raw materials, stock levels.',
         };
       case 'settings':
         return {
@@ -317,12 +317,12 @@ function AppContent() {
       case 'sales':
         return {
           title: 'Sales',
-          subtitle: 'Highway construction contracts, client job-mix dispatches & receivables',
+          subtitle: '',
         };
       case 'purchases':
         return {
           title: 'Purchases',
-          subtitle: 'Bitumen supply, aggregates/feedstock purchase orders & payables',
+          subtitle: '',
         };
       case 'production':
         return {

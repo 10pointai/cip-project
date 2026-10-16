@@ -719,7 +719,13 @@ export interface Sale {
   // One-shot application flags — stock / cash may post at most ONCE per sale;
   // the user decides WHERE (which stage save) via the toggle in the UI.
   inventoryApplied: boolean;
+  // cashApplied = "payment flow applied (locked)" — true for BOTH the account
+  // and the credit flow; settlementType tells which one.
   cashApplied: boolean;
+  // Which payment flow was applied: 'credit' = booked on the party ledger (no
+  // cash moved), 'account' = settled into a Cash/Bank account; undefined =
+  // Don't touch — flow never applied.
+  settlementType?: 'credit' | 'account';
   // Cash & Bank wiring (FKs per Golden Rule §2 — names JOINed at read time;
   // settled_amount is the §2 exception statutory snapshot of the settled total)
   settlementAccountId?: string;
@@ -785,7 +791,12 @@ export interface Purchase {
   status: OrderStatus;
   notes?: string;
   inventoryApplied: boolean;
+  // cashApplied = "payment flow applied (locked)" — true for BOTH the account
+  // and the credit flow; settlementType tells which one.
   cashApplied: boolean;
+  // 'credit' = payable on the party ledger (no cash moved); 'account' = paid
+  // from a Cash/Bank account; undefined = Don't touch — flow never applied.
+  settlementType?: 'credit' | 'account';
   settlementAccountId?: string;
   settlementAccountName?: string; // hydrated read-time (JOIN cash_bank_accounts)
   paymentMode?: 'bank_transfer' | 'cheque' | 'cash' | 'upi' | 'neft_rtgs';
@@ -811,8 +822,12 @@ export interface SalesOrderStageInput {
   notes?: string;
   updateInventory?: boolean;
   updateCash?: boolean;
-  // "Settle Payment Now" — post the receipt voucher when settling (cash
-  // applied); required whenever updateCash is true.
+  // Payment flow choice: 'none' = Don't touch settlement (nothing posts),
+  // 'credit' = book on the party ledger (receivable, no cash), 'account' =
+  // settle into settlementAccountId. NOTE: once the flow was applied the
+  // section is locked — later saves must ECHO the stored value, never 'none'.
+  settlementType?: 'none' | 'credit' | 'account';
+  // Payment voucher — required when settlementType is 'account'.
   settlementAccountId?: string;
   paymentMode?: 'bank_transfer' | 'cheque' | 'cash' | 'upi' | 'neft_rtgs';
 }
@@ -827,6 +842,9 @@ export interface PurchaseOrderStageInput {
   receiptDetails?: ReceiptStageDetails;
   updateInventory?: boolean;
   updateCash?: boolean;
+  // Mirror of SalesOrderStageInput.settlementType (payable vs receivable).
+  // Once applied, later saves must ECHO the stored value, never 'none'.
+  settlementType?: 'none' | 'credit' | 'account';
   settlementAccountId?: string;
   paymentMode?: 'bank_transfer' | 'cheque' | 'cash' | 'upi' | 'neft_rtgs';
 }

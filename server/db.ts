@@ -24,6 +24,7 @@ import {
   StockMovementLog,
   OrderStatus,
   PaymentMode,
+  PurchaseStage,
   Sale,
   Purchase,
   SalesOrderItem,
@@ -1417,6 +1418,24 @@ class ServerLocalDatabase {
     return { subtotal: subtotal2, taxAmount: taxAmount2, totalAmount: r2(subtotal2 + taxAmount2 + (Number(transportCharges) || 0)), taxRateGst };
   }
 
+  /** Received-based stage totals — the goods-receipt document bills the
+   *  ACTUAL received quantities at the PO's locked rates: every line is worth
+   *  received qty × rate + that line's GST slab, so a short line contributes
+   *  less/zero and an overage contributes more (user rule). Lines without a
+   *  recorded received quantity fall back to the ordered qty. */
+  private computeReceivedStageTotals(
+    lines: Array<{ quantity: number; rate: number; gstRate?: number; receivedQuantity?: number | null }>
+  ): { subtotal: number; taxAmount: number; totalAmount: number; taxRateGst: number } {
+    const receivedLines = (lines || []).map((li) => ({
+      ...li,
+      quantity:
+        li.receivedQuantity !== undefined && li.receivedQuantity !== null
+          ? Number(li.receivedQuantity)
+          : Number(li.quantity) || 0,
+    }));
+    return this.computeStageTotals(receivedLines, 0);
+  }
+
   private computeSalesStatus(sale: Sale): OrderStatus {
     if (sale.status === 'cancelled') return 'cancelled';
     const stageTypes = new Set((sale.stages || []).map((s) => s.stageType));
@@ -1473,6 +1492,14 @@ class ServerLocalDatabase {
     }
   }
 
+  /** The invoice/bill journal voucher reads "settled" (status paid) only when
+   *  the payment flow was applied with a real Cash/Bank account — booking on
+   *  credit moves the party ledger but never marks the voucher paid. */
+  private cashFlowSettled(master: { settlementType?: string; settlementVoucherId?: string }): boolean {
+    const flowType = master.settlementType ?? (master.settlementVoucherId ? 'account' : undefined);
+    return flowType === 'account';
+  }
+
   /** Post (idempotently, by id) the sale_invoice journal voucher for the
    *  invoice stage — amount is a statutory snapshot of the stage total. */
   private upsertSaleInvoiceVoucher(sale: Sale, stage: SalesOrderStage): string {
@@ -1482,6 +1509,9 @@ class ServerLocalDatabase {
       : undefined;
     const voucherNumber = existingVoucher?.voucherNumber || this.mintVoucherNumber(this.data.settings.prefixes.salesInvoice);
     const voucherId = existingVoucher?.id || `txn-${sale.id}-inv`;
+    // The voucher names the document that booked the receivable — credit
+    // bookings can post at the sales_order stage before any invoice exists.
+    const docLabel = stage.stageType === 'sales_invoice' ? 'Sales Invoice' : 'Sales Order';
     this.createTransaction(
       {
         id: voucherId,
@@ -1492,8 +1522,8 @@ class ServerLocalDatabase {
         amount: this.roundMoney(stage.totalAmount),
         date: stage.date || sale.date,
         referenceNumber: stage.stageNumber,
-        description: `Sales Invoice ${stage.stageNumber} — sale ${sale.saleNumber}`,
-        status: sale.cashApplied ? 'paid' : 'pending',
+        description: `${docLabel} ${stage.stageNumber} — sale ${sale.saleNumber}`,
+        status: this.cashFlowSettled(sale) ? 'paid' : 'pending',
       },
     );
     return voucherId;
@@ -1532,77 +1562,132 @@ class ServerLocalDatabase {
     return voucherId;
   }
 
-  /** One-shot gate: posts the sale's invoice voucher (+ receipt voucher when
-   *  settling) exactly once per sale, recording the settlement FKs + snapshot
-   *  on the master. Runs whenever a sales_invoice stage document is saved. */
+  /** One-shot gate: applies the sale's payment flow exactly once per sale —
+   *  settlement.type picks the flow (db.ts wire: stageInput.settlementType):
+   *   'none'   → don't touch: nothing posts at all (no journal, no ledger);
+   *   'credit' → party ledger only: the sale_invoice journal voucher posts the
+   *              moment credit is booked (stage total — the receivable must
+   *              move immediately); the later invoice save re-upserts it with
+   *              the invoice-stage total. No cash ever moves;
+   *   'account'→ full flow: journal (at the invoice document) + payment_in
+   *              receipt into the chosen account (stage-total-now policy;
+   *              later invoice differences stay outstanding on the party).
+   *  Legacy callers (no type) keep today's behavior: unsettled credit posting
+   *  + receipt only when settle=true. Runs at sales_order AND sales_invoice
+   *  stage saves; cashApplied acts as the one-shot "flow applied" lock. */
   private applySaleCash(
     sale: Sale,
     stage: SalesOrderStage,
-    settlement: { settle: boolean; settlementAccountId?: string; paymentMode?: PaymentMode }
+    settlement: { settle: boolean; type?: 'none' | 'credit' | 'account'; settlementAccountId?: string; paymentMode?: PaymentMode },
+    stageType?: SalesStage
   ): void {
+    // Legacy fallback: old clients send only updateCash — settle ⇒ account.
+    const flowType = settlement.type ?? (settlement.settle ? 'account' as const : undefined);
+    // "Don't touch payment settlement": post nothing, lock nothing. At the
+    // FINAL document stage, however, a payment flow is COMPULSORY — the
+    // invoice cannot be issued without deciding credit vs account.
+    if (flowType === 'none') {
+      if (stageType === undefined || stageType === 'sales_invoice') {
+        throw new Error('A payment flow (Book on credit or Cash/Bank settlement) must be applied when the Sales Invoice is issued.');
+      }
+      return;
+    }
+
     const wasSettled = sale.cashApplied;
+    const isInvoice = stageType === undefined || stageType === 'sales_invoice';
 
     // Validate the settlement account BEFORE any voucher is written — a reject
-    // must not leave an orphaned invoice voucher behind.
-    if (settlement.settle && !wasSettled && settlement.settlementAccountId) {
+    // must not leave an orphaned journal voucher behind.
+    if (flowType === 'account' && !wasSettled) {
+      if (!settlement.settlementAccountId) {
+        throw new Error('A Deposit / Settlement Account is required when settling payment.');
+      }
       const account = (this.data.accounts || []).find((a) => a.id === settlement.settlementAccountId && a.isActive);
       if (!account) {
         throw new Error('Selected settlement account was not found — please choose an active Cash/Bank account.');
       }
     }
 
-    // 1. Invoice voucher (always, once the invoice document exists).
-    const billId = this.upsertSaleInvoiceVoucher(sale, stage);
-    sale.invoiceVoucherId = billId;
+    // 1. Invoice journal voucher — posted for 'credit' and 'account' flows.
+    //    For 'credit' it posts IMMEDIATELY at whichever stage the flow was
+    //    applied (party receivable must move the moment credit is booked);
+    //    the later invoice save re-upserts it with the invoice-stage total.
+    //    For 'account'/legacy flows it belongs to the invoice document.
+    if (isInvoice || flowType === 'credit') {
+      const billId = this.upsertSaleInvoiceVoucher(sale, stage);
+      sale.invoiceVoucherId = billId;
+    }
 
-    // 2. Receipt voucher (only when the user settles; guard: never doubles).
-    if (settlement.settle && !wasSettled) {
-      if (!settlement.settlementAccountId) {
-        throw new Error('A Deposit / Settlement Account is required when settling payment for an invoice.');
-      }
-      const payId = this.upsertSaleReceiptVoucher(sale, stage, settlement.settlementAccountId, settlement.paymentMode);
+    // 2. Receipt voucher (only for the account flow; guard: never doubles,
+    //    and it keeps the settled STAGE total — a later invoice difference
+    //    simply stays outstanding on the party ledger).
+    if (flowType === 'account' && !wasSettled) {
+      const payId = this.upsertSaleReceiptVoucher(sale, stage, settlement.settlementAccountId!, settlement.paymentMode);
       sale.settlementVoucherId = payId;
       sale.settlementAccountId = settlement.settlementAccountId;
       sale.paymentMode = settlement.paymentMode || sale.paymentMode;
       sale.settledAmount = this.roundMoney(stage.totalAmount);
       sale.settledDate = stage.date || sale.date;
       sale.cashApplied = true;
-    } else if (wasSettled && sale.invoiceVoucherId) {
-      // Sale was already settled (defensive: settlement outside the UI) —
-      // keep the receipt voucher's amount in step with the stage total.
-      const receipt = (this.data.transactions || []).find((t) => t.id === sale.settlementVoucherId);
-      if (receipt && this.roundMoney(receipt.amount) !== this.roundMoney(stage.totalAmount)) {
-        this.updateTransaction(receipt.id, { amount: this.roundMoney(stage.totalAmount) });
-        sale.settledAmount = this.roundMoney(stage.totalAmount);
-      }
+      sale.settlementType = 'account';
+    } else if (flowType === 'credit' && !wasSettled) {
+      // Book on credit: receivable rides the party ledger (journal voucher),
+      // no account linkage — the flow is still one-shot locked.
+      sale.cashApplied = true;
+      sale.settlementType = 'credit';
     }
-    // Refresh the invoice voucher's status flag: paid when settled.
+    // Refresh the invoice voucher's status flag: paid only for the account flow.
     if (sale.invoiceVoucherId) {
       const invoiceTxn = (this.data.transactions || []).find((t) => t.id === sale.invoiceVoucherId);
-      if (invoiceTxn && invoiceTxn.status !== (sale.cashApplied ? 'paid' : 'pending') && invoiceTxn.status !== 'cancelled') {
-        this.updateTransaction(invoiceTxn.id, { status: sale.cashApplied ? 'paid' : 'pending' });
+      if (invoiceTxn && invoiceTxn.status !== (this.cashFlowSettled(sale) ? 'paid' : 'pending') && invoiceTxn.status !== 'cancelled') {
+        this.updateTransaction(invoiceTxn.id, { status: this.cashFlowSettled(sale) ? 'paid' : 'pending' });
       }
     }
     // Push the recalculated party/account balances to MySQL.
     this.syncLedgerBalances(sale.partyId, [sale.settlementAccountId]);
   }
 
-  /** Mirror for purchases at the goods_receipt stage: purchase_bill journal
-   *  voucher + (when settling) payment_out payout voucher debiting the
-   *  selected Cash/Bank account. */
+  /** Mirror for purchases at purchase_order AND goods_receipt stages. Same
+   *  payment-flow semantics as applySaleCash: 'none' touches nothing, 'credit'
+   *  books the payable on the party ledger immediately at the applying stage
+   *  (re-upserted with GRN totals at the goods receipt), 'account' adds the
+   *  payment_out payout from the chosen account (stage-total-now policy; later
+   *  GRN differences stay on the party). Legacy callers (no type) keep
+   *  today's behavior. */
   private applyPurchaseCash(
     purchase: Purchase,
     stage: PurchaseOrderStage,
-    settlement: { settle: boolean; settlementAccountId?: string; paymentMode?: PaymentMode }
+    settlement: { settle: boolean; type?: 'none' | 'credit' | 'account'; settlementAccountId?: string; paymentMode?: PaymentMode },
+    stageType?: PurchaseStage
   ): void {
+    // Legacy fallback: old clients send only updateCash — settle ⇒ account.
+    const flowType = settlement.type ?? (settlement.settle ? 'account' as const : undefined);
+    // "Don't touch payment settlement": post nothing, lock nothing. At the
+    // FINAL document stage, however, a payment flow is COMPULSORY — the
+    // goods receipt cannot be recorded without deciding credit vs account.
+    if (flowType === 'none') {
+      if (stageType === undefined || stageType === 'goods_receipt') {
+        throw new Error('A payment flow (Book on credit or Cash/Bank settlement) must be applied when the Goods Receiving is recorded.');
+      }
+      return;
+    }
+
     const wasSettled = purchase.cashApplied;
+    const isGrn = stageType === undefined || stageType === 'goods_receipt';
     const party = purchase.partyId ? this.data.parties.find((p) => p.id === purchase.partyId) : undefined;
 
-    // Validate the settlement account BEFORE any voucher is written — a reject
-    // must not leave an orphaned bill voucher behind.
-    if (settlement.settle && !wasSettled) {
+    // Validate BEFORE any voucher is written — a reject must not leave an
+    // orphaned bill voucher behind. The journal + payout vouchers carry
+    // partyId FKs into the party ledger, so a payer is always required;
+    // the payout additionally needs a source account.
+    if (!purchase.partyId && (flowType === 'credit' || (flowType === 'account' && !wasSettled))) {
+      throw new Error(flowType === 'credit'
+        ? 'A Supplier / Vendor is required to book the purchase on credit.'
+        : 'A Supplier / Vendor is required when settling payment.');
+    }
+    if (flowType === 'account' && !wasSettled) {
       if (!settlement.settlementAccountId) {
-        throw new Error('A Disbursement / Source Account is required when settling payment for a goods receipt.');
+        throw new Error('A Disbursement / Source Account is required when settling payment.');
       }
       const account = (this.data.accounts || []).find((a) => a.id === settlement.settlementAccountId && a.isActive);
       if (!account) {
@@ -1610,30 +1695,40 @@ class ServerLocalDatabase {
       }
     }
 
-    // 1. Purchase bill journal voucher (payable moves; no account linkage).
-    const existingBill = purchase.invoiceVoucherId
-      ? (this.data.transactions || []).find((t) => t.id === purchase.invoiceVoucherId)
-      : undefined;
-    const billNumber = existingBill?.voucherNumber || this.mintVoucherNumber(this.data.settings.prefixes.purchaseBill);
-    const billId = existingBill?.id || `txn-${purchase.id}-bill`;
-    this.createTransaction(
-      {
-        id: billId,
-        voucherNumber: billNumber,
-        partyId: purchase.partyId!,
-        partyType: (party?.type as any) || 'supplier',
-        type: 'purchase_bill',
-        amount: this.roundMoney(stage.totalAmount),
-        date: stage.date || purchase.date,
-        referenceNumber: stage.stageNumber,
-        description: `Purchase Bill ${stage.stageNumber} — purchase ${purchase.purchaseNumber}`,
-        status: purchase.cashApplied ? 'paid' : 'pending',
-      }
-    );
-    purchase.invoiceVoucherId = billId;
+    // 1. Purchase bill journal voucher (payable moves; no account linkage) —
+    //    posted for 'credit' and 'account' flows. For 'credit' it posts
+    //    IMMEDIATELY at whichever stage the flow was applied (party payable
+    //    must move the moment credit is booked); the later GRN save re-upserts
+    //    it with the goods-receipt totals. For 'account'/legacy flows it
+    //    belongs to the goods-receipt document.
+    if (isGrn || flowType === 'credit') {
+      const existingBill = purchase.invoiceVoucherId
+        ? (this.data.transactions || []).find((t) => t.id === purchase.invoiceVoucherId)
+        : undefined;
+      const billNumber = existingBill?.voucherNumber || this.mintVoucherNumber(this.data.settings.prefixes.purchaseBill);
+      const billId = existingBill?.id || `txn-${purchase.id}-bill`;
+      // The voucher names the document that booked the payable — credit
+      // bookings can post at the purchase_order stage before any GRN exists.
+      const docLabel = stage.stageType === 'goods_receipt' ? 'Purchase Bill' : 'Purchase Order';
+      this.createTransaction(
+        {
+          id: billId,
+          voucherNumber: billNumber,
+          partyId: purchase.partyId!,
+          partyType: (party?.type as any) || 'supplier',
+          type: 'purchase_bill',
+          amount: this.roundMoney(stage.totalAmount),
+          date: stage.date || purchase.date,
+          referenceNumber: stage.stageNumber,
+          description: `${docLabel} ${stage.stageNumber} — purchase ${purchase.purchaseNumber}`,
+          status: this.cashFlowSettled(purchase) ? 'paid' : 'pending',
+        }
+      );
+      purchase.invoiceVoucherId = billId;
+    }
 
-    // 2. Payout voucher (debit the account).
-    if (settlement.settle && !wasSettled) {
+    // 2. Payout voucher (debit the account; one-shot — never doubles).
+    if (flowType === 'account' && !wasSettled) {
       const existingPay = purchase.settlementVoucherId
         ? (this.data.transactions || []).find((t) => t.id === purchase.settlementVoucherId)
         : undefined;
@@ -1651,7 +1746,7 @@ class ServerLocalDatabase {
           accountId: settlement.settlementAccountId,
           paymentMode: (settlement.paymentMode as any) || 'bank_transfer',
           referenceNumber: stage.stageNumber,
-          description: `Payout against Purchase Bill ${stage.stageNumber} — purchase ${purchase.purchaseNumber}`,
+          description: `Payout against purchase ${purchase.purchaseNumber} (stage ${stage.stageNumber})`,
           status: 'paid',
         }
       );
@@ -1661,17 +1756,17 @@ class ServerLocalDatabase {
       purchase.settledAmount = this.roundMoney(stage.totalAmount);
       purchase.settledDate = stage.date || purchase.date;
       purchase.cashApplied = true;
-    } else if (wasSettled && purchase.settlementVoucherId) {
-      const receipt = (this.data.transactions || []).find((t) => t.id === purchase.settlementVoucherId);
-      if (receipt && this.roundMoney(receipt.amount) !== this.roundMoney(stage.totalAmount)) {
-        this.updateTransaction(receipt.id, { amount: this.roundMoney(stage.totalAmount) });
-        purchase.settledAmount = this.roundMoney(stage.totalAmount);
-      }
+      purchase.settlementType = 'account';
+    } else if (flowType === 'credit' && !wasSettled) {
+      // Book on credit: payable rides the party ledger (bill voucher at GRN),
+      // no account linkage — the flow is still one-shot locked.
+      purchase.cashApplied = true;
+      purchase.settlementType = 'credit';
     }
-    if (purchase.invoiceVoucherId) {
+    if (purchase.invoiceVoucherId && isGrn) {
       const billTxn = (this.data.transactions || []).find((t) => t.id === purchase.invoiceVoucherId);
-      if (billTxn && billTxn.status !== (purchase.cashApplied ? 'paid' : 'pending') && billTxn.status !== 'cancelled') {
-        this.updateTransaction(billTxn.id, { status: purchase.cashApplied ? 'paid' : 'pending' });
+      if (billTxn && billTxn.status !== (this.cashFlowSettled(purchase) ? 'paid' : 'pending') && billTxn.status !== 'cancelled') {
+        this.updateTransaction(billTxn.id, { status: this.cashFlowSettled(purchase) ? 'paid' : 'pending' });
       }
     }
     // Push the recalculated party/account balances to MySQL.
@@ -1698,6 +1793,42 @@ class ServerLocalDatabase {
     }
     master.invoiceVoucherId = undefined;
     master.settlementVoucherId = undefined;
+    // Push the recalculated party/account balances to MySQL.
+    this.syncLedgerBalances(master.partyId, accountIds);
+  }
+
+  /** Edit compensation (user rule: "money follows the document"): re-size the
+   *  posted journal + receipt/payout vouchers to the edited document total —
+   *  the journal refreshes the party receivable/payable leg, the money voucher
+   *  re-adjusts its Cash/Bank account via updateTransaction's recalc. Only
+   *  vouchers whose amounts actually differ are rewritten. */
+  private resizeVoucherAmounts(
+    master: {
+      partyId?: string;
+      invoiceVoucherId?: string;
+      settlementVoucherId?: string;
+      settlementAccountId?: string;
+      settledAmount?: number;
+    },
+    newAmount: number,
+    label: string,
+    auditAction: string
+  ): void {
+    const accountIds: Array<string | undefined> = [];
+    for (const vid of [master.invoiceVoucherId, master.settlementVoucherId]) {
+      if (!vid) continue;
+      const txn = (this.data.transactions || []).find((t) => t.id === vid);
+      if (!txn) continue;
+      accountIds.push(txn.accountId);
+      if (this.roundMoney(txn.amount) !== this.roundMoney(newAmount)) {
+        this.updateTransaction(vid, { amount: this.roundMoney(newAmount) });
+        this.logAudit('UPDATE', auditAction, vid, `${label}: voucher ${txn.voucherNumber} (${txn.type}) amount resized to ₹${newAmount}`);
+      }
+    }
+    // The settled snapshot rides on the resized money voucher.
+    if (master.settlementVoucherId) {
+      master.settledAmount = this.roundMoney(newAmount);
+    }
     // Push the recalculated party/account balances to MySQL.
     this.syncLedgerBalances(master.partyId, accountIds);
   }
@@ -1763,6 +1894,9 @@ class ServerLocalDatabase {
       partyName: party ? (party.tradeName || party.name) : undefined,
       items,
       stages,
+      // Legacy derive: pre-flow rows have no settlementType — a settlement
+      // voucher means the account flow was applied (mirrors the MySQL backfill).
+      settlementType: sale.settlementType ?? (sale.settlementVoucherId ? 'account' : undefined),
       // Settlement display fields (Golden Rule §2 — JOINed, never persisted)
       settlementAccountName: sale.settlementAccountId
         ? (this.data.accounts || []).find((a) => a.id === sale.settlementAccountId)?.name
@@ -1808,6 +1942,9 @@ class ServerLocalDatabase {
       partyName: party ? (party.tradeName || party.name) : undefined,
       items,
       stages: [...(purchase.stages || [])],
+      // Legacy derive: pre-flow rows have no settlementType — a settlement
+      // voucher means the account flow was applied (mirrors the MySQL backfill).
+      settlementType: purchase.settlementType ?? (purchase.settlementVoucherId ? 'account' : undefined),
       // Settlement display fields (Golden Rule §2 — JOINed, never persisted)
       settlementAccountName: purchase.settlementAccountId
         ? (this.data.accounts || []).find((a) => a.id === purchase.settlementAccountId)?.name
@@ -2129,20 +2266,20 @@ class ServerLocalDatabase {
         sale.inventoryApplied = true;
       }
     }
-    if (firstStage.stageType === 'sales_invoice') {
-      // Cash & Bank wiring: a sale created straight at the invoice stage posts
-      // its sale_invoice journal voucher, plus the payment_in receipt voucher
-      // when "Settle Payment Now" was chosen (sets cashApplied + FKs).
+    if (firstStage.stageType === 'sales_invoice' || firstStage.stageType === 'sales_order') {
+      // Cash & Bank wiring: the payment_in receipt voucher posts the moment
+      // "Settle Payment Now" is chosen (sales-order or invoice stage — once
+      // per sale); the sale_invoice journal voucher posts when the invoice
+      // document exists.
       this.applySaleCash(sale, firstStage, {
         settle: Boolean(stageInput.updateCash),
+        type: (stageInput as any).settlementType,
         settlementAccountId: stageInput.settlementAccountId,
         paymentMode: stageInput.paymentMode,
-      });
-      this.logAudit('CREATE', 'SALE_CASH', saleId, `Invoice voucher posted for ${sale.saleNumber} (settle=${Boolean(stageInput.updateCash)})`);
+      }, firstStage.stageType);
+      this.logAudit('CREATE', 'SALE_CASH', saleId, `Payment flow on sale ${sale.saleNumber} at ${firstStage.stageType} (type=${(stageInput as any).settlementType ?? (stageInput.updateCash ? 'account(legacy)' : 'legacy-off')})`);
     } else if (stageInput.updateCash) {
-      // Cash applies only through settlement at the invoice stage — a flag
-      // request at an earlier stage is noted, not applied.
-      this.logAudit('DISPATCH', 'SALE_CASH', saleId, `Cash application requested at ${firstStage.stageType} stage — applies when the invoice stage is issued`);
+      this.logAudit('DISPATCH', 'SALE_CASH', saleId, `Cash application requested at ${firstStage.stageType} stage — applies at the sales-order stage`);
     }
     sale.status = this.computeSalesStatus(sale);
 
@@ -2153,7 +2290,11 @@ class ServerLocalDatabase {
     return this.hydrateSale(sale);
   }
 
-  public updateSale(id: string, updates: Partial<Sale> & { items?: SalesOrderItemInput[] }): Sale | null {
+  public updateSale(
+    id: string,
+    updates: Partial<Sale> & { items?: SalesOrderItemInput[]; updateInventory?: boolean },
+    opts: { skipMysqlSync?: boolean } = {}
+  ): Sale | null {
     const index = (this.data.sales || []).findIndex((s) => s.id === id);
     if (index === -1) {
       return this.createSale({ ...updates, id });
@@ -2192,7 +2333,7 @@ class ServerLocalDatabase {
     // compensate (reverse the old dispatches) and re-apply the new quantities.
     if (updates.items !== undefined) {
       const normalized = this.normalizeSaleItemLines(id, updates.items || [], latestStage?.id);
-      const identical = existing.inventoryApplied && this.areOrderItemLinesEqual(existing.items, normalized);
+      const identical = this.areOrderItemLinesEqual(existing.items, normalized);
       existing.items = normalized;
       if (latestStage) {
         latestStage.items = normalized;
@@ -2213,6 +2354,45 @@ class ServerLocalDatabase {
         latestStage.taxAmount = refreshed.taxAmount;
         latestStage.totalAmount = refreshed.totalAmount;
       }
+      // Voucher compensation on edit (user rule: money follows the document) —
+      // the posted sale_invoice journal (party receivable leg) AND the payment
+      // receipt (Cash/Bank leg, when settled) both resize to the edited total.
+      if (!identical) {
+        const refreshed = this.computeStageTotals(existing.items, Number(existing.transportCharges) || 0);
+        this.resizeVoucherAmounts(existing, refreshed.totalAmount, `Sale ${existing.saleNumber} edit`, 'SALE_CASH');
+      }
+    }
+
+    // One-shot inventory application rides on the master EDIT: the edit form
+    // shows the Deduct Stockyard Inventory switch (default OFF) — enabled only
+    // while the dispatch has never posted (user rule for the edit-stage flow).
+    if (updates.updateInventory && !existing.inventoryApplied) {
+      if (this.applySaleInventory(existing, existing.saleNumber)) {
+        existing.inventoryApplied = true;
+      }
+    }
+
+    // Payment-flow switch on the master EDIT: a flow never applied at
+    // creation can be chosen here (Sales Order stage). Applies once through
+    // the shared settlement gate; a sale already carrying a flow ignores it.
+    const editSettleType = (updates as any).settlementType as 'none' | 'credit' | 'account' | undefined;
+    if (editSettleType && editSettleType !== 'none' && !existing.cashApplied && latestStage &&
+        latestStage.stageType === 'sales_order') {
+      // The flow applies at the CURRENT stage's totals and number — the
+      // invoice stage cannot occur here (locked above).
+      const settleStage: SalesOrderStage = {
+        ...latestStage,
+        subtotal: Number((updates as any).subtotal ?? latestStage.subtotal) || 0,
+        taxAmount: Number((updates as any).taxAmount ?? latestStage.taxAmount) || 0,
+        totalAmount: Number((updates as any).totalAmount ?? latestStage.totalAmount) || 0,
+      };
+      this.applySaleCash(existing, settleStage, {
+        settle: editSettleType === 'account',
+        type: editSettleType,
+        settlementAccountId: (updates as any).settlementAccountId,
+        paymentMode: (updates as any).paymentMode,
+      }, latestStage.stageType as SalesStage);
+      this.logAudit('CREATE', 'SALE_CASH', id, `Payment flow on sale ${existing.saleNumber} via edit at ${latestStage.stageType} (type=${editSettleType})`);
     }
 
     // Cancellation reverses the applied dispatch (policy: revisit with user)
@@ -2225,7 +2405,13 @@ class ServerLocalDatabase {
 
     this.logAudit('UPDATE', 'SALE', id, `Updated sale ${existing.saleNumber}`);
     this.save();
-    this.syncSaleToMysql(existing);
+    // When a composite flow (e.g. addSaleStageDirect) follows this call with
+    // its own sync, skip the intermediate write: two fire-and-forget REPLACEs
+    // for one row race the connection pool and can land out of order, leaving
+    // STALE flags (e.g. inventory_applied=0 while the stock already applied).
+    if (!opts.skipMysqlSync) {
+      this.syncSaleToMysql(existing);
+    }
     return this.hydrateSale(existing);
   }
 
@@ -2300,17 +2486,20 @@ class ServerLocalDatabase {
       // Invoice stage: PERMANENT-ON inventory application (see createSale).
       sale.inventoryApplied = true;
     }
-    if (stage.stageType === 'sales_invoice') {
-      // Cash & Bank wiring: issuing the invoice posts the sale_invoice journal
-      // voucher (+ the payment_in receipt voucher when settling now).
+    if (stage.stageType === 'sales_invoice' || stage.stageType === 'sales_order') {
+      // Cash & Bank wiring: the payment_in receipt voucher posts the moment
+      // "Settle Payment Now" is checked (sales-order or invoice stage —
+      // once per sale); the sale_invoice journal voucher posts when the
+      // invoice document exists.
       this.applySaleCash(sale, stage, {
         settle: Boolean(stageInput.updateCash),
+        type: (stageInput as any).settlementType,
         settlementAccountId: stageInput.settlementAccountId,
         paymentMode: stageInput.paymentMode,
-      });
-      this.logAudit('CREATE', 'SALE_CASH', id, `Invoice voucher posted at ${stage.stageNumber} on sale ${sale.saleNumber} (settle=${Boolean(stageInput.updateCash)})`);
+      }, stage.stageType);
+      this.logAudit('CREATE', 'SALE_CASH', id, `Payment flow on sale ${sale.saleNumber} at ${stage.stageType} ${stage.stageNumber} (type=${(stageInput as any).settlementType ?? (stageInput.updateCash ? 'account(legacy)' : 'legacy-off')})`);
     } else if (stageInput.updateCash) {
-      this.logAudit('DISPATCH', 'SALE_CASH', id, `Cash application requested at ${stage.stageType} stage — applies when the invoice stage is issued`);
+      this.logAudit('DISPATCH', 'SALE_CASH', id, `Cash application requested at ${stage.stageType} stage — applies at the sales-order stage`);
     }
     sale.status = this.computeSalesStatus(sale);
     sale.updatedAt = now;
@@ -2360,7 +2549,11 @@ class ServerLocalDatabase {
     const purchaseId = data.id || `purc-${this.nextLedgerMs()}-${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
     const items = this.normalizePurchaseItemLines(purchaseId, data.items || []);
-    const total = this.computeStageTotals(items, 0);
+    // A purchase created straight at goods-receipt bills received quantities.
+    const firstStageType = data.stage?.stageType || 'purchase_order';
+    const total = firstStageType === 'goods_receipt'
+      ? this.computeReceivedStageTotals(items)
+      : this.computeStageTotals(items, 0);
 
     const stageInput: PurchaseOrderStageInput = data.stage || {
       stageType: 'purchase_order',
@@ -2399,24 +2592,31 @@ class ServerLocalDatabase {
       updatedAt: now,
     };
 
-    if (stageInput.updateInventory) {
+    // Inventory: the goods_receipt is a PERMANENT-ON stage (mirrors the sales
+    // invoice) — inward posts here even if the toggle was never enabled at PO.
+    if (stageInput.updateInventory || stage.stageType === 'goods_receipt') {
       if (this.applyPurchaseInventory(purchase, stage.stageNumber)) {
         purchase.inventoryApplied = true;
       }
     }
-    if (stage.stageType === 'goods_receipt') {
-      // Cash & Bank wiring: a purchase whose first stage is the goods receipt
-      // posts its purchase_bill journal voucher (+ payment_out payout voucher
-      // when "Settle Payment Now" was chosen).
+    if (stage.stageType === 'purchase_order' || stage.stageType === 'goods_receipt') {
+      // Cash & Bank wiring: the payment_out payout voucher posts the moment
+      // "Settle Payment Now" is chosen (purchase-order or goods-receipt
+      // stage — once per purchase); the purchase_bill journal voucher
+      // belongs to the goods-receipt document. A goods receipt also refuses
+      // to record payables without a vendor.
+      if (stage.stageType === 'goods_receipt' && !purchase.partyId) {
+        throw new Error('A Supplier / Vendor is required to record a Goods Receiving. Add the vendor at the Purchase Order stage first.');
+      }
       this.applyPurchaseCash(purchase, stage, {
         settle: Boolean(stageInput.updateCash),
+        type: (stageInput as any).settlementType,
         settlementAccountId: stageInput.settlementAccountId,
         paymentMode: stageInput.paymentMode,
-      });
-      this.logAudit('CREATE', 'PURCHASE_CASH', purchaseId, `Bill voucher posted for ${purchase.purchaseNumber} (settle=${Boolean(stageInput.updateCash)})`);
+      }, stage.stageType);
+      this.logAudit('CREATE', 'PURCHASE_CASH', purchaseId, `Payment flow on purchase ${purchase.purchaseNumber} at ${stage.stageType} (type=${(stageInput as any).settlementType ?? (stageInput.updateCash ? 'account(legacy)' : 'legacy-off')})`);
     } else if (stageInput.updateCash) {
-      // Cash applies only through settlement at the goods receipt stage.
-      this.logAudit('DISPATCH', 'PURCHASE_CASH', purchaseId, `Cash application requested at ${stage.stageType} stage — applies when the goods receipt is saved`);
+      this.logAudit('DISPATCH', 'PURCHASE_CASH', purchaseId, `Cash application requested at ${stage.stageType} stage — applies at the purchase-order stage`);
     }
     purchase.status = this.computePurchaseStatus(purchase);
 
@@ -2427,7 +2627,11 @@ class ServerLocalDatabase {
     return this.hydratePurchase(purchase);
   }
 
-  public updatePurchase(id: string, updates: Partial<Purchase> & { items?: PurchaseOrderItemInput[] }): Purchase | null {
+  public updatePurchase(
+    id: string,
+    updates: Partial<Purchase> & { items?: PurchaseOrderItemInput[]; updateInventory?: boolean },
+    opts: { skipMysqlSync?: boolean } = {}
+  ): Purchase | null {
     const index = (this.data.purchases || []).findIndex((p) => p.id === id);
     if (index === -1) {
       return this.createPurchase({ ...updates, id });
@@ -2454,19 +2658,49 @@ class ServerLocalDatabase {
           existing.inventoryApplied = false;
         }
       }
-      // Voucher compensation: keep the posted purchase_bill journal voucher in
-      // step with the edited lines (the payout voucher records cash that has
-      // already left the account, so it is intentionally NOT adjusted — the
-      // difference simply stays as outstanding payable on the party).
-      if (existing.invoiceVoucherId && !identical) {
-        const refreshed = this.computeStageTotals(existing.items, 0);
-        const bill = (this.data.transactions || []).find((t) => t.id === existing.invoiceVoucherId);
-        if (bill && this.roundMoney(bill.amount) !== this.roundMoney(refreshed.totalAmount)) {
-          this.updateTransaction(bill.id, { amount: this.roundMoney(refreshed.totalAmount) });
-          this.logAudit('UPDATE', 'PURCHASE_CASH', id, `Bill voucher ${bill.voucherNumber} amount refreshed to ₹${refreshed.totalAmount} after purchase edit`);
-        }
-        this.syncLedgerBalances(existing.partyId);
+      // Voucher compensation on edit (user rule: money follows the document) —
+      // BOTH posted vouchers resize to the edited total: the purchase_bill
+      // journal (party payable leg) and the payment_out payout (Cash/Bank leg,
+      // when settled at an earlier stage; the bank balance re-adjusts too).
+      // A GRN'd purchase sizes to its RECEIVED-based document total.
+      if (!identical) {
+        const latest = (existing.stages || []).length > 0 ? existing.stages[existing.stages.length - 1] : undefined;
+        const refreshed = latest?.stageType === 'goods_receipt'
+          ? this.computeReceivedStageTotals(existing.items)
+          : this.computeStageTotals(existing.items, 0);
+        this.resizeVoucherAmounts(existing, refreshed.totalAmount, `Purchase ${existing.purchaseNumber} edit`, 'PURCHASE_CASH');
       }
+    }
+
+    // One-shot inventory application rides on the master EDIT (user rule:
+    // the edit-stage flow shows the Receive Into Stockyard Inventory switch,
+    // default OFF — enabled only while the inward has never posted).
+    if (updates.updateInventory && !existing.inventoryApplied) {
+      if (this.applyPurchaseInventory(existing, existing.purchaseNumber)) {
+        existing.inventoryApplied = true;
+      }
+    }
+
+    // Payment-flow switch on the master EDIT: a flow never applied at
+    // creation can be chosen here (Purchase Order stage) — same one-shot
+    // settlement gate as the stage saves.
+    const editSettleType = (updates as any).settlementType as 'none' | 'credit' | 'account' | undefined;
+    const latestStage = (existing.stages || []).length > 0 ? existing.stages[existing.stages.length - 1] : undefined;
+    if (editSettleType && editSettleType !== 'none' && !existing.cashApplied && latestStage &&
+        (latestStage.stageType === 'purchase_order' || latestStage.stageType === 'goods_receipt')) {
+      const settleStage: PurchaseOrderStage = {
+        ...latestStage,
+        subtotal: Number((updates as any).subtotal ?? latestStage.subtotal) || 0,
+        taxAmount: Number((updates as any).taxAmount ?? latestStage.taxAmount) || 0,
+        totalAmount: Number((updates as any).totalAmount ?? latestStage.totalAmount) || 0,
+      };
+      this.applyPurchaseCash(existing, settleStage, {
+        settle: editSettleType === 'account',
+        type: editSettleType,
+        settlementAccountId: (updates as any).settlementAccountId,
+        paymentMode: (updates as any).paymentMode,
+      }, latestStage.stageType as PurchaseStage);
+      this.logAudit('CREATE', 'PURCHASE_CASH', id, `Payment flow on purchase ${existing.purchaseNumber} via edit at ${latestStage.stageType} (type=${editSettleType})`);
     }
 
     if (updates.status === 'cancelled' && !wasCancelled && existing.inventoryApplied) {
@@ -2482,7 +2716,12 @@ class ServerLocalDatabase {
 
     this.logAudit('UPDATE', 'PURCHASE', id, `Updated purchase ${existing.purchaseNumber}`);
     this.save();
-    this.syncPurchaseToMysql(existing);
+    // Composite flows (addPurchaseStageDirect) sync AFTER the stage save —
+    // two fire-and-forget REPLACEs for one row race the pool and can land
+    // out of order, leaving stale flags (inventory_applied=0 with stock applied).
+    if (!opts.skipMysqlSync) {
+      this.syncPurchaseToMysql(existing);
+    }
     return this.hydratePurchase(existing);
   }
 
@@ -2495,8 +2734,13 @@ class ServerLocalDatabase {
     const purchase = (this.data.purchases || []).find((p) => p.id === id);
     if (!purchase) return null;
     const now = new Date().toISOString();
-    const total = this.computeStageTotals(purchase.items || [], 0);
     const stageType = stageInput.stageType;
+    // The goods-receipt document bills the ACTUAL received quantities at the
+    // PO's locked rates (shortage lines contribute less/zero, overage more);
+    // PO/RFQ stage totals stay ordered-qty based (user rule).
+    const total = stageType === 'goods_receipt'
+      ? this.computeReceivedStageTotals(purchase.items || [])
+      : this.computeStageTotals(purchase.items || [], 0);
 
     const existingStageIdx = (purchase.stages || []).findIndex((s) => s.stageType === stageType);
     const stageNumber = stageInput.stageNumber || purchase.purchaseNumber;
@@ -2532,26 +2776,32 @@ class ServerLocalDatabase {
 
     // Stage item quantities (receivedQuantity at GRN) live on the master items
     // and are applied via updatePurchase — the stage save reuses those totals.
+    const stageRow = (purchase.stages || []).find((s) => s.stageType === stageType);
 
-    if (stageInput.updateInventory && this.applyPurchaseInventory(purchase, stageNumber)) {
+    // Inventory: the goods_receipt is a PERMANENT-ON stage (mirrors the sales
+    // invoice) — inward posts here even if the toggle was never enabled at PO.
+    if ((stageInput.updateInventory || stageType === 'goods_receipt') && this.applyPurchaseInventory(purchase, stageNumber)) {
       purchase.inventoryApplied = true;
     }
-    if (stageType === 'goods_receipt') {
-      // Cash & Bank wiring: saving the goods receipt posts the purchase_bill
-      // journal voucher (+ the payment_out payout voucher when settling now).
-      // GRN is a UNIQUE-per-purchase stage row, so a re-save upserts its own
-      // vouchers (deterministic ids) instead of duplicating them.
-      const grnStage = (purchase.stages || []).find((s) => s.stageType === 'goods_receipt');
-      if (grnStage) {
-        this.applyPurchaseCash(purchase, grnStage, {
-          settle: Boolean(stageInput.updateCash),
-          settlementAccountId: stageInput.settlementAccountId,
-          paymentMode: stageInput.paymentMode,
-        });
-        this.logAudit('CREATE', 'PURCHASE_CASH', id, `Bill voucher posted at ${stageNumber} on purchase ${purchase.purchaseNumber} (settle=${Boolean(stageInput.updateCash)})`);
+    if (stageType === 'purchase_order' || stageType === 'goods_receipt') {
+      // A goods receipt records payables against the vendor — refuse it
+      // without one (mirror of the sales settlement-account guard).
+      if (stageType === 'goods_receipt' && !purchase.partyId) {
+        throw new Error('A Supplier / Vendor is required to record a Goods Receiving. Add the vendor at the Purchase Order stage first.');
       }
+      // Cash & Bank wiring: the payment_out payout voucher posts the moment
+      // "Settle Payment Now" is checked (purchase-order or goods-receipt
+      // stage — once per purchase); the purchase_bill journal voucher
+      // belongs to the goods-receipt document.
+      this.applyPurchaseCash(purchase, stageRow, {
+        settle: Boolean(stageInput.updateCash),
+        type: (stageInput as any).settlementType,
+        settlementAccountId: stageInput.settlementAccountId,
+        paymentMode: stageInput.paymentMode,
+      }, stageType);
+      this.logAudit('CREATE', 'PURCHASE_CASH', id, `Payment flow on purchase ${purchase.purchaseNumber} at ${stageType} ${stageRow?.stageNumber || stageNumber} (type=${(stageInput as any).settlementType ?? (stageInput.updateCash ? 'account(legacy)' : 'legacy-off')})`);
     } else if (stageInput.updateCash) {
-      this.logAudit('DISPATCH', 'PURCHASE_CASH', id, `Cash application requested at ${stageType} stage — applies when the goods receipt is saved`);
+      this.logAudit('DISPATCH', 'PURCHASE_CASH', id, `Cash application requested at ${stageType} stage — applies at the purchase-order stage`);
     }
     purchase.status = this.computePurchaseStatus(purchase);
     purchase.updatedAt = now;

@@ -211,6 +211,22 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         console.warn('[Azure MySQL] Notice loading item_location_mapping:', ilmErr.message);
       }
 
+      // 4b-audit. Startup integrity audit (log-only): Σ(location buckets) must
+      // equal the item's total — any drift means an increment lost its
+      // location leg and is surfaced loudly the moment it happens.
+      for (const item of items) {
+        if (!item.locations || item.locations.length === 0) continue;
+        const bucketSum = item.locations.reduce((sum, l) => sum + (Number(l.currentStock) || 0), 0);
+        if (Math.abs(bucketSum - (Number(item.currentStock) || 0)) > 1e-9) {
+          console.warn(
+            `[Azure MySQL] STOCK AUDIT drift on item ${item.name} (${item.id}): ` +
+            `total ${item.currentStock} ≠ location buckets ${bucketSum} ` +
+            `[${item.locations.map((l) => `${l.locationName}:${l.currentStock}`).join(', ')}] — ` +
+            `fix with a stock adjustment or the /api/accounts-style recalculation.`
+          );
+        }
+      }
+
       // 4c. Stock movements ledger -> hydrate item.movements (latest 100 per item, newest first).
       // FK store: item_id / location_id / party_id only. Names are resolved with JOINs
       // so party/item renames always propagate into the movement ledger display.
@@ -493,6 +509,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
             transportCharges: numOr(so.transport_charges),
             inventoryApplied: Boolean(so.inventory_applied),
             cashApplied: Boolean(so.cash_applied),
+            settlementType: so.settlement_type || (so.settlement_voucher_id ? 'account' : undefined),
             settlementAccountId: so.settlement_account_id || undefined,
             settlementAccountName: so.settlement_account_display || undefined, // live view (§2)
             paymentMode: so.payment_mode || undefined,
@@ -593,6 +610,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
           notes: po.notes || undefined,
           inventoryApplied: Boolean(po.inventory_applied),
           cashApplied: Boolean(po.cash_applied),
+          settlementType: po.settlement_type || (po.settlement_voucher_id ? 'account' : undefined),
           settlementAccountId: po.settlement_account_id || undefined,
           settlementAccountName: po.settlement_account_display || undefined, // live view (§2)
           paymentMode: po.payment_mode || undefined,
@@ -1162,8 +1180,8 @@ export async function liveSyncSale(sale: Sale, isDelete = false) {
   if (!pool) return;
   try {
     await pool.query(
-      `REPLACE INTO sales_orders (id, sale_number, party_id, date, status, notes, vehicle_no, driver_name, transport_charges, inventory_applied, cash_applied, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `REPLACE INTO sales_orders (id, sale_number, party_id, date, status, notes, vehicle_no, driver_name, transport_charges, inventory_applied, cash_applied, settlement_type, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sale.id,
         sale.saleNumber,
@@ -1176,6 +1194,7 @@ export async function liveSyncSale(sale: Sale, isDelete = false) {
         numOr(sale.transportCharges),
         sale.inventoryApplied ? 1 : 0,
         sale.cashApplied ? 1 : 0,
+        (sale as any).settlementType || null,
         sale.settlementAccountId || null,
         sale.paymentMode || null,
         sale.invoiceVoucherId || null,
@@ -1272,8 +1291,8 @@ export async function liveSyncPurchase(purchase: Purchase, isDelete = false) {
   if (!pool) return;
   try {
     await pool.query(
-      `REPLACE INTO purchase_orders (id, purchase_number, party_id, date, status, notes, inventory_applied, cash_applied, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `REPLACE INTO purchase_orders (id, purchase_number, party_id, date, status, notes, inventory_applied, cash_applied, settlement_type, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         purchase.id,
         purchase.purchaseNumber,
@@ -1283,6 +1302,7 @@ export async function liveSyncPurchase(purchase: Purchase, isDelete = false) {
         purchase.notes || null,
         purchase.inventoryApplied ? 1 : 0,
         purchase.cashApplied ? 1 : 0,
+        (purchase as any).settlementType || null,
         purchase.settlementAccountId || null,
         purchase.paymentMode || null,
         purchase.invoiceVoucherId || null,

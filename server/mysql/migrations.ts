@@ -1210,6 +1210,7 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           transport_charges DECIMAL(12,2) DEFAULT 0.00,
           inventory_applied BOOLEAN DEFAULT FALSE,
           cash_applied BOOLEAN DEFAULT FALSE,
+          settlement_type VARCHAR(16) COMMENT 'credit | account | NULL = payment flow not applied',
           settlement_account_id VARCHAR(64) COMMENT 'FK cash_bank_accounts — where the invoice payment was deposited',
           payment_mode VARCHAR(64) COMMENT 'bank_transfer | neft_rtgs | upi | cheque | cash',
           invoice_voucher_id VARCHAR(64) COMMENT 'FK transactions — the sale_invoice journal voucher',
@@ -1267,6 +1268,7 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           notes TEXT,
           inventory_applied BOOLEAN DEFAULT FALSE,
           cash_applied BOOLEAN DEFAULT FALSE,
+          settlement_type VARCHAR(16) COMMENT 'credit | account | NULL = payment flow not applied',
           settlement_account_id VARCHAR(64) COMMENT 'FK cash_bank_accounts — account the vendor was paid from',
           payment_mode VARCHAR(64) COMMENT 'bank_transfer | neft_rtgs | upi | cheque | cash',
           invoice_voucher_id VARCHAR(64) COMMENT 'FK transactions — the purchase_bill journal voucher',
@@ -1492,6 +1494,51 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         }
       } catch (soiErr: any) {
         console.warn('[MySQL Migration] stage-scoped sale items notice:', soiErr.message);
+      }
+
+      // 16c. PAYMENT-FLOW TYPE on sale/purchase masters: settlement_type
+      // ('credit' | 'account' | NULL = flow untouched). cash_applied is
+      // re-purposed as "payment flow applied (locked)" — credit bookings set
+      // it too — so the type tells the two flows apart.
+      const settleTypeTables = ['sales_orders', 'purchase_orders'] as const;
+      for (const masterTable of settleTypeTables) {
+        try {
+          const [stCols]: any = await conn.query(`SHOW COLUMNS FROM ${masterTable}`);
+          const stColNames = (stCols || []).map((c: any) => c.Field);
+          if (stColNames.length > 0 && !stColNames.includes('settlement_type')) {
+            await conn.query(`ALTER TABLE ${masterTable} ADD COLUMN settlement_type VARCHAR(16) NULL AFTER cash_applied`);
+            console.log(`[MySQL Migration] Added ${masterTable}.settlement_type column.`);
+          }
+        } catch (stTypeErr: any) {
+          console.warn(`[MySQL Migration] ${masterTable} settlement_type notice:`, stTypeErr.message);
+        }
+      }
+      try {
+        const [stBackfill]: any = await conn.query(
+          `UPDATE sales_orders SET settlement_type = 'account' WHERE settlement_voucher_id IS NOT NULL AND settlement_type IS NULL`
+        );
+        const [ptBackfill]: any = await conn.query(
+          `UPDATE purchase_orders SET settlement_type = 'account' WHERE settlement_voucher_id IS NOT NULL AND settlement_type IS NULL`
+        );
+        // Legacy credit bookings: the unpaid invoice/bill journal voucher was
+        // posted but no money moved — those rows were "book on credit".
+        const [scBackfill]: any = await conn.query(
+          `UPDATE sales_orders so LEFT JOIN transactions t ON t.id = CONCAT('txn-', so.id, '-inv')
+           SET so.settlement_type = 'credit'
+           WHERE so.settlement_type IS NULL AND t.id IS NOT NULL`
+        );
+        const [pcBackfill]: any = await conn.query(
+          `UPDATE purchase_orders po LEFT JOIN transactions t ON t.id = CONCAT('txn-', po.id, '-bill')
+           SET po.settlement_type = 'credit'
+           WHERE po.settlement_type IS NULL AND t.id IS NOT NULL`
+        );
+        // Safety net: locked rows must carry a type.
+        await conn.query(`UPDATE sales_orders SET settlement_type = 'account' WHERE cash_applied = 1 AND settlement_type IS NULL`);
+        await conn.query(`UPDATE purchase_orders SET settlement_type = 'account' WHERE cash_applied = 1 AND settlement_type IS NULL`);
+        const backfilled = (stBackfill?.affectedRows || 0) + (ptBackfill?.affectedRows || 0) + (scBackfill?.affectedRows || 0) + (pcBackfill?.affectedRows || 0);
+        if (backfilled > 0) console.log(`[MySQL Migration] Backfilled settlement_type on ${backfilled} sale/purchase master rows.`);
+      } catch (stBackfillErr: any) {
+        console.warn('[MySQL Migration] settlement_type backfill notice:', stBackfillErr.message);
       }
 
       console.log('[MySQL Migration] All tables verified successfully.');
