@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { Party } from '../../types';
 import { formatCurrency, formatDate } from '../../utils/formatters';
-import { PartyLedgerEntry, PartyStatement, formatLedgerBalance } from './partyStatement';
+import { PartyLedgerEntry, PartyStatement, formatLedgerBalance, entryStageLines } from './partyStatement';
 
 /**
  * Statement of Account & Ledger — the doc-centric party list. One row per
@@ -112,7 +112,9 @@ export function PartyStatementLedger({
           entry.typeLabel.toLowerCase().includes(q) ||
           (entry.stageChip && entry.stageChip.toLowerCase().includes(q)) ||
           (entry.particulars && entry.particulars.toLowerCase().includes(q)) ||
-          (entry.reference && entry.reference.toLowerCase().includes(q))
+          (entry.reference && entry.reference.toLowerCase().includes(q)) ||
+          entryStageLines(entry).some((s) =>
+            s.number.toLowerCase().includes(q) || s.label.toLowerCase().includes(q))
         );
       });
   }, [statement.rows, filterType, searchQuery]);
@@ -126,7 +128,7 @@ export function PartyStatementLedger({
             Statement of Account & Ledger
           </h3>
           <p className="text-xs text-[var(--color-on-surface-variant)]">
-            Every {party.name} sale, purchase and payment in one chronological story — click any row for the full document
+            Every {party.name} sale, purchase and payment in one chronological story (newest first) — click any row for the full document
           </p>
         </div>
 
@@ -169,8 +171,8 @@ export function PartyStatementLedger({
           <thead>
             <tr className="bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
               <th className="py-3 px-4">Date</th>
-              <th className="py-3 px-3">Document #</th>
               <th className="py-3 px-3">Particulars</th>
+              <th className="py-3 px-3">Stages</th>
               <th className="py-3 px-3">Reference</th>
               <th className="py-3 px-3 text-right text-[var(--color-primary)]">Debit (Dr / Sales / We Paid)</th>
               <th className="py-3 px-3 text-right text-[var(--color-success)]">Credit (Cr / Purchases / Received)</th>
@@ -185,15 +187,13 @@ export function PartyStatementLedger({
               <td className="py-3 px-4 text-[var(--color-on-surface)]">
                 {formatDate(party.createdAt)}
               </td>
-              <td className="py-3 px-3 font-mono font-bold text-[var(--color-on-surface-variant)]">
-                OPENING
-              </td>
               <td className="py-3 px-3">
                 <span className="inline-flex items-center gap-1 font-bold text-[var(--color-on-surface)]">
                   <Building2 className="w-3.5 h-3.5 text-[var(--color-primary)]" />
                   Opening Balance
                 </span>
               </td>
+              <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">—</td>
               <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">
                 Initial balance registered ({party.openingBalanceType === 'to_receive' ? 'Receivable from Party' : 'Payable to Party'})
               </td>
@@ -227,13 +227,14 @@ export function PartyStatementLedger({
                 </td>
               </tr>
             ) : (
-              filtered.map((entry) => {
+              [...filtered].reverse().map((entry) => {
                 const { Icon, tone } = rowVisual(entry);
                 const isOrder = entry.kind === 'sale' || entry.kind === 'purchase';
                 const muted = entry.status === 'cancelled' || entry.status === 'not_posted';
                 const journalChip = entry.journalVoucher && entry.journalVoucher.status !== 'cancelled'
                   ? entry.journalVoucher.voucherNumber
                   : undefined;
+                const stageLines = entryStageLines(entry);
                 return (
                   <tr
                     key={entry.id}
@@ -245,21 +246,6 @@ export function PartyStatementLedger({
                     <td className="py-3 px-4 whitespace-nowrap text-[var(--color-on-surface)] font-medium">
                       {formatDate(entry.date)}
                     </td>
-                    <td className="py-3 px-3">
-                      <p className="font-mono font-bold text-[var(--color-on-surface)] whitespace-nowrap">
-                        {entry.documentNumber}
-                      </p>
-                      {entry.stageChip && (
-                        <p className="text-[9px] uppercase font-bold tracking-wide text-[var(--color-on-surface-variant)] mt-0.5">
-                          {entry.stageChip}
-                        </p>
-                      )}
-                      {journalChip && (
-                        <p className="text-[9px] font-mono text-[var(--color-outline)] mt-0.5">
-                          Vch: {journalChip}
-                        </p>
-                      )}
-                    </td>
                     <td className="py-3 px-3 text-[var(--color-on-surface)] max-w-xs">
                       <p className={`inline-flex items-center gap-1.5 font-bold text-[11px] uppercase tracking-wide ${tone}`}>
                         <Icon className="w-3.5 h-3.5 shrink-0" />
@@ -269,6 +255,38 @@ export function PartyStatementLedger({
                         <p className="font-medium text-[var(--color-on-surface-variant)] truncate mt-0.5">
                           {entry.particulars}
                         </p>
+                      )}
+                      {journalChip && (
+                        <p className="text-[9px] font-mono text-[var(--color-outline)] mt-0.5">
+                          Vch: {journalChip}
+                        </p>
+                      )}
+                    </td>
+                    {/* Stages — every issued stage with its document number,
+                        stacked; "—" for payments / standalone vouchers */}
+                    <td className="py-3 px-3 align-top">
+                      {stageLines.length === 0 ? (
+                        <span className="text-[var(--color-on-surface-variant)] font-mono">—</span>
+                      ) : (
+                        <div className="space-y-1">
+                          {stageLines.map((s, idx) => {
+                            const isCurrent = idx === stageLines.length - 1;
+                            const label = s.label.replace(/ \(legacy\)/, '');
+                            return (
+                              <p key={`${s.stageType}-${s.number}-${idx}`} className="leading-tight whitespace-nowrap">
+                                <span
+                                  className={`text-[10px] font-bold ${isCurrent ? 'text-[var(--color-primary)]' : 'text-[var(--color-on-surface-variant)]'}`}
+                                >
+                                  {label}
+                                </span>
+                                <span className="text-[var(--color-outline)]"> · </span>
+                                <span className={`font-mono text-[10px] ${isCurrent ? 'font-bold text-[var(--color-on-surface)]' : 'text-[var(--color-on-surface-variant)]'}`}>
+                                  {s.number}
+                                </span>
+                              </p>
+                            );
+                          })}
+                        </div>
                       )}
                     </td>
                     <td className="py-3 px-3 font-mono text-[var(--color-on-surface-variant)] max-w-[140px] truncate">

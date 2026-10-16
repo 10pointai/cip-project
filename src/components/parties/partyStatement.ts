@@ -343,3 +343,36 @@ export function formatLedgerBalance(balance: number): string {
   const side = balance >= 0 ? 'Dr' : 'Cr';
   return `${abs.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${side}`;
 }
+
+/** One line of the ledger's STACKED Stages column: every stage the
+ *  sale/purchase has issued, in ladder order, with its document number.
+ *  Payment / standalone-voucher rows have no stages (empty array). */
+export interface LedgerStageLine {
+  stageType: string;
+  label: string;
+  number: string;
+  date: string;
+  totalAmount: number;
+}
+
+export function entryStageLines(entry: PartyLedgerEntry): LedgerStageLine[] {
+  if (entry.kind === 'sale') {
+    return (entry.sale?.stages || []).map((st) => ({
+      stageType: st.stageType,
+      label: SALES_STAGE_LABELS[st.stageType] || st.stageType.replace(/_/g, ' '),
+      number: st.stageNumber,
+      date: st.date,
+      totalAmount: st.totalAmount,
+    }));
+  }
+  if (entry.kind === 'purchase') {
+    return (entry.purchase?.stages || []).map((st) => ({
+      stageType: st.stageType,
+      label: PURCHASE_STAGE_LABELS[st.stageType] || st.stageType.replace(/_/g, ' '),
+      number: st.stageNumber,
+      date: st.date,
+      totalAmount: st.totalAmount,
+    }));
+  }
+  return [];
+}
