@@ -1,35 +1,41 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   X,
   Phone,
   MessageSquare,
   Mail,
   MapPin,
-  Building2,
-  Calendar,
-  CreditCard,
-  Printer,
-  PlusCircle,
+  Clock,
   ArrowDownLeft,
   ArrowUpRight,
   Edit2,
-  FileText,
-  Clock,
-  ShieldCheck,
-  AlertTriangle,
+  Printer,
 } from 'lucide-react';
-import { Party, Transaction, CompanySettings, Order } from '../../types';
-import { formatCurrency, formatDate } from '../../utils/formatters';
+import { Party, Transaction, CompanySettings, Sale, Purchase, CashBankAccount } from '../../types';
+import { formatCurrency } from '../../utils/formatters';
 import { PrintStatementModal } from '../common/PrintStatementModal';
 import { useAuth } from '../../context/AuthContext';
 import { cloudStore as localDb } from '../../services/cloudStore';
+import { PartyLedgerEntry, buildPartyStatement, statementToVoucherTransactions } from './partyStatement';
+import { PartyStatementSummaryCards } from './PartyStatementSummaryCards';
+import { PartyStatementLedger } from './PartyStatementLedger';
+import { OrderDocumentsViewerModal } from '../orders/OrderDocumentsViewerModal';
+import { PaymentVoucherDetailModal } from './PaymentVoucherDetailModal';
+import { saleToDisplay, purchaseToDisplay, OrderDisplay } from '../orders/orderDisplay';
 
+/**
+ * Dashboard party quick-view — a shim over the SHARED party statement
+ * components (same ledger, same detail modals as the Parties module's
+ * full detail screen), wrapped in the modal shell the dashboard renders.
+ */
 interface PartyDetailModalProps {
   isOpen: boolean;
   onClose: () => void;
   party: Party | null;
   transactions: Transaction[];
-  orders?: Order[];
+  sales?: Sale[];
+  purchases?: Purchase[];
+  accounts?: CashBankAccount[];
   settings: CompanySettings;
   onEdit: (party: Party) => void;
   onRecordPayment: (partyId: string, type: 'payment_in' | 'payment_out') => void;
@@ -40,7 +46,9 @@ export function PartyDetailModal({
   onClose,
   party,
   transactions,
-  orders,
+  sales,
+  purchases,
+  accounts,
   settings,
   onEdit,
   onRecordPayment,
@@ -49,47 +57,25 @@ export function PartyDetailModal({
   const canManageParties = hasPermission('manage_parties');
   const canRecordPayments = hasPermission('record_payments');
 
-  const [filterType, setFilterType] = useState<string>('all');
   const [isPrintOpen, setIsPrintOpen] = useState(false);
+  const [detailEntry, setDetailEntry] = useState<PartyLedgerEntry | null>(null);
+
+  const statement = useMemo(
+    () =>
+      party
+        ? buildPartyStatement({
+            party,
+            sales: sales || localDb.getSales(),
+            purchases: purchases || localDb.getPurchases(),
+            transactions,
+          })
+        : { party: party as Party, openingBalance: 0, rows: [] },
+    [party, sales, purchases, transactions],
+  );
 
   if (!isOpen || !party) return null;
 
-  const rawTxList = transactions.filter((t) => t.partyId === party.id);
-  const ordersList = (orders || localDb.getOrders()).filter(
-    (o) => o.partyId === party.id && o.status !== 'cancelled'
-  );
-
-  const orderTxItems: Transaction[] = ordersList.map((o) => {
-    const isSales = o.type === 'sales';
-    const itemsSummary = o.items && o.items.length > 0
-      ? o.items.map((i) => `${i.itemName} (${i.quantity} ${i.unit})`).join(', ')
-      : 'Materials / Goods';
-
-    return {
-      id: o.id,
-      voucherNumber: o.orderNumber,
-      partyId: o.partyId,
-      partyName: o.partyName,
-      partyType: party.type,
-      type: isSales ? 'sale_invoice' : 'purchase_bill',
-      amount: Number(o.totalAmount) || 0,
-      date: o.date,
-      accountId: o.accountId,
-      accountName: o.accountName,
-      paymentMode: o.paymentMode,
-      referenceNumber: o.vehicleNo ? `Veh: ${o.vehicleNo}` : (o.accountName ? `A/c: ${o.accountName}` : o.orderNumber),
-      materialOrService: itemsSummary,
-      description: `${isSales ? (o.stage ? `Sales Order [${o.stage.replace('_', ' ').toUpperCase()}]` : 'Sales Order') : 'Purchase Order'} • Payment: ${(o.paymentMode || 'bank_transfer').replace('_', ' ').toUpperCase()}${o.accountName ? ` (${o.accountName})` : ''}${o.notes ? ` • ${o.notes}` : ''}`,
-      status: o.paymentStatus || 'paid',
-      createdAt: o.createdAt,
-    };
-  });
-
-  const allPartyEntries = [...rawTxList, ...orderTxItems];
-
-  const partyTxs = allPartyEntries
-    .filter((t) => (filterType === 'all' ? true : t.type === filterType))
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  const currencySymbol = settings.currency.symbol;
 
   // Clean WhatsApp phone number
   const cleanPhone = party.phone.replace(/[^0-9]/g, '');
@@ -99,7 +85,6 @@ export function PartyDetailModal({
 
   const isReceivable = party.currentBalance > 0;
   const isPayable = party.currentBalance < 0;
-  const isSettled = party.currentBalance === 0;
 
   const creditUsedPct = party.creditLimit > 0 ? Math.min(100, Math.round((Math.abs(party.currentBalance) / party.creditLimit) * 100)) : 0;
 
@@ -202,7 +187,7 @@ export function PartyDetailModal({
                     ? 'bg-[var(--color-primary-container)] border-[var(--color-primary)]/20'
                     : isPayable
                     ? 'bg-[var(--color-error-container)] border-[var(--color-error)]/20'
-                    : 'bg-[var(--color-surface-container)] border-[var(--color-outline-variant)]'
+                    : 'bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)]'
                 }`}
               >
                 <div className="flex justify-between items-start">
@@ -327,141 +312,15 @@ export function PartyDetailModal({
               </div>
             )}
 
-            {/* Statement of Account / Ledger Table */}
-            <div className="space-y-3">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <div>
-                  <h3 className="text-sm font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
-                    Statement of Account / Transaction Ledger
-                  </h3>
-                  <p className="text-xs text-[var(--color-on-surface-variant)]">History of all bills, dispatches, receipts, and payments</p>
-                </div>
-
-                {/* Filter chips */}
-                <div className="flex items-center gap-1 bg-[var(--color-surface-container)] p-1 rounded-full border border-[var(--color-outline-variant)] text-xs">
-                  {[
-                    { id: 'all', label: 'All Vouchers' },
-                    { id: 'sale_invoice', label: 'Sale Invoices' },
-                    { id: 'purchase_bill', label: 'Purchase Bills' },
-                    { id: 'payment_in', label: 'Receipts In' },
-                    { id: 'payment_out', label: 'Payments Out' },
-                  ].map((tab) => (
-                    <button
-                      key={tab.id}
-                      onClick={() => setFilterType(tab.id)}
-                      className={`px-3 py-1 rounded-full font-medium transition-colors ${
-                        filterType === tab.id
-                          ? 'bg-[var(--color-surface-container-lowest)] text-[var(--color-primary)] shadow-2xs font-bold'
-                          : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
-                      }`}
-                    >
-                      {tab.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Transactions Table */}
-              <div className="border border-[var(--color-outline-variant)] rounded-2xl overflow-hidden bg-[var(--color-surface-container-lowest)] shadow-2xs">
-                <table className="w-full text-left text-xs border-collapse">
-                  <thead>
-                    <tr className="bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-                      <th className="py-3 px-3">Date</th>
-                      <th className="py-3 px-3">Voucher #</th>
-                      <th className="py-3 px-3">Voucher Type</th>
-                      <th className="py-3 px-3">Material / Description</th>
-                      <th className="py-3 px-3 text-right">Amount</th>
-                      <th className="py-3 px-3 text-center">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[var(--color-outline-variant)]">
-                    {/* Opening balance indicator row */}
-                    <tr className="bg-[var(--color-surface-container)]/30">
-                      <td className="py-2.5 px-3 text-[var(--color-on-surface-variant)]">{formatDate(party.createdAt, 'short')}</td>
-                      <td className="py-2.5 px-3 font-mono font-medium text-[var(--color-on-surface-variant)]">OPENING</td>
-                      <td className="py-2.5 px-3">
-                        <span className="font-semibold text-[var(--color-on-surface)]">Opening Balance</span>
-                      </td>
-                      <td className="py-2.5 px-3 text-[var(--color-on-surface-variant)]">
-                        Initial balance entered upon party creation ({party.openingBalanceType === 'to_receive' ? 'Receivable' : 'Payable'})
-                      </td>
-                      <td className="py-2.5 px-3 text-right font-mono font-bold text-[var(--color-on-surface)]">
-                        {formatCurrency(party.openingBalance, settings.currency.symbol)}
-                      </td>
-                      <td className="py-2.5 px-3 text-center">
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border border-[var(--color-outline-variant)]">
-                          Initial
-                        </span>
-                      </td>
-                    </tr>
-
-                    {partyTxs.length === 0 ? (
-                      <tr>
-                        <td colSpan={6} className="py-8 text-center text-[var(--color-outline)] italic">
-                          No transactions found matching the filter.
-                        </td>
-                      </tr>
-                    ) : (
-                      partyTxs.map((tx) => (
-                        <tr key={tx.id} className="hover:bg-[var(--color-surface-container)]/50 transition-colors">
-                          <td className="py-3 px-3 whitespace-nowrap text-[var(--color-on-surface)] font-medium">
-                            {formatDate(tx.date, 'short')}
-                          </td>
-                          <td className="py-3 px-3 font-mono font-bold text-[var(--color-on-surface)]">{tx.voucherNumber}</td>
-                          <td className="py-3 px-3">
-                            <span
-                              className={`inline-flex items-center gap-1 font-bold text-[11px] uppercase ${
-                                tx.type === 'sale_invoice'
-                                  ? 'text-[var(--color-primary)]'
-                                  : tx.type === 'purchase_bill'
-                                  ? 'text-[var(--color-secondary)]'
-                                  : tx.type === 'payment_in'
-                                  ? 'text-[var(--color-success)]'
-                                  : 'text-[var(--color-error)]'
-                              }`}
-                            >
-                              {tx.type === 'sale_invoice' && <FileText className="w-3.5 h-3.5" />}
-                              {tx.type === 'purchase_bill' && <FileText className="w-3.5 h-3.5" />}
-                              {tx.type === 'payment_in' && <ArrowDownLeft className="w-3.5 h-3.5" />}
-                              {tx.type === 'payment_out' && <ArrowUpRight className="w-3.5 h-3.5" />}
-                              {tx.type.replace('_', ' ')}
-                            </span>
-                          </td>
-                          <td className="py-3 px-3 text-[var(--color-on-surface)] max-w-xs">
-                            <p className="font-medium truncate">{tx.materialOrService || tx.description}</p>
-                            {tx.referenceNumber && (
-                              <p className="text-[10px] text-[var(--color-outline)] font-mono">Ref: {tx.referenceNumber}</p>
-                            )}
-                          </td>
-                          <td
-                            className={`py-3 px-3 text-right font-mono font-bold text-sm ${
-                              tx.type === 'sale_invoice' || tx.type === 'payment_out'
-                                ? 'text-[var(--color-primary)]'
-                                : 'text-[var(--color-error)]'
-                            }`}
-                          >
-                            {formatCurrency(tx.amount, settings.currency.symbol)}
-                          </td>
-                          <td className="py-3 px-3 text-center">
-                            <span
-                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                                tx.status === 'paid'
-                                  ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-                                  : tx.status === 'pending'
-                                  ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
-                                  : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
-                              }`}
-                            >
-                              {tx.status}
-                            </span>
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            {/* Statement of Account — the shared doc-centric ledger (identical
+                to the Parties module's detail screen) */}
+            <PartyStatementLedger
+              party={party}
+              statement={statement}
+              currencySymbol={currencySymbol}
+              onOpenOrder={(entry) => setDetailEntry(entry)}
+              onOpenVoucher={(entry) => setDetailEntry(entry)}
+            />
 
             {party.notes && (
               <div className="p-3 bg-[var(--color-surface-container)] rounded-xl border border-[var(--color-outline-variant)] text-xs text-[var(--color-on-surface-variant)]">
@@ -473,12 +332,54 @@ export function PartyDetailModal({
         </div>
       </div>
 
-      {/* Printable Statement Modal */}
+      {/* Click-through: sale/purchase → read-only stage document viewer */}
+      {(() => {
+        if (!detailEntry) return null;
+        if (detailEntry.kind === 'sale' && detailEntry.sale) {
+          const order: OrderDisplay = saleToDisplay(detailEntry.sale);
+          return (
+            <OrderDocumentsViewerModal
+              isOpen
+              onClose={() => setDetailEntry(null)}
+              order={order}
+              currencyCode={settings.currency?.code}
+            />
+          );
+        }
+        if (detailEntry.kind === 'purchase' && detailEntry.purchase) {
+          const order: OrderDisplay = purchaseToDisplay(detailEntry.purchase);
+          return (
+            <OrderDocumentsViewerModal
+              isOpen
+              onClose={() => setDetailEntry(null)}
+              order={order}
+              currencyCode={settings.currency?.code}
+            />
+          );
+        }
+        if (detailEntry.transaction) {
+          const accountName = detailEntry.transaction.accountId
+            ? (accounts || localDb.getAccounts()).find((a) => a.id === detailEntry.transaction!.accountId)?.name
+            : undefined;
+          return (
+            <PaymentVoucherDetailModal
+              isOpen
+              onClose={() => setDetailEntry(null)}
+              transaction={detailEntry.transaction}
+              accountName={accountName}
+              currencySymbol={currencySymbol}
+            />
+          );
+        }
+        return null;
+      })()}
+
+      {/* Printable Statement Modal (fed the underlying active vouchers) */}
       <PrintStatementModal
         isOpen={isPrintOpen}
         onClose={() => setIsPrintOpen(false)}
         party={party}
-        transactions={transactions.filter((t) => t.partyId === party.id)}
+        transactions={statementToVoucherTransactions(statement)}
         settings={settings}
       />
     </>

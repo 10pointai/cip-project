@@ -1,0 +1,330 @@
+import React, { useMemo, useState } from 'react';
+import {
+  Search,
+  FileText,
+  ArrowDownLeft,
+  ArrowUpRight,
+  Building2,
+  Receipt,
+  ClipboardList,
+  ChevronRight,
+} from 'lucide-react';
+import { Party } from '../../types';
+import { formatCurrency, formatDate } from '../../utils/formatters';
+import { PartyLedgerEntry, PartyStatement, formatLedgerBalance } from './partyStatement';
+
+/**
+ * Statement of Account & Ledger — the doc-centric party list. One row per
+ * sale, purchase and payment (plus standalone vouchers), each row
+ * click-through to its full story; the opening-balance row seeds the Dr/Cr
+ * running balance.
+ */
+interface PartyStatementLedgerProps {
+  party: Party;
+  statement: PartyStatement;
+  currencySymbol: string;
+  /** Click-through for a payment / other-voucher row */
+  onOpenVoucher: (entry: PartyLedgerEntry) => void;
+  /** Click-through for a sale/purchase row (opens the document viewer) */
+  onOpenOrder: (entry: PartyLedgerEntry) => void;
+}
+
+type FilterChip = 'all' | 'sales' | 'purchases' | 'payments_in' | 'payments_out' | 'other' | 'pending';
+
+const FILTER_TABS: Array<{ id: FilterChip; label: string }> = [
+  { id: 'all', label: 'All' },
+  { id: 'sales', label: 'Sales' },
+  { id: 'purchases', label: 'Purchases' },
+  { id: 'payments_in', label: 'Payments In' },
+  { id: 'payments_out', label: 'Payments Out' },
+  { id: 'other', label: 'Other' },
+  { id: 'pending', label: 'Pending Dues' },
+];
+
+/** Row-level icon + tint per document kind/type */
+function rowVisual(entry: PartyLedgerEntry): { Icon: any; tone: string } {
+  if (entry.kind === 'sale') return { Icon: FileText, tone: 'text-[var(--color-primary)]' };
+  if (entry.kind === 'purchase') return { Icon: ClipboardList, tone: 'text-[var(--color-secondary)]' };
+  if (entry.kind === 'payment') {
+    return entry.transaction?.type === 'payment_in'
+      ? { Icon: ArrowDownLeft, tone: 'text-[var(--color-success)]' }
+      : { Icon: ArrowUpRight, tone: 'text-[var(--color-error)]' };
+  }
+  const type = entry.transaction?.type;
+  if (type === 'payment_in' || type === 'payment_out') {
+    return type === 'payment_in'
+      ? { Icon: ArrowDownLeft, tone: 'text-[var(--color-success)]' }
+      : { Icon: ArrowUpRight, tone: 'text-[var(--color-error)]' };
+  }
+  return { Icon: Receipt, tone: 'text-[var(--color-on-surface-variant)]' };
+}
+
+function statusPillClass(status: PartyLedgerEntry['status']): string {
+  switch (status) {
+    case 'paid':
+    case 'settled':
+      return 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]';
+    case 'pending':
+    case 'partially_paid':
+      return 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]';
+    case 'cancelled':
+      return 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]';
+    default:
+      return 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]';
+  }
+}
+
+export function PartyStatementLedger({
+  party,
+  statement,
+  currencySymbol,
+  onOpenVoucher,
+  onOpenOrder,
+}: PartyStatementLedgerProps) {
+  const [filterType, setFilterType] = useState<FilterChip>('all');
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const filtered = useMemo(() => {
+    return statement.rows
+      .filter((entry) => {
+        if (filterType === 'all') return true;
+        if (filterType === 'sales') return entry.kind === 'sale';
+        if (filterType === 'purchases') return entry.kind === 'purchase';
+        if (filterType === 'other') return entry.kind === 'voucher';
+        if (filterType === 'payments_in')
+          return entry.kind === 'payment' && entry.transaction?.type === 'payment_in';
+        if (filterType === 'payments_out')
+          return entry.kind === 'payment' && entry.transaction?.type === 'payment_out';
+        if (filterType === 'pending') {
+          const statusPending = entry.status === 'pending' || entry.status === 'partially_paid';
+          const postedWithOutstanding =
+            entry.isPosted && entry.outstanding > 0
+            && entry.status !== 'paid' && entry.status !== 'settled' && entry.status !== 'cancelled';
+          return statusPending || postedWithOutstanding;
+        }
+        return true;
+      })
+      .filter((entry) => {
+        if (!searchQuery.trim()) return true;
+        const q = searchQuery.toLowerCase();
+        return (
+          entry.documentNumber.toLowerCase().includes(q) ||
+          entry.typeLabel.toLowerCase().includes(q) ||
+          (entry.stageChip && entry.stageChip.toLowerCase().includes(q)) ||
+          (entry.particulars && entry.particulars.toLowerCase().includes(q)) ||
+          (entry.reference && entry.reference.toLowerCase().includes(q))
+        );
+      });
+  }, [statement.rows, filterType, searchQuery]);
+
+  return (
+    <div className="bg-[var(--color-surface-container-lowest)] rounded-[24px] border border-[var(--color-outline-variant)] shadow-xs overflow-hidden space-y-3">
+      {/* Table Header Controls */}
+      <div className="p-4 border-b border-[var(--color-outline-variant)] flex flex-col md:flex-row md:items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
+            Statement of Account & Ledger
+          </h3>
+          <p className="text-xs text-[var(--color-on-surface-variant)]">
+            Every {party.name} sale, purchase and payment in one chronological story — click any row for the full document
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Search inside ledger */}
+          <div className="relative min-w-[220px]">
+            <Search className="w-3.5 h-3.5 text-[var(--color-outline)] absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              placeholder="Search document #, item, ref..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full pl-8 pr-3 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] placeholder:text-[var(--color-outline)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+            />
+          </div>
+
+          {/* Filter Pills */}
+          <div className="flex items-center gap-1 bg-[var(--color-surface-container)] p-0.5 rounded-full border border-[var(--color-outline-variant)] text-xs overflow-x-auto max-w-full">
+            {FILTER_TABS.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setFilterType(tab.id)}
+                className={`px-3 py-1 rounded-full font-semibold transition-colors whitespace-nowrap ${
+                  filterType === tab.id
+                    ? 'bg-[var(--color-surface-container-lowest)] text-[var(--color-primary)] shadow-xs'
+                    : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Scrollable Ledger Table */}
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-xs border-collapse min-w-[1020px]">
+          <thead>
+            <tr className="bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
+              <th className="py-3 px-4">Date</th>
+              <th className="py-3 px-3">Document #</th>
+              <th className="py-3 px-3">Particulars</th>
+              <th className="py-3 px-3">Reference</th>
+              <th className="py-3 px-3 text-right text-[var(--color-primary)]">Debit (Dr / Sales / We Paid)</th>
+              <th className="py-3 px-3 text-right text-[var(--color-success)]">Credit (Cr / Purchases / Received)</th>
+              <th className="py-3 px-3 text-right">Running Balance</th>
+              <th className="py-3 px-4 text-center">Status</th>
+              <th className="py-3 px-2 w-6"></th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[var(--color-outline-variant)]">
+            {/* Opening Balance Row */}
+            <tr className="bg-[var(--color-surface-container)]/40 font-semibold">
+              <td className="py-3 px-4 text-[var(--color-on-surface)]">
+                {formatDate(party.createdAt)}
+              </td>
+              <td className="py-3 px-3 font-mono font-bold text-[var(--color-on-surface-variant)]">
+                OPENING
+              </td>
+              <td className="py-3 px-3">
+                <span className="inline-flex items-center gap-1 font-bold text-[var(--color-on-surface)]">
+                  <Building2 className="w-3.5 h-3.5 text-[var(--color-primary)]" />
+                  Opening Balance
+                </span>
+              </td>
+              <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">
+                Initial balance registered ({party.openingBalanceType === 'to_receive' ? 'Receivable from Party' : 'Payable to Party'})
+              </td>
+              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-primary)]">
+                {party.openingBalanceType === 'to_receive' ? formatCurrency(party.openingBalance, currencySymbol) : '—'}
+              </td>
+              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-success)]">
+                {party.openingBalanceType === 'to_pay' ? formatCurrency(party.openingBalance, currencySymbol) : '—'}
+              </td>
+              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-on-surface)]">
+                {formatCurrency(party.openingBalance, currencySymbol)}{' '}
+                <span className="text-[9px] uppercase font-normal">
+                  {party.openingBalanceType === 'to_receive' ? 'Dr' : 'Cr'}
+                </span>
+              </td>
+              <td className="py-3 px-4 text-center">
+                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]">
+                  Initial
+                </span>
+              </td>
+              <td className="py-3 px-2"></td>
+            </tr>
+
+            {/* Document-ledger rows */}
+            {filtered.length === 0 ? (
+              <tr>
+                <td colSpan={9} className="py-10 text-center text-xs text-[var(--color-on-surface-variant)] italic">
+                  {statement.rows.length === 0
+                    ? 'No sales, purchases or payments recorded for this party yet.'
+                    : 'No documents found matching your search or active filter.'}
+                </td>
+              </tr>
+            ) : (
+              filtered.map((entry) => {
+                const { Icon, tone } = rowVisual(entry);
+                const isOrder = entry.kind === 'sale' || entry.kind === 'purchase';
+                const muted = entry.status === 'cancelled' || entry.status === 'not_posted';
+                const journalChip = entry.journalVoucher && entry.journalVoucher.status !== 'cancelled'
+                  ? entry.journalVoucher.voucherNumber
+                  : undefined;
+                return (
+                  <tr
+                    key={entry.id}
+                    onClick={() => (isOrder ? onOpenOrder(entry) : onOpenVoucher(entry))}
+                    className={`hover:bg-[var(--color-surface-container)]/50 transition-colors cursor-pointer group ${
+                      muted ? 'opacity-60' : ''
+                    }`}
+                  >
+                    <td className="py-3 px-4 whitespace-nowrap text-[var(--color-on-surface)] font-medium">
+                      {formatDate(entry.date)}
+                    </td>
+                    <td className="py-3 px-3">
+                      <p className="font-mono font-bold text-[var(--color-on-surface)] whitespace-nowrap">
+                        {entry.documentNumber}
+                      </p>
+                      {entry.stageChip && (
+                        <p className="text-[9px] uppercase font-bold tracking-wide text-[var(--color-on-surface-variant)] mt-0.5">
+                          {entry.stageChip}
+                        </p>
+                      )}
+                      {journalChip && (
+                        <p className="text-[9px] font-mono text-[var(--color-outline)] mt-0.5">
+                          Vch: {journalChip}
+                        </p>
+                      )}
+                    </td>
+                    <td className="py-3 px-3 text-[var(--color-on-surface)] max-w-xs">
+                      <p className={`inline-flex items-center gap-1.5 font-bold text-[11px] uppercase tracking-wide ${tone}`}>
+                        <Icon className="w-3.5 h-3.5 shrink-0" />
+                        {entry.typeLabel}
+                      </p>
+                      {entry.particulars && (
+                        <p className="font-medium text-[var(--color-on-surface-variant)] truncate mt-0.5">
+                          {entry.particulars}
+                        </p>
+                      )}
+                    </td>
+                    <td className="py-3 px-3 font-mono text-[var(--color-on-surface-variant)] max-w-[140px] truncate">
+                      {entry.reference || '—'}
+                    </td>
+                    <td className="py-3 px-3 text-right">
+                      <span className="font-mono font-bold text-[var(--color-primary)]">
+                        {entry.debit ? formatCurrency(entry.debit, currencySymbol) : '—'}
+                      </span>
+                      {entry.debit && entry.settledAmount ? (
+                        <p className="text-[9px] font-semibold text-[var(--color-success)] mt-0.5">
+                          Settled {formatCurrency(entry.settledAmount, currencySymbol)}
+                        </p>
+                      ) : null}
+                    </td>
+                    <td className="py-3 px-3 text-right">
+                      <span className="font-mono font-bold text-[var(--color-success)]">
+                        {entry.credit ? formatCurrency(entry.credit, currencySymbol) : '—'}
+                      </span>
+                      {entry.settledAmount && !entry.debit ? (
+                        <p className="text-[9px] font-semibold text-[var(--color-primary)] mt-0.5">
+                          Settled {formatCurrency(entry.settledAmount, currencySymbol)}
+                        </p>
+                      ) : null}
+                    </td>
+                    <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-on-surface)] whitespace-nowrap">
+                      {formatCurrency(Math.abs(entry.runningBalance), currencySymbol)}{' '}
+                      <span className="text-[9px] uppercase font-normal">
+                        {entry.runningBalance > 0 ? 'Dr' : entry.runningBalance < 0 ? 'Cr' : ''}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      <span
+                        className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider whitespace-nowrap ${statusPillClass(entry.status)}`}
+                      >
+                        {entry.status.replace('_', ' ')}
+                      </span>
+                    </td>
+                    <td className="py-3 px-2">
+                      <ChevronRight className="w-3.5 h-3.5 text-[var(--color-outline)] opacity-0 group-hover:opacity-100 transition-opacity" />
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Site Notes & Additional Meta */}
+      {party.notes && (
+        <div className="p-4 bg-[var(--color-surface-container)] border-t border-[var(--color-outline-variant)] text-xs text-[var(--color-on-surface-variant)]">
+          <span className="font-bold text-[var(--color-on-surface)]">Site Instructions & Plant Notes: </span>
+          {party.notes}
+        </div>
+      )}
+    </div>
+  );
+}

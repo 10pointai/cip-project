@@ -18,7 +18,7 @@ import {
   Sparkles,
   CreditCard,
 } from 'lucide-react';
-import { Party, Transaction, CompanySettings, PartyType, PartyCategory, Order, CashBankAccount } from '../../types';
+import { Party, Transaction, CompanySettings, PartyType, PartyCategory, Sale, Purchase, CashBankAccount } from '../../types';
 import { formatCurrency, formatCompactCurrency } from '../../utils/formatters';
 import { PartyFormModal } from './PartyFormModal';
 import { BulkPartyEntryModal } from './BulkPartyEntryModal';
@@ -30,7 +30,9 @@ import { useAuth } from '../../context/AuthContext';
 interface PartiesViewProps {
   parties: Party[];
   transactions: Transaction[];
-  orders?: Order[];
+  /** Relational sale/purchase masters feeding the statement ledger */
+  sales?: Sale[];
+  purchases?: Purchase[];
   settings: CompanySettings;
   accounts?: CashBankAccount[];
   onAddParty: (partyData: any) => void;
@@ -43,7 +45,8 @@ interface PartiesViewProps {
 export function PartiesView({
   parties,
   transactions,
-  orders,
+  sales,
+  purchases,
   settings,
   accounts,
   onAddParty,
@@ -163,7 +166,9 @@ export function PartiesView({
         <PartyDetailView
           party={selectedParty}
           transactions={transactions}
-          orders={orders}
+          sales={sales}
+          purchases={purchases}
+          accounts={accounts}
           settings={settings}
           onBack={() => setSelectedPartyId(null)}
           onEdit={(party) => {

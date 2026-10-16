@@ -445,7 +445,8 @@ function AppContent() {
             <PartiesView
               parties={parties}
               transactions={transactions}
-              orders={orders}
+              sales={sales}
+              purchases={purchases}
               settings={settings}
               accounts={accounts}
               onAddParty={handleAddParty}
@@ -607,6 +608,9 @@ function AppContent() {
         onClose={() => setSelectedPartyForDetail(null)}
         party={selectedPartyForDetail}
         transactions={transactions}
+        sales={sales}
+        purchases={purchases}
+        accounts={accounts}
         settings={settings}
         onEdit={(party) => {
           setEditingParty(party);

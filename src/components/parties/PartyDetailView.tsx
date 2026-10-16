@@ -28,17 +28,27 @@ import {
   FolderOpen,
   Paperclip,
 } from 'lucide-react';
-import { Party, Transaction, CompanySettings, Order } from '../../types';
-import { formatCurrency, formatDate } from '../../utils/formatters';
+import { Party, Transaction, CompanySettings, CashBankAccount, Sale, Purchase } from '../../types';
+import { formatDate } from '../../utils/formatters';
 import { PrintStatementModal } from '../common/PrintStatementModal';
 import { EvidenceManager } from '../evidence/EvidenceManager';
 import { useAuth } from '../../context/AuthContext';
 import { cloudStore as localDb } from '../../services/cloudStore';
+import { PartyLedgerEntry, buildPartyStatement, statementToVoucherTransactions } from './partyStatement';
+import { PartyStatementSummaryCards } from './PartyStatementSummaryCards';
+import { PartyStatementLedger } from './PartyStatementLedger';
+import { OrderDocumentsViewerModal } from '../orders/OrderDocumentsViewerModal';
+import { PaymentVoucherDetailModal } from './PaymentVoucherDetailModal';
+import { saleToDisplay, purchaseToDisplay, OrderDisplay } from '../orders/orderDisplay';
 
 interface PartyDetailViewProps {
   party: Party;
   transactions: Transaction[];
-  orders?: Order[];
+  /** Relational sale/purchase masters — the statement's document rows */
+  sales?: Sale[];
+  purchases?: Purchase[];
+  /** Cash/Bank accounts for payment-voucher lookups */
+  accounts?: CashBankAccount[];
   settings: CompanySettings;
   onBack: () => void;
   onEdit: (party: Party) => void;
@@ -48,7 +58,9 @@ interface PartyDetailViewProps {
 export function PartyDetailView({
   party,
   transactions,
-  orders,
+  sales,
+  purchases,
+  accounts,
   settings,
   onBack,
   onEdit,
@@ -60,72 +72,23 @@ export function PartyDetailView({
 
   const currencySymbol = settings.currency.symbol;
   const [activeMainTab, setActiveMainTab] = useState<'ledger' | 'evidence'>('ledger');
-  const [filterType, setFilterType] = useState<string>('all');
-  const [ledgerSearchQuery, setLedgerSearchQuery] = useState('');
   const [isPrintOpen, setIsPrintOpen] = useState(false);
+  /** The ledger row currently opened for its detail story */
+  const [detailEntry, setDetailEntry] = useState<PartyLedgerEntry | null>(null);
 
-  // All unified ledger transactions & orders for this party
-  const partyTxs = useMemo(() => {
-    const rawTxList = transactions.filter((t) => t.partyId === party.id);
-    
-    // Convert Party Orders to unified ledger items
-    const ordersList = (orders || localDb.getOrders()).filter(
-      (o) => o.partyId === party.id && o.status !== 'cancelled'
-    );
-
-    const orderTxItems: Transaction[] = ordersList.map((o) => {
-      const isSales = o.type === 'sales';
-      const itemsSummary = o.items && o.items.length > 0
-        ? o.items.map((i) => `${i.itemName} (${i.quantity} ${i.unit})`).join(', ')
-        : 'Materials / Goods';
-
-      return {
-        id: o.id,
-        voucherNumber: o.orderNumber,
-        partyId: o.partyId,
-        partyName: o.partyName,
-        partyType: party.type,
-        type: isSales ? 'sale_invoice' : 'purchase_bill',
-        amount: Number(o.totalAmount) || 0,
-        date: o.date,
-        accountId: o.accountId,
-        accountName: o.accountName,
-        paymentMode: o.paymentMode,
-        referenceNumber: o.vehicleNo ? `Veh: ${o.vehicleNo}` : (o.accountName ? `A/c: ${o.accountName}` : o.orderNumber),
-        materialOrService: itemsSummary,
-        description: `${isSales ? (o.stage ? `Sales Order [${o.stage.replace('_', ' ').toUpperCase()}]` : 'Sales Order') : 'Purchase Order'} • Payment: ${(o.paymentMode || 'bank_transfer').replace('_', ' ').toUpperCase()}${o.accountName ? ` (${o.accountName})` : ''}${o.notes ? ` • ${o.notes}` : ''}`,
-        status: o.paymentStatus || 'paid',
-        createdAt: o.createdAt,
-      };
-    });
-
-    return [...rawTxList, ...orderTxItems];
-  }, [transactions, orders, party.id, party.type]);
-
-  // Filtered transactions based on filter tabs & search query
-  const filteredTxs = useMemo(() => {
-    return partyTxs
-      .filter((t) => {
-        if (filterType === 'all') return true;
-        if (filterType === 'sale_invoice') return t.type === 'sale_invoice';
-        if (filterType === 'purchase_bill') return t.type === 'purchase_bill';
-        if (filterType === 'payment_in') return t.type === 'payment_in';
-        if (filterType === 'payment_out') return t.type === 'payment_out';
-        if (filterType === 'pending') return t.status === 'pending';
-        return true;
-      })
-      .filter((t) => {
-        if (!ledgerSearchQuery.trim()) return true;
-        const q = ledgerSearchQuery.toLowerCase();
-        return (
-          t.voucherNumber.toLowerCase().includes(q) ||
-          (t.materialOrService && t.materialOrService.toLowerCase().includes(q)) ||
-          (t.description && t.description.toLowerCase().includes(q)) ||
-          (t.referenceNumber && t.referenceNumber.toLowerCase().includes(q))
-        );
-      })
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [partyTxs, filterType, ledgerSearchQuery]);
+  // The document-centric statement: one row per sale, purchase and payment
+  // (plus standalone vouchers); internal mirroring vouchers are folded into
+  // their order row so the running balance ties to party.currentBalance.
+  const statement = useMemo(
+    () =>
+      buildPartyStatement({
+        party,
+        sales: sales || localDb.getSales(),
+        purchases: purchases || localDb.getPurchases(),
+        transactions,
+      }),
+    [party, sales, purchases, transactions],
+  );
 
   // Clean WhatsApp phone number
   const cleanPhone = party.phone ? party.phone.replace(/[^0-9]/g, '') : '';
@@ -133,88 +96,9 @@ export function PartyDetailView({
     party.contactPerson || party.name
   )},%20regarding%20our%20account%20statement%20with%20${encodeURIComponent(settings.companyName)}:`;
 
-  const isReceivable = party.currentBalance > 0;
-  const isPayable = party.currentBalance < 0;
-  const isSettled = party.currentBalance === 0;
-
-  const creditUsedPct =
-    party.creditLimit > 0
-      ? Math.min(100, Math.round((Math.abs(party.currentBalance) / party.creditLimit) * 100))
-      : 0;
-
-  // Cumulative financial stats
-  const totalSalesBilled = useMemo(() => {
-    return partyTxs
-      .filter((t) => t.type === 'sale_invoice')
-      .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
-  }, [partyTxs]);
-
-  const totalPurchasesBilled = useMemo(() => {
-    return partyTxs
-      .filter((t) => t.type === 'purchase_bill')
-      .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
-  }, [partyTxs]);
-
-  const totalPaymentsReceived = useMemo(() => {
-    return partyTxs
-      .filter((t) => t.type === 'payment_in')
-      .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
-  }, [partyTxs]);
-
-  const totalPaymentsMade = useMemo(() => {
-    return partyTxs
-      .filter((t) => t.type === 'payment_out')
-      .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
-  }, [partyTxs]);
-
-  // Calculate Running Balances chronologically (oldest to newest)
-  const chronologicalLedger = useMemo(() => {
-    const sortedAsc = [...partyTxs].sort(
-      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
-    );
-
-    let runningBal = party.openingBalanceType === 'to_receive' ? party.openingBalance : -party.openingBalance;
-
-    const calculated = sortedAsc.map((tx) => {
-      let debit = 0;
-      let credit = 0;
-      const amt = Number(tx.amount) || 0;
-
-      if (tx.type === 'sale_invoice' || tx.type === 'payment_out' || tx.type === 'debit_note') {
-        debit = amt;
-        runningBal += amt;
-      } else {
-        credit = amt;
-        runningBal -= amt;
-      }
-
-      return {
-        ...tx,
-        debit,
-        credit,
-        runningBalance: runningBal,
-      };
-    });
-
-    // Return mapped lookup dictionary for quick runningBalance access by id
-    const lookup: Record<string, { debit: number; credit: number; runningBalance: number }> = {};
-    calculated.forEach((item) => {
-      lookup[item.id] = {
-        debit: item.debit,
-        credit: item.credit,
-        runningBalance: item.runningBalance,
-      };
-    });
-    return lookup;
-  }, [partyTxs, party.openingBalance, party.openingBalanceType]);
-
-  // Export Party Ledger to CSV
+  // Export Statement of Account to CSV (documents-first shape)
   const handleExportLedgerCSV = () => {
-    const headers = ['Date', 'Voucher Number', 'Type', 'Description / Material', 'Ref Number', 'Debit', 'Credit', 'Running Balance', 'Status'];
-    
-    // Sort oldest first for readable export
-    const sortedForExport = [...partyTxs].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-    let currentExportBal = party.openingBalanceType === 'to_receive' ? party.openingBalance : -party.openingBalance;
+    const headers = ['Date', 'Document #', 'Stage/Type', 'Particulars', 'Reference', 'Debit', 'Credit', 'Settled', 'Running Balance', 'Status'];
 
     const rows = [
       [
@@ -225,39 +109,29 @@ export function PartyDetailView({
         '""',
         party.openingBalanceType === 'to_receive' ? party.openingBalance : 0,
         party.openingBalanceType === 'to_pay' ? party.openingBalance : 0,
-        currentExportBal,
+        '""',
+        statement.openingBalance,
         '"Initial"',
       ],
-      ...sortedForExport.map((t) => {
-        const amt = Number(t.amount) || 0;
-        let d = 0;
-        let c = 0;
-        if (t.type === 'sale_invoice' || t.type === 'payment_out') {
-          d = amt;
-          currentExportBal += amt;
-        } else {
-          c = amt;
-          currentExportBal -= amt;
-        }
-        return [
-          `"${formatDate(t.date)}"`,
-          `"${t.voucherNumber}"`,
-          `"${t.type.replace('_', ' ').toUpperCase()}"`,
-          `"${(t.materialOrService || t.description || '').replace(/"/g, '""')}"`,
-          `"${t.referenceNumber || ''}"`,
-          d,
-          c,
-          currentExportBal,
-          `"${t.status}"`,
-        ];
-      }),
+      ...statement.rows.map((e) => [
+        `"${formatDate(e.date)}"`,
+        `"${e.documentNumber}"`,
+        `"${(e.stageChip ? `${e.stageChip} — ` : '') + e.typeLabel}"`,
+        `"${(e.particulars || '').replace(/"/g, '""')}"`,
+        `"${e.reference || ''}"`,
+        e.debit,
+        e.credit,
+        e.settledAmount ?? 0,
+        e.runningBalance,
+        `"${e.status}"`,
+      ]),
     ];
 
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `ledger_${party.name.replace(/[^a-zA-Z0-9]/g, '_')}_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `statement_${party.name.replace(/[^a-zA-Z0-9]/g, '_')}_${new Date().toISOString().split('T')[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -414,134 +288,13 @@ export function PartyDetailView({
       </div>
 
       {/* ========================================================================= */}
-      {/* 3. FINANCIAL KPI STATS CARDS                                              */}
+      {/* 3. FINANCIAL KPI STATS CARDS (fed by the document statement)              */}
       {/* ========================================================================= */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        {/* Card 1: Outstanding Balance */}
-        <div
-          className={`p-5 rounded-[24px] border shadow-xs flex flex-col justify-between ${
-            isReceivable
-              ? 'bg-[var(--color-primary-container)] border-[var(--color-primary)]/20 text-[var(--color-on-primary-container)]'
-              : isPayable
-              ? 'bg-[var(--color-error-container)] border-[var(--color-error)]/20 text-[var(--color-on-error-container)]'
-              : 'bg-[var(--color-surface-container)] border-[var(--color-outline-variant)] text-[var(--color-on-surface)]'
-          }`}
-        >
-          <div className="flex justify-between items-start">
-            <div>
-              <p className="text-[11px] font-bold uppercase tracking-wider opacity-80">
-                Outstanding Balance
-              </p>
-              <p className="text-2xl sm:text-3xl font-black mt-1 tracking-tight">
-                {formatCurrency(Math.abs(party.currentBalance), currencySymbol)}
-              </p>
-            </div>
-            <span
-              className={`text-[10px] font-bold px-2.5 py-1 rounded-full uppercase tracking-wider ${
-                isReceivable
-                  ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)]'
-                  : isPayable
-                  ? 'bg-[var(--color-error)] text-[var(--color-on-error)]'
-                  : 'bg-[var(--color-surface-container-highest)] text-[var(--color-on-surface-variant)]'
-              }`}
-            >
-              {isReceivable ? 'Receivable (Dr)' : isPayable ? 'Payable (Cr)' : 'Settled'}
-            </span>
-          </div>
-          <p className="text-xs mt-3 font-medium opacity-90">
-            {isReceivable
-              ? `Party owes ${formatCurrency(party.currentBalance, currencySymbol)} to plant.`
-              : isPayable
-              ? `Plant owes ${formatCurrency(Math.abs(party.currentBalance), currencySymbol)} to party.`
-              : 'All dues and payments are fully settled.'}
-          </p>
-        </div>
-
-        {/* Card 2: Credit Terms & Limit */}
-        <div className="p-5 rounded-[24px] bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] shadow-xs flex flex-col justify-between">
-          <div>
-            <div className="flex justify-between items-center text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-              <span>Credit Terms & Limit</span>
-              <Clock className="w-4 h-4 text-[var(--color-outline)]" />
-            </div>
-            <div className="mt-2 flex items-baseline gap-2">
-              <p className="text-2xl font-black text-[var(--color-on-surface)]">{party.paymentTermsDays} Days</p>
-              <span className="text-xs text-[var(--color-on-surface-variant)] font-medium">
-                Limit: {formatCurrency(party.creditLimit, currencySymbol)}
-              </span>
-            </div>
-          </div>
-
-          {party.creditLimit > 0 ? (
-            <div className="mt-3">
-              <div className="flex justify-between text-[10px] font-bold text-[var(--color-on-surface-variant)] mb-1">
-                <span>Credit Used</span>
-                <span>{creditUsedPct}%</span>
-              </div>
-              <div className="w-full h-2 bg-[var(--color-surface-container-highest)] rounded-full overflow-hidden">
-                <div
-                  className={`h-full rounded-full transition-all duration-500 ${
-                    creditUsedPct > 90
-                      ? 'bg-[var(--color-error)]'
-                      : creditUsedPct > 70
-                      ? 'bg-[var(--color-tertiary)]'
-                      : 'bg-[var(--color-primary)]'
-                  }`}
-                  style={{ width: `${creditUsedPct}%` }}
-                />
-              </div>
-            </div>
-          ) : (
-            <p className="text-xs text-[var(--color-on-surface-variant)] mt-2">
-              Standard net payment terms applied.
-            </p>
-          )}
-        </div>
-
-        {/* Card 3: Total Invoiced Turnover */}
-        <div className="p-5 rounded-[24px] bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] shadow-xs flex flex-col justify-between">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-              Total Invoiced Turnover
-            </span>
-            <div className="w-8 h-8 rounded-full bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)] flex items-center justify-center">
-              <FileText className="w-4 h-4" />
-            </div>
-          </div>
-          <div className="mt-2">
-            <p className="text-2xl font-black text-[var(--color-primary)] tracking-tight">
-              {formatCurrency(totalSalesBilled + totalPurchasesBilled, currencySymbol)}
-            </p>
-            <p className="text-xs text-[var(--color-on-surface-variant)] mt-1">
-              {party.type === 'customer'
-                ? `Total ${formatCurrency(totalSalesBilled, currencySymbol)} sales dispatched`
-                : party.type === 'vendor'
-                ? `Total ${formatCurrency(totalPurchasesBilled, currencySymbol)} supplies received`
-                : 'Lifetime commercial transaction value'}
-            </p>
-          </div>
-        </div>
-
-        {/* Card 4: Total Payments Settled */}
-        <div className="p-5 rounded-[24px] bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] shadow-xs flex flex-col justify-between">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-              Total Payments Cleared
-            </span>
-            <div className="w-8 h-8 rounded-full bg-[var(--color-success-container)] text-[var(--color-on-success-container)] flex items-center justify-center">
-              <Receipt className="w-4 h-4" />
-            </div>
-          </div>
-          <div className="mt-2">
-            <p className="text-2xl font-black text-[var(--color-success)] tracking-tight">
-              {formatCurrency(totalPaymentsReceived + totalPaymentsMade, currencySymbol)}
-            </p>
-            <p className="text-xs text-[var(--color-on-surface-variant)] mt-1">
-              Across {partyTxs.filter((t) => t.type === 'payment_in' || t.type === 'payment_out').length} payment vouchers
-            </p>
-          </div>
-        </div>
-      </div>
+      <PartyStatementSummaryCards
+        party={party}
+        statement={statement}
+        currencySymbol={currencySymbol}
+      />
 
       {/* ========================================================================= */}
       {/* 4. QUICK ACTION BAR FOR RECORDING VOUCHERS & PAYMENTS                      */}
@@ -587,7 +340,7 @@ export function PartyDetailView({
           }`}
         >
           <FileText className="w-4 h-4" />
-          <span>Statement of Account & Ledger ({partyTxs.length})</span>
+          <span>Statement of Account & Ledger ({statement.rows.length})</span>
         </button>
 
         <button
@@ -605,196 +358,14 @@ export function PartyDetailView({
       </div>
 
       {activeMainTab === 'ledger' ? (
-        /* STATEMENT OF ACCOUNT / TRANSACTION LEDGER TABLE (HORIZONTALLY SCROLLABLE) */
-        <div className="bg-[var(--color-surface-container-lowest)] rounded-[24px] border border-[var(--color-outline-variant)] shadow-xs overflow-hidden space-y-3">
-        {/* Table Header Controls */}
-        <div className="p-4 border-b border-[var(--color-outline-variant)] flex flex-col md:flex-row md:items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
-              Statement of Account & Ledger
-            </h3>
-            <p className="text-xs text-[var(--color-on-surface-variant)]">
-              Chronological log of dispatches, procurement, receipts, and payments
-            </p>
-          </div>
-
-          <div className="flex items-center gap-3 flex-wrap">
-            {/* Search inside ledger */}
-            <div className="relative min-w-[220px]">
-              <Search className="w-3.5 h-3.5 text-[var(--color-outline)] absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                placeholder="Search voucher #, material, ref..."
-                value={ledgerSearchQuery}
-                onChange={(e) => setLedgerSearchQuery(e.target.value)}
-                className="w-full pl-8 pr-3 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] placeholder:text-[var(--color-outline)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-              />
-            </div>
-
-            {/* Filter Pills */}
-            <div className="flex items-center gap-1 bg-[var(--color-surface-container)] p-0.5 rounded-full border border-[var(--color-outline-variant)] text-xs overflow-x-auto">
-              {[
-                { id: 'all', label: 'All Logs' },
-                { id: 'sale_invoice', label: 'Sale Invoices' },
-                { id: 'purchase_bill', label: 'Purchase Bills' },
-                { id: 'payment_in', label: 'Receipts In' },
-                { id: 'payment_out', label: 'Payments Out' },
-                { id: 'pending', label: 'Pending Dues' },
-              ].map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setFilterType(tab.id)}
-                  className={`px-3 py-1 rounded-full font-semibold transition-colors whitespace-nowrap ${
-                    filterType === tab.id
-                      ? 'bg-[var(--color-surface-container-lowest)] text-[var(--color-primary)] shadow-xs'
-                      : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
-                  }`}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Scrollable Ledger Table */}
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs border-collapse min-w-[950px]">
-            <thead>
-              <tr className="bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-                <th className="py-3 px-4">Date</th>
-                <th className="py-3 px-3">Voucher #</th>
-                <th className="py-3 px-3">Transaction Type</th>
-                <th className="py-3 px-3">Material / Service / Details</th>
-                <th className="py-3 px-3">Reference / Cheque</th>
-                <th className="py-3 px-3 text-right text-[var(--color-primary)]">Debit (Dr / Sales / Out)</th>
-                <th className="py-3 px-3 text-right text-[var(--color-success)]">Credit (Cr / Receipt / In)</th>
-                <th className="py-3 px-3 text-right">Running Balance</th>
-                <th className="py-3 px-4 text-center">Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[var(--color-outline-variant)]">
-              {/* Opening Balance Row */}
-              <tr className="bg-[var(--color-surface-container)]/40 font-semibold">
-                <td className="py-3 px-4 text-[var(--color-on-surface)]">
-                  {formatDate(party.createdAt)}
-                </td>
-                <td className="py-3 px-3 font-mono font-bold text-[var(--color-on-surface-variant)]">
-                  OPENING
-                </td>
-                <td className="py-3 px-3">
-                  <span className="inline-flex items-center gap-1 font-bold text-[var(--color-on-surface)]">
-                    <Building2 className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-                    Opening Balance
-                  </span>
-                </td>
-                <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">
-                  Initial balance registered ({party.openingBalanceType === 'to_receive' ? 'Receivable from Party' : 'Payable to Party'})
-                </td>
-                <td className="py-3 px-3 font-mono text-[var(--color-outline)]">—</td>
-                <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-primary)]">
-                  {party.openingBalanceType === 'to_receive' ? formatCurrency(party.openingBalance, currencySymbol) : '—'}
-                </td>
-                <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-success)]">
-                  {party.openingBalanceType === 'to_pay' ? formatCurrency(party.openingBalance, currencySymbol) : '—'}
-                </td>
-                <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-on-surface)]">
-                  {formatCurrency(party.openingBalance, currencySymbol)} {party.openingBalanceType === 'to_receive' ? 'Dr' : 'Cr'}
-                </td>
-                <td className="py-3 px-4 text-center">
-                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]">
-                    Initial
-                  </span>
-                </td>
-              </tr>
-
-              {/* Transactions List */}
-              {filteredTxs.length === 0 ? (
-                <tr>
-                  <td colSpan={9} className="py-10 text-center text-xs text-[var(--color-on-surface-variant)] italic">
-                    No transactions found matching your search or active filter.
-                  </td>
-                </tr>
-              ) : (
-                filteredTxs.map((tx) => {
-                  const runningData = chronologicalLedger[tx.id] || { debit: 0, credit: 0, runningBalance: 0 };
-                  const isDebit = tx.type === 'sale_invoice' || tx.type === 'payment_out';
-
-                  return (
-                    <tr key={tx.id} className="hover:bg-[var(--color-surface-container)]/50 transition-colors">
-                      <td className="py-3 px-4 whitespace-nowrap text-[var(--color-on-surface)] font-medium">
-                        {formatDate(tx.date)}
-                      </td>
-                      <td className="py-3 px-3 font-mono font-bold text-[var(--color-on-surface)]">
-                        {tx.voucherNumber}
-                      </td>
-                      <td className="py-3 px-3">
-                        <span
-                          className={`inline-flex items-center gap-1 font-bold text-[11px] uppercase ${
-                            tx.type === 'sale_invoice'
-                              ? 'text-[var(--color-primary)]'
-                              : tx.type === 'purchase_bill'
-                              ? 'text-[var(--color-secondary)]'
-                              : tx.type === 'payment_in'
-                              ? 'text-[var(--color-success)]'
-                              : 'text-[var(--color-error)]'
-                          }`}
-                        >
-                          {tx.type === 'sale_invoice' && <FileText className="w-3.5 h-3.5" />}
-                          {tx.type === 'purchase_bill' && <FileText className="w-3.5 h-3.5" />}
-                          {tx.type === 'payment_in' && <ArrowDownLeft className="w-3.5 h-3.5" />}
-                          {tx.type === 'payment_out' && <ArrowUpRight className="w-3.5 h-3.5" />}
-                          {tx.type.replace('_', ' ')}
-                        </span>
-                      </td>
-                      <td className="py-3 px-3 text-[var(--color-on-surface)] max-w-xs">
-                        <p className="font-medium truncate">{tx.materialOrService || tx.description || '—'}</p>
-                      </td>
-                      <td className="py-3 px-3 font-mono text-[var(--color-on-surface-variant)]">
-                        {tx.referenceNumber || '—'}
-                      </td>
-                      <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-primary)]">
-                        {isDebit ? formatCurrency(tx.amount, currencySymbol) : '—'}
-                      </td>
-                      <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-success)]">
-                        {!isDebit ? formatCurrency(tx.amount, currencySymbol) : '—'}
-                      </td>
-                      <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-on-surface)]">
-                        {formatCurrency(Math.abs(runningData.runningBalance), currencySymbol)}{' '}
-                        <span className="text-[9px] uppercase font-normal">
-                          {runningData.runningBalance > 0 ? 'Dr' : runningData.runningBalance < 0 ? 'Cr' : ''}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        <span
-                          className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                            tx.status === 'paid'
-                              ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-                              : tx.status === 'pending'
-                              ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
-                              : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
-                          }`}
-                        >
-                          {tx.status}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Site Notes & Additional Meta */}
-        {party.notes && (
-          <div className="p-4 bg-[var(--color-surface-container)] border-t border-[var(--color-outline-variant)] text-xs text-[var(--color-on-surface-variant)]">
-            <span className="font-bold text-[var(--color-on-surface)]">Site Instructions & Plant Notes: </span>
-            {party.notes}
-          </div>
-        )}
-      </div>
+        /* STATEMENT OF ACCOUNT — doc-centric ledger with click-through detail */
+        <PartyStatementLedger
+          party={party}
+          statement={statement}
+          currencySymbol={currencySymbol}
+          onOpenOrder={(entry) => setDetailEntry(entry)}
+          onOpenVoucher={(entry) => setDetailEntry(entry)}
+        />
       ) : (
         /* EVIDENCE & DOCUMENTS VAULT TAB */
         <EvidenceManager
@@ -806,12 +377,55 @@ export function PartyDetailView({
         />
       )}
 
-      {/* Printable Statement Modal */}
+      {/* Click-through: sale/purchase → read-only stage document viewer */}
+      {(() => {
+        if (!detailEntry) return null;
+        if (detailEntry.kind === 'sale' && detailEntry.sale) {
+          const order: OrderDisplay = saleToDisplay(detailEntry.sale);
+          return (
+            <OrderDocumentsViewerModal
+              isOpen
+              onClose={() => setDetailEntry(null)}
+              order={order}
+              currencyCode={settings.currency?.code}
+            />
+          );
+        }
+        if (detailEntry.kind === 'purchase' && detailEntry.purchase) {
+          const order: OrderDisplay = purchaseToDisplay(detailEntry.purchase);
+          return (
+            <OrderDocumentsViewerModal
+              isOpen
+              onClose={() => setDetailEntry(null)}
+              order={order}
+              currencyCode={settings.currency?.code}
+            />
+          );
+        }
+        if (detailEntry.transaction) {
+          const accountName = detailEntry.transaction.accountId
+            ? (accounts || localDb.getAccounts()).find((a) => a.id === detailEntry.transaction!.accountId)?.name
+            : undefined;
+          return (
+            <PaymentVoucherDetailModal
+              isOpen
+              onClose={() => setDetailEntry(null)}
+              transaction={detailEntry.transaction}
+              accountName={accountName}
+              currencySymbol={currencySymbol}
+            />
+          );
+        }
+        return null;
+      })()}
+
+      {/* Printable Statement Modal (fed the underlying active vouchers so its
+          voucher-based balance math stays identical to the server's) */}
       <PrintStatementModal
         isOpen={isPrintOpen}
         onClose={() => setIsPrintOpen(false)}
         party={party}
-        transactions={partyTxs}
+        transactions={statementToVoucherTransactions(statement)}
         settings={settings}
       />
     </div>
