@@ -481,6 +481,21 @@ manual SQL, should you prefer to run it yourself:
     current (latest) stage's rows — a quotation's values/dates/numbers never
     change after advancing. Issuing an invoice LOCKS the sale: master edits,
     item edits, new stages and cancel/delete are all refused (HTTP 400).
+  - PARTY STATEMENT OF ACCOUNT REDESIGN (DONE 2026-10-16): the Parties
+    detail screen (and the dashboard party modal) render a document-centric
+    statement — ONE ROW PER SALE, PER PURCHASE AND PER PAYMENT (rows built
+    from the relational masters + standalone vouchers; legacy orders ignored).
+    Rows click through: sale/purchase -> read-only stage document cards (the
+    Sales/Purchases modal's card presentation, extracted into
+    src/components/orders/StageDocumentCards.tsx + OrderDocumentsViewerModal),
+    payments/standalone vouchers -> PaymentVoucherDetailModal. The system's
+    mirroring vouchers (txn-<saleId>-inv/-pay, txn-<purchaseId>-bill/-pay) are
+    HIDDEN as rows and fold their server effects into their order row
+    (src/components/parties/partyStatement.ts) so the Dr/Cr running balance
+    still ties exactly to party.currentBalance; manual invoices/bills and
+    debit/credit notes stay visible. CSV export (new columns: Document #,
+    Stage/Type, Settled) and PrintStatementModal are re-fed from the model
+    (statementToVoucherTransactions expands rows back into active vouchers).
   - Cash & Bank: real bank reconciliation; voucher edit UI; unify balance recalc voucher types.
   - Parties: voucher edit/delete UI; unify client-side balance delta with server logic.
   - Cross-cutting: authenticate /api/sync + /api/health; env-based JWT secret;
