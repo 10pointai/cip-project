@@ -41,15 +41,19 @@ import { cloudStore as localDb } from '../../services/cloudStore';
 import { AddPurchaseModal } from './AddPurchaseModal';
 import { SearchableSelect } from './SearchableSelect';
 import {
-  SALES_STAGE_META,
-  PURCHASE_STAGE_META,
-  StageDocDisplay,
-  PurchaseStageDocDisplay,
   OrderDisplay,
   saleToDisplay,
   purchaseToDisplay,
+  salesStageActionMenu,
+  purchaseStageActionMenu,
+  isSaleLocked,
+  isPurchaseLocked,
+  editLabelFor,
+  purchaseEditLabelFor,
+  canViewProforma,
 } from './orderDisplay';
-import { SaleStageDocCard, PurchaseStageDocCard } from './StageDocumentCards';
+import { OrderDetailModal } from './OrderDetailModal';
+import { OrderDocumentPreviewModal } from './OrderDocumentPreviewModal';
 
 function numberToWords(num: number): string {
   if (num === 0) return 'Zero Rupees Only';
@@ -95,6 +99,10 @@ interface OrdersViewProps {
   onAddPurchaseStage: (id: string, stageInput: any) => any;
   onDeletePurchase: (id: string) => boolean;
   fixedType?: OrderType;
+  /** Deep link from another module (party statement): open this order's
+   *  edit form or issue-stage flow on arrival (nonce re-triggers it) */
+  deepLink?: { orderId: string; action: string; nonce: number } | null;
+  onDeepLinkHandled?: () => void;
 }
 
 export function OrdersView({
@@ -112,6 +120,8 @@ export function OrdersView({
   onAddPurchaseStage,
   onDeletePurchase,
   fixedType,
+  deepLink,
+  onDeepLinkHandled,
 }: OrdersViewProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [typeFilter, setTypeFilter] = useState<'all' | OrderType>('all');
@@ -236,58 +246,6 @@ export function OrdersView({
     };
   }, [rowActionMenuFor]);
 
-  /**
-   * Sales stage hierarchy for the row ⋮ popover. The current (latest issued)
-   * stage gates what can still be issued — the user can NEVER create same-or-
-   * lower documents. Per direction: from quotation -> Sales Order, Proforma,
-   * Invoice; from sales_order -> Proforma + Invoice only (Delivery Note never
-   * appears in this menu); from proforma / delivery_note -> Invoice; from
-   * sales_invoice -> nothing (final).
-   */
-  // Sales stage ladder for the row ⋮ popover (user's exact rules):
-  //   quotation     -> Sales Order (row seeding from quotation), Invoice direct
-  //   sales_order   -> Invoice; "View Proforma" shows the SO as a proforma doc
-  //   sales_invoice -> sale LOCKED: no edit, no further stages, no cancel/delete
-  const salesStageActionMenu = (order: OrderDisplay): Array<{ stageType: SalesStage; label: string; icon: any }> => {
-    const current = order.stage || 'sales_order';
-    const menu: Array<{ stageType: SalesStage; label: string; icon: any }> = [];
-    if (current === 'sales_invoice') return menu; // locked
-    if (current === 'quotation') {
-      menu.push({ stageType: 'sales_order', label: 'Create Sales Order', icon: Layers });
-      menu.push({ stageType: 'sales_invoice', label: 'Issue GST Tax Invoice', icon: FileText });
-    } else {
-      // sales_order (and legacy proforma/delivery_note rows)
-      menu.push({ stageType: 'sales_invoice', label: 'Issue GST Tax Invoice', icon: FileText });
-    }
-    return menu;
-  };
-  const isSaleLocked = (order: OrderDisplay) => (order.stage || 'sales_order') === 'sales_invoice';
-  const editLabelFor = (order: OrderDisplay) =>
-    (order.stage || 'sales_order') === 'quotation' ? 'Edit Quotation' : 'Edit Sales Order';
-
-  // Purchase stage ladder (mirror of the sales rules):
-  //   rfq            -> Create Purchase Order, Record Goods Receiving
-  //   purchase_order -> Record Goods Receiving
-  //   goods_receipt  -> purchase LOCKED: goods received, no edit, no stages
-  const purchaseStageActionMenu = (order: OrderDisplay): Array<{ stageType: PurchaseStage; label: string; icon: any }> => {
-    const current = order.purchaseStage || 'purchase_order';
-    if (current === 'goods_receipt' || order.status === 'cancelled') return []; // locked
-    if (current === 'rfq') {
-      return [
-        { stageType: 'purchase_order', label: 'Create Purchase Order', icon: Layers },
-        { stageType: 'goods_receipt', label: 'Record Goods Receiving', icon: FileCheck },
-      ];
-    }
-    return [{ stageType: 'goods_receipt', label: 'Record Goods Receiving', icon: FileCheck }];
-  };
-  const isPurchaseLocked = (order: OrderDisplay) =>
-    (order.purchaseStage || 'purchase_order') === 'goods_receipt' || order.status === 'cancelled';
-  const purchaseEditLabelFor = (order: OrderDisplay) =>
-    (order.purchaseStage || 'purchase_order') === 'rfq' ? 'Edit Request Quotation' : 'Edit Purchase Order';
-  const canViewProforma = (order: OrderDisplay) => {
-    const c = order.stage || 'sales_order';
-    return c === 'sales_order' || c === 'proforma_invoice' || c === 'delivery_note';
-  };
 
   /**
    * Opens the full sales form modal in STAGE-ISSUE mode: lines are seeded as
@@ -349,60 +307,6 @@ export function OrdersView({
     setFormError(null);
     setIsFormOpen(true);
   };
-
-  /** Opens the commercial-document preview for a SPECIFIC stage doc (its own
-   *  line values/totals), e.g. printing the quotation alone. */
-  const openStageDocPreview = (doc: StageDocDisplay) => {
-    if (!selectedOrder) return;
-    const subtotal = doc.items.reduce((sum, i) => sum + i.quantity * i.rate, 0);
-    const blendedRate = subtotal > 0 ? Math.round((doc.taxAmount / subtotal) * 10000) / 100 : 0;
-    setPreviewOrder({
-      ...selectedOrder,
-      stage: doc.stageType,
-      items: doc.items,
-      taxRateGst: blendedRate,
-      taxAmount: doc.taxAmount,
-      totalAmount: doc.totalAmount,
-      notes: doc.notes || selectedOrder.notes,
-    });
-    setPreviewStage(doc.stageType);
-    setIsPreviewOpen(true);
-  };
-
-  /** Stage document cards (extracted verbatim into StageDocumentCards.tsx so
-   *  the party statement can replay the same presentation read-only). */
-  const renderStageDocCard = (doc: StageDocDisplay) => (
-    <SaleStageDocCard
-      doc={doc}
-      order={selectedOrder}
-      currencyCode={settings.currency?.code}
-      onOpenDocument={openStageDocPreview}
-      onViewProforma={() => {
-        if (!selectedOrder) return;
-        setPreviewOrder(selectedOrder);
-        setPreviewStage('proforma_invoice');
-        setIsPreviewOpen(true);
-      }}
-    />
-  );
-
-  /** Opens the purchase stage doc preview (the GRN/PO/RFQ variant) */
-  const openPurchaseStageDocPreview = (doc: PurchaseStageDocDisplay) => {
-    if (!selectedOrder) return;
-    setPreviewOrder({ ...(selectedOrder as any), purchaseStage: doc.stageType });
-    setPreviewStage(doc.stageType as any);
-    setIsPreviewOpen(true);
-  };
-
-  /** Purchase stage document card (shared component wrapper) */
-  const renderPurchaseDocCard = (doc: PurchaseStageDocDisplay) => (
-    <PurchaseStageDocCard
-      doc={doc}
-      order={selectedOrder}
-      currencyCode={settings.currency?.code}
-      onOpenDocument={openPurchaseStageDocPreview}
-    />
-  );
 
   // Currency Formatter
   const formatCurrency = (amount: number) => {
@@ -585,9 +489,44 @@ export function OrdersView({
     }
   };
 
+  // Deep link from another module (e.g. the party statement "Issue stage"/
+  // "Edit" actions): on arrival, resolve the order and open the requested
+  // flow directly. onDeepLinkHandled clears the request app-side.
+  React.useEffect(() => {
+    if (!deepLink || !deepLink.orderId) return;
+    const sale = sales.find((s) => s.id === deepLink.orderId);
+    const purchase = purchaseOrders.find((p) => p.id === deepLink.orderId);
+    const target = purchase ? purchaseToDisplay(purchase) : sale ? saleToDisplay(sale) : null;
+    closeRowActionMenu();
+    setIsDetailOpen(false);
+    if (!target) {
+      onDeepLinkHandled?.();
+      return;
+    }
+    if (deepLink.action === 'edit') {
+      handleOpenEdit(target);
+    } else if (deepLink.action) {
+      if (target.type === 'purchase') {
+        setPurchaseOpenStage(deepLink.action as PurchaseStage);
+        setPurchaseCreateStage('rfq');
+        setEditingPurchaseOrder(target);
+        setIsPurchaseModalOpen(true);
+      } else {
+        openIssueStageForm(target, deepLink.action as SalesStage);
+      }
+    } else {
+      // No explicit action: open the order details modal
+      setDetailStageTab(null);
+      setSelectedOrder(target);
+      setIsDetailOpen(true);
+    }
+    onDeepLinkHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deepLink?.nonce]);
+
   // Handle open Form Modal for Edit
-  const handleOpenEdit = (order: OrderDisplay, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleOpenEdit = (order: OrderDisplay, e?: React.MouseEvent) => {
+    e?.stopPropagation();
     setStageIssueCtx(null);
     if (order.type === 'purchase') {
       // Edit opens the modal at the order's CURRENT stage: no create stage
@@ -2378,662 +2317,43 @@ export function OrdersView({
       )}
 
       {/* --- ORDER DETAIL VIEW MODAL --- */}
-      {isDetailOpen && selectedOrder && (
-        <div className="fixed inset-0 z-50 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-[var(--color-surface)] rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl border border-[var(--color-outline-variant)] animate-in fade-in zoom-in-95 duration-150">
-            {/* Header */}
-            <div className="px-6 py-4 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
-              <div>
-                <span
-                  className={`inline-block px-2.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider mb-1 ${
-                    selectedOrder.type === 'sales'
-                      ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-                      : 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
-                  }`}
-                >
-                  {selectedOrder.type === 'sales' ? 'Sales / Dispatch Order' : 'Purchase / Inward Order'}
-                </span>
-                  {selectedOrder.type === 'sales' ? (
-                    <h3 className="text-base font-black text-[var(--color-on-surface)]">{selectedOrder.date}</h3>
-                  ) : (
-                    <>
-                      <h3 className="text-base font-black text-[var(--color-on-surface)]">{selectedOrder.orderNumber}</h3>
-                      <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">Booked on {selectedOrder.date}</p>
-                    </>
-                  )}
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setIsDetailOpen(false)}
-                  className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)] rounded-full transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-
-            {/* Body */}
-            <div className="p-6 space-y-5">
-              {/* Party (plain — no card) */}
-              <div>
-                <p className="text-xs font-black text-[var(--color-on-surface)]">
-                  {parties.find((p) => p.id === selectedOrder.partyId)?.name || selectedOrder.partyName || '—'}
-                </p>
-                {(() => {
-                  const party = parties.find((p) => p.id === selectedOrder.partyId);
-                  return party?.tradeName ? (
-                    <p className="text-[11px] text-[var(--color-on-surface-variant)] font-medium">({party.tradeName})</p>
-                  ) : null;
-                })()}
-                {(() => {
-                  const party = parties.find((p) => p.id === selectedOrder.partyId);
-                  return party?.category ? (
-                    <p className="text-[10px] text-[var(--color-on-surface-variant)] font-medium mt-0.5">{party.category}</p>
-                  ) : null;
-                })()}
-              </div>
-
-              {/* SALES — every issued stage document (values in its own format) + create buttons */}
-              {selectedOrder.type === 'sales' && (
-                <div className="space-y-3">
-                  <h4 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
-                    Stage Documents
-                  </h4>
-
-                  {(() => {
-                    const docs = selectedOrder.stageDocs || [];
-                    if (docs.length === 0) return null;
-                    const active = docs.find((d) => d.stageType === (detailStageTab || selectedOrder.stage)) || docs[docs.length - 1];
-                    return (
-                      <>
-                        {/* Stage tabs — click a stage to view its document data */}
-                        <div className="flex flex-wrap gap-1.5">
-                          {docs.map((d) => {
-                            const meta = SALES_STAGE_META[d.stageType] || SALES_STAGE_META.sales_order;
-                            const isActive = d.stageType === active.stageType;
-                            const isCurrent = d.stageType === (selectedOrder.stage || 'sales_order');
-                            return (
-                              <button
-                                key={d.stageType + d.stageNumber}
-                                type="button"
-                                onClick={() => setDetailStageTab(d.stageType)}
-                                className={`px-3.5 py-2 rounded-full text-[11px] font-bold transition-all border text-left ${
-                                  isActive
-                                    ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] border-[var(--color-primary)] shadow-xs'
-                                    : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] border-[var(--color-outline-variant)] hover:text-[var(--color-on-surface)]'
-                                }`}
-                              >
-                                <span className="flex items-center gap-1.5">
-                                  <meta.icon className="w-3.5 h-3.5 shrink-0" />
-                                  {meta.label}
-                                  {isCurrent && <span className={`text-[8px] uppercase tracking-wider px-1.5 py-0.5 rounded-full ${isActive ? 'bg-white/25' : 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'}`}>current</span>}
-                                </span>
-                                <span className={`block text-[9px] font-semibold mt-0.5 ${isActive ? 'opacity-80' : 'opacity-70'}`}>
-                                  {d.stageNumber} · {d.date}
-                                </span>
-                              </button>
-                            );
-                          })}
-                          {/* Next stages — as dashed create buttons in the tab row */}
-                          {!isSaleLocked(selectedOrder) && salesStageActionMenu(selectedOrder).map((sa) => {
-                            const StageIcon = sa.icon;
-                            return (
-                              <button
-                                key={sa.stageType}
-                                type="button"
-                                title={`Issue ${sa.label}`}
-                                onClick={() => openIssueStageForm(selectedOrder, sa.stageType)}
-                                className="flex flex-col items-start px-3.5 py-2 rounded-full text-[11px] font-bold border border-dashed border-[var(--color-primary)]/50 text-[var(--color-primary)] hover:bg-[var(--color-primary-container)]/30 transition-all"
-                              >
-                                <span className="flex items-center gap-1">
-                                  <StageIcon className="w-3.5 h-3.5" />+ {sa.label}
-                                </span>
-                              </button>
-                            );
-                          })}
-                          {isSaleLocked(selectedOrder) && (
-                            <span className="flex items-center gap-1.5 px-3 py-2 rounded-full text-[10px] font-bold text-[var(--color-error)] bg-[var(--color-error-container)]/25 border border-[var(--color-error)]/30">
-                              <Ban className="w-3 h-3" /> Sale locked — invoice issued
-                            </span>
-                          )}
-                        </div>
-
-                        {/* The active stage document */}
-                        {renderStageDocCard(active)}
-                      </>
-                    );
-                  })()}
-                </div>
-              )}
-
-              {/* PURCHASE — Stage Documents: one card per issued stage
-                  (Request Quotation / Purchase Order / Goods Receiving),
-                  mirroring the sales detail modal's per-stage cards */}
-              {selectedOrder.type === 'purchase' && (
-                <div className="space-y-3">
-                  <h4 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
-                    Stage Documents
-                  </h4>
-
-                  {(() => {
-                    const docs = selectedOrder.purchaseStageDocs || [];
-                    if (docs.length === 0) return null;
-                    const active =
-                      docs.find((d) => d.stageType === (detailStageTab || selectedOrder.purchaseStage)) ||
-                      docs[docs.length - 1];
-                    return (
-                      <>
-                        {/* Stage tabs — click a stage to view its document data */}
-                        <div className="flex flex-wrap gap-1.5">
-                          {docs.map((d) => {
-                            const meta = PURCHASE_STAGE_META[d.stageType] || PURCHASE_STAGE_META.purchase_order;
-                            const isActive = d.stageType === active.stageType;
-                            const isCurrent = d.stageType === selectedOrder.purchaseStage;
-                            return (
-                              <button
-                                key={d.stageType + d.stageNumber}
-                                type="button"
-                                onClick={() => setDetailStageTab(d.stageType)}
-                                className={`px-3.5 py-2 rounded-full text-[11px] font-bold transition-all border text-left ${
-                                  isActive
-                                    ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] border-[var(--color-primary)] shadow-xs'
-                                    : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] border-[var(--color-outline-variant)] hover:text-[var(--color-on-surface)]'
-                                }`}
-                              >
-                                <span className="flex items-center gap-1.5">
-                                  <meta.icon className="w-3.5 h-3.5 shrink-0" />
-                                  {meta.label}
-                                  {isCurrent && <span className={`text-[8px] uppercase tracking-wider px-1.5 py-0.5 rounded-full ${isActive ? 'bg-white/25' : 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'}`}>current</span>}
-                                </span>
-                                <span className={`block text-[9px] font-semibold mt-0.5 ${isActive ? 'opacity-80' : 'opacity-70'}`}>
-                                  {d.stageNumber} · {d.date}
-                                </span>
-                              </button>
-                            );
-                          })}
-                          {/* Next stages — dashed create buttons in the tab row */}
-                          {!isPurchaseLocked(selectedOrder) && purchaseStageActionMenu(selectedOrder).map((sa) => {
-                            const StageIcon = sa.icon;
-                            return (
-                              <button
-                                key={sa.stageType}
-                                type="button"
-                                title={`Issue ${sa.label}`}
-                                onClick={() => {
-                                  // Advance to the next purchase stage document —
-                                  // mirror of the sales issue-stage flow
-                                  setPurchaseOpenStage(sa.stageType);
-                                  setPurchaseCreateStage('rfq');
-                                  setEditingPurchaseOrder(selectedOrder);
-                                  setIsPurchaseModalOpen(true);
-                                  setIsDetailOpen(false);
-                                }}
-                                className="flex flex-col items-start px-3.5 py-2 rounded-full text-[11px] font-bold border border-dashed border-[var(--color-primary)]/50 text-[var(--color-primary)] hover:bg-[var(--color-primary-container)]/30 transition-all"
-                              >
-                                <span className="flex items-center gap-1">
-                                  <StageIcon className="w-3.5 h-3.5" />+ {sa.label}
-                                </span>
-                              </button>
-                            );
-                          })}
-                          {isPurchaseLocked(selectedOrder) && (
-                            <span className="flex items-center gap-1.5 px-3 py-2 rounded-full text-[10px] font-bold text-[var(--color-error)] bg-[var(--color-error-container)]/25 border border-[var(--color-error)]/30">
-                              <Ban className="w-3 h-3" /> {selectedOrder.status === 'cancelled' ? 'Purchase cancelled' : 'Purchase locked — goods received'}
-                            </span>
-                          )}
-                        </div>
-
-                        {/* The active stage document */}
-                        {renderPurchaseDocCard(active)}
-                      </>
-                    );
-                  })()}
-                </div>
-              )}
-
-              {/* Actions Footer */}
-              <div className="flex items-center justify-end pt-3 border-t border-[var(--color-outline-variant)]">
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setIsDetailOpen(false)}
-                    className="px-5 py-2 border border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] rounded-full text-xs font-semibold hover:bg-[var(--color-surface-container-high)] transition-colors"
-                  >
-                    Close
-                  </button>
-                  {/* Locked orders offer no edit: invoiced sales, and purchases
-                      at the goods-receipt stage (or cancelled) — the GRN locks
-                      the purchase. */}
-                  {(selectedOrder.type === 'sales' && isSaleLocked(selectedOrder)) ||
-                  (selectedOrder.type === 'purchase' && isPurchaseLocked(selectedOrder)) ? null : (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        setIsDetailOpen(false);
-                        handleOpenEdit(selectedOrder, e);
-                      }}
-                      className="flex items-center gap-1 px-5 py-2 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-semibold hover:opacity-90 transition-colors"
-                    >
-                      <Edit3 className="w-4 h-4" /> {selectedOrder.type === 'sales' ? editLabelFor(selectedOrder) : 'Edit Purchase'}
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* ORDER DETAILS MODAL — shared with the party statement (same modal,
+          same issue/edit actions and document preview) */}
+      <OrderDetailModal
+        isOpen={isDetailOpen}
+        onClose={() => setIsDetailOpen(false)}
+        order={selectedOrder}
+        parties={parties}
+        items={items}
+        settings={settings}
+        onIssueStage={(order, stageType) => {
+          if (order.type === 'purchase') {
+            setPurchaseOpenStage(stageType as PurchaseStage);
+            setPurchaseCreateStage('rfq');
+            setEditingPurchaseOrder(order);
+            setIsPurchaseModalOpen(true);
+            setIsDetailOpen(false);
+          } else {
+            openIssueStageForm(order, stageType as SalesStage);
+          }
+        }}
+        onEditOrder={(order, e) => {
+          setIsDetailOpen(false);
+          handleOpenEdit(order, e);
+        }}
+      />
 
       {/* --- COMMERCIAL DOCUMENT PREVIEW MODAL --- */}
-      {isPreviewOpen && previewOrder && (
-        <div id="printable-document-content-parent" className="fixed inset-0 z-50 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-[var(--color-surface)] rounded-3xl w-full max-w-4xl shadow-2xl border border-[var(--color-outline-variant)] flex flex-col my-8 animate-in fade-in zoom-in-95 duration-150">
-            {/* Top Bar (Non-Printable) */}
-            <div className="px-6 py-4 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)] print:hidden">
-              <div className="flex items-center gap-2">
-                <Printer className="w-5 h-5 text-[var(--color-primary)]" />
-                <div className="text-left">
-                  <h3 className="text-sm font-bold text-[var(--color-on-surface)]">Commercial Document Viewer</h3>
-                  <p className="text-[10px] text-[var(--color-on-surface-variant)]">Review details, export as PDF, or print directly using thermal or laser printers.</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handlePrint}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold hover:opacity-90 transition-all shadow-xs"
-                >
-                  <Printer className="w-3.5 h-3.5" />
-                  Print / Save PDF
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsPreviewOpen(false)}
-                  className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)] rounded-full transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-
-            {/* Printable Document Area */}
-            <div className="p-8 sm:p-12 bg-white text-[#1a1a1a] overflow-x-auto print:p-0" id="printable-document-content">
-              {/* CSS Print Rules embedded inside */}
-              <style>{`
-                @media print {
-                  body > :not(#printable-document-content-parent) {
-                    display: none !important;
-                  }
-                  #printable-document-content {
-                    position: absolute;
-                    left: 0;
-                    top: 0;
-                    width: 100%;
-                    padding: 0 !important;
-                    margin: 0 !important;
-                  }
-                }
-              `}</style>
-
-              {/* Company Header */}
-              <div className="flex flex-col sm:flex-row justify-between items-start border-b-2 border-double border-[#44474e] pb-6 gap-6">
-                <div className="space-y-1 text-left">
-                  <div className="flex items-center gap-2">
-                    <div className="w-7 h-7 bg-[#005ac1] text-white font-black rounded flex items-center justify-center text-sm">A</div>
-                    <span className="text-lg font-black tracking-tight text-[#1c1b1f]">{settings.companyName || 'APEX ASPHALT INDUSTRIES'}</span>
-                  </div>
-                  <p className="text-[10px] text-[#44474e] uppercase tracking-widest font-extrabold">{settings.tagline || 'Highways, Runways & Civil Road Infrastructure'}</p>
-                  <p className="text-[10px] text-[#74777f] max-w-sm font-semibold leading-relaxed">
-                    {settings.registeredAddress 
-                      ? `${settings.registeredAddress.street}, ${settings.registeredAddress.city}, ${settings.registeredAddress.state} - ${settings.registeredAddress.pincode}`
-                      : 'Plant Yard A, Gate No. 4, Midc Industrial Area, Pune, MH 411013'}
-                  </p>
-                  <p className="text-[10px] text-[#74777f] font-semibold">
-                    Contact: {settings.phone || '+91 98765 43210'} | Email: {settings.email || 'billing@apexroads.com'}
-                  </p>
-                  <p className="text-[10px] text-[#1c1b1f] font-extrabold uppercase">
-                    GSTIN: <span className="font-mono">{settings.gstin || '27AAACA1234A1Z5'}</span>
-                  </p>
-                </div>
-
-                {/* Right Document Label block */}
-                <div className="text-right space-y-1.5 min-w-[200px]">
-                  {(() => {
-                    const isPurchase = previewOrder.type === 'purchase';
-                    const docTitles: Record<string, string> = {
-                      quotation: 'COMMERCIAL QUOTATION',
-                      sales_order: 'SALES ORDER CONFIRMATION',
-                      proforma_invoice: 'PROFORMA INVOICE',
-                      delivery_note: 'DELIVERY CHALLAN / NOTE',
-                      sales_invoice: 'TAX INVOICE',
-                    };
-                    const docColors: Record<string, string> = {
-                      quotation: 'bg-[#74777f] text-white',
-                      sales_order: 'bg-[#386a20] text-white',
-                      proforma_invoice: 'bg-[#005ac1] text-white',
-                      delivery_note: 'bg-[#8c5000] text-white',
-                      sales_invoice: 'bg-[#2e7d32] text-white',
-                    };
-                    const title = isPurchase
-                      ? previewOrder.purchaseStage === 'rfq'
-                        ? 'REQUEST FOR QUOTATION (RFQ)'
-                        : previewOrder.purchaseStage === 'goods_receipt'
-                        ? 'GOODS RECEIPT NOTE (GRN)'
-                        : 'PURCHASE ORDER (PO)'
-                      : (docTitles[previewStage] || 'SALES ORDER');
-                    const colorClass = isPurchase
-                      ? previewOrder.purchaseStage === 'rfq'
-                        ? 'bg-[#5c5b62] text-white'
-                        : previewOrder.purchaseStage === 'goods_receipt'
-                        ? 'bg-[#2e7d32] text-white'
-                        : 'bg-[#005ac1] text-white'
-                      : (docColors[previewStage] || 'bg-[#386a20] text-white');
-                    
-                    return (
-                      <div className={`px-4 py-2 rounded-xl font-black text-xs uppercase text-center tracking-widest ${colorClass}`}>
-                        {title}
-                      </div>
-                    );
-                  })()}
-                  <div className="text-[10px] text-right space-y-1 font-semibold text-[#44474e] pt-1">
-                    <div>Doc Ref: <span className="font-mono font-bold text-[#1c1b1f]">
-                      {(() => {
-                        if (previewOrder.type === 'purchase') {
-                          if (previewOrder.purchaseStage === 'rfq' && previewOrder.rfqDetails?.rfqNumber) {
-                            return previewOrder.rfqDetails.rfqNumber;
-                          }
-                          if (previewOrder.purchaseStage === 'goods_receipt' && previewOrder.receiptDetails?.grnNumber) {
-                            return previewOrder.receiptDetails.grnNumber;
-                          }
-                          return previewOrder.poDetails?.poNumber || previewOrder.orderNumber;
-                        }
-                        const prefixes: Record<string, string> = {
-                          quotation: 'QT',
-                          sales_order: 'SO',
-                          proforma_invoice: 'PI',
-                          delivery_note: 'DC',
-                          sales_invoice: 'INV',
-                        };
-                        const pre = prefixes[previewStage] || 'SO';
-                        const rawNum = previewOrder.orderNumber;
-                        return rawNum.replace(/^(SO|PO)/, pre);
-                      })()}
-                    </span></div>
-                    <div>Date: <span className="font-bold text-[#1c1b1f]">{previewOrder.date}</span></div>
-                    <div>PO / RFQ Ref: <span className="font-mono font-bold text-[#1c1b1f]">{previewOrder.orderNumber}</span></div>
-                    <div>State / Supply: <span className="font-bold text-[#1c1b1f]">{settings.registeredAddress?.state || 'Maharashtra (MH)'}</span></div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Party Information (Billing/Shipping) */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-8 py-6 text-xs text-left">
-                <div className="space-y-1.5 border-r border-[#e1e2ec] pr-4">
-                  <h4 className="font-black text-[#44474e] uppercase tracking-wider text-[10px]">Recipient (Buyer Details)</h4>
-                  <div>
-                    <p className="font-black text-sm text-[#1c1b1f]">{previewOrder.partyName}</p>
-                    {(() => {
-                      const party = parties.find(p => p.id === previewOrder.partyId);
-                      return party ? (
-                        <div className="text-[10px] text-[#44474e] space-y-0.5 mt-1 font-medium text-left">
-                          {party.tradeName && <p className="font-bold text-[#1c1b1f]">T/A: {party.tradeName}</p>}
-                          <p className="leading-relaxed text-left">
-                            {party.address 
-                              ? `${party.address.street}, ${party.address.city}, ${party.address.state} - ${party.address.pincode}`
-                              : 'No billing address provided in directory.'}
-                          </p>
-                          {party.gstin && <p className="font-bold text-[#1c1b1f] mt-1">GSTIN: <span className="font-mono">{party.gstin}</span></p>}
-                          {party.phone && <p>Phone: {party.phone}</p>}
-                          {party.email && <p>Email: {party.email}</p>}
-                        </div>
-                      ) : (
-                        <p className="text-[10px] text-[#74777f]">Registered customer database index: {previewOrder.partyId}</p>
-                      );
-                    })()}
-                  </div>
-                </div>
-
-                <div className="space-y-1.5 pl-0 sm:pl-4 text-left">
-                  <h4 className="font-black text-[#44474e] uppercase tracking-wider text-[10px]">Logistics & Delivery Site</h4>
-                  <div className="text-[10px] text-[#44474e] space-y-1 font-medium text-left">
-                    <div className="text-left">
-                      <span className="font-bold text-[#1c1b1f]">Unloading Site / Destination:</span>
-                      <p className="mt-0.5 leading-relaxed text-[#1c1b1f] text-left">
-                        {linkedTripSlip?.destination || (previewOrder.notes?.toLowerCase().includes('site') 
-                          ? previewOrder.notes 
-                          : 'As per approved designated highway job-site.')}
-                      </p>
-                    </div>
-                    <div className="pt-2 border-t border-[#e1e2ec]/40 mt-1 text-left">
-                      <span className="font-bold text-[#1c1b1f]">Dispatch Transport Fleet:</span>
-                      <div className="mt-1 space-y-0.5 text-[#1c1b1f] font-semibold text-left">
-                        <p className="text-left">Vehicle No: <span className="font-mono text-xs font-black bg-[var(--color-surface-container)] px-1.5 py-0.5 rounded border border-[var(--color-outline-variant)] text-[var(--color-on-surface)]">{previewOrder.vehicleNo || linkedTripSlip?.vehicleNo || 'Multi-axle Tipper / Yard Fleet'}</span></p>
-                        <p className="text-left">Driver Assigned: <span className="font-bold">{previewOrder.driverName || linkedTripSlip?.driverName || 'Regular Operations Carrier'}</span></p>
-                        {linkedTripSlip && (
-                          <p className="text-[9px] text-[#2e7d32] font-black flex items-center gap-1 mt-1 text-left">
-                            <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
-                            Linked Active Trip Slip: {linkedTripSlip.slipNumber} ({linkedTripSlip.status.toUpperCase()})
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                    <div className="pt-2 border-t border-[#e1e2ec]/40 mt-1 text-left">
-                      <span className="font-bold text-[#1c1b1f]">Settlement Account & Payment:</span>
-                      <div className="mt-1 space-y-0.5 text-[#1c1b1f] font-semibold text-left">
-                        <p className="text-left">Account: <span className="font-bold">{previewOrder.accountName || 'Primary Cash/Bank A/c'}</span></p>
-                        <p className="text-left">Payment Mode: <span className="capitalize font-bold">{(previewOrder.paymentMode || 'bank_transfer').replace('_', ' ')}</span></p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Materials Table Grid */}
-              <div className="border border-[#1c1b1f] rounded-lg overflow-hidden mt-2">
-                <table className="w-full text-left text-xs border-collapse">
-                  <thead>
-                    <tr className="bg-[#f3f3fa] text-[#1c1b1f] font-black border-b border-[#1c1b1f] text-[10px] uppercase">
-                      <th className="py-2.5 px-3 border-r border-[#e1e2ec] w-12 text-center">S.No</th>
-                      <th className="py-2.5 px-3 border-r border-[#e1e2ec]">Item Description & HSN Code</th>
-                      <th className="py-2.5 px-3 border-r border-[#e1e2ec] text-right w-24">Qty (MT/Nos)</th>
-                      <th className="py-2.5 px-3 border-r border-[#e1e2ec] text-right w-28">Rate ({settings.currency?.symbol || '₹'})</th>
-                      <th className="py-2.5 px-3 text-right w-32">Line Subtotal</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#e1e2ec]">
-                    {previewOrder.items.map((item, idx) => {
-                      const grnPreview =
-                        previewOrder.type === 'purchase' && previewOrder.purchaseStage === 'goods_receipt';
-                      const billQty =
-                        grnPreview && item.receivedQuantity !== undefined && item.receivedQuantity !== null
-                          ? Number(item.receivedQuantity)
-                          : item.quantity;
-                      const lineAmount =
-                        grnPreview && item.receivedQuantity !== undefined && item.receivedQuantity !== null
-                          ? Number(item.receivedQuantity) * item.rate
-                          : item.amount;
-                      return (
-                      <tr key={idx} className="bg-white font-medium text-[11px] text-[#1c1b1f]">
-                        <td className="py-3 px-3 border-r border-[#e1e2ec] text-center">{idx + 1}</td>
-                        <td className="py-3 px-3 border-r border-[#e1e2ec]">
-                          <p className="font-bold text-[#1c1b1f]">
-                            {item.itemCode ? `${item.itemCode} (${item.itemName})` : item.itemName}
-                          </p>
-                          {item.location && (
-                            <p className="text-[10px] font-semibold text-[#006a6a] mt-0.5">
-                              {previewOrder.type === 'sales' ? 'Dispatch Location:' : 'Inward Location:'} {item.location}
-                            </p>
-                          )}
-                          {(() => {
-                            const originalItem = items.find(it => it.id === item.itemId);
-                            return originalItem?.hsnSacCode ? (
-                              <p className="text-[9px] text-[#74777f] mt-0.5">HSN Code: <span className="font-mono font-bold">{originalItem.hsnSacCode}</span></p>
-                            ) : (
-                              <p className="text-[9px] text-[#74777f] mt-0.5">HSN Code: <span className="font-mono font-bold">38241000</span></p>
-                            );
-                          })()}
-                        </td>
-                        <td className="py-3 px-3 border-r border-[#e1e2ec] text-right font-bold">
-                          {billQty.toLocaleString('en-IN')} {item.unit}
-                          {grnPreview && item.receivedQuantity !== undefined && Number(item.receivedQuantity) !== item.quantity && (
-                            <p className="text-[9px] font-semibold text-[#44474e] mt-0.5">
-                              Ordered: {item.quantity.toLocaleString('en-IN')} {item.unit}
-                            </p>
-                          )}
-                        </td>
-                        <td className="py-3 px-3 border-r border-[#e1e2ec] text-right font-bold text-[#44474e]">
-                          {formatCurrency(item.rate)}
-                        </td>
-                        <td className="py-3 px-3 text-right font-black text-[#1c1b1f]">
-                          {formatCurrency(lineAmount)}
-                        </td>
-                      </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Calculations Block */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-8 mt-6">
-                {/* Terms and words */}
-                <div className="text-left space-y-4">
-                  <div className="bg-[#f3f3fa]/50 p-3 rounded-xl border border-[#e1e2ec] text-[10px] space-y-1 text-[#44474e]">
-                    <span className="font-black text-[#1c1b1f] uppercase tracking-wider text-[9px] block mb-1">Standard Terms & Declarations</span>
-                    {previewOrder.type === 'purchase' ? (
-                      <ul className="list-disc pl-3 space-y-1 font-semibold leading-relaxed text-left">
-                        <li>Materials must strictly conform to approved Marshall Mix Design JMF standards.</li>
-                        <li>Aggregates should be washed, graded, and stored under safe dry conditions.</li>
-                        <li>Payments processed within standard credit framework terms of agreement.</li>
-                      </ul>
-                    ) : (
-                      <>
-                        {previewStage === 'quotation' && (
-                          <ul className="list-disc pl-3 space-y-1 font-semibold leading-relaxed text-left">
-                            <li>Rates are valid for exactly 30 calendar days from document date.</li>
-                            <li>Material loading is subject to raw bitumen supply index allocations.</li>
-                            <li>Payment terms: 50% advance along with confirmed schedule dispatch request.</li>
-                          </ul>
-                        )}
-                        {previewStage === 'sales_order' && (
-                          <ul className="list-disc pl-3 space-y-1 font-semibold leading-relaxed text-left">
-                            <li>Approved Sales Order reservation. Stockyards have committed designated silos.</li>
-                            <li>Site inspection team must verify grade criteria prior to tipper dispatches.</li>
-                            <li>Transit weight losses up to 0.5% accepted under normal loading tolerances.</li>
-                          </ul>
-                        )}
-                        {previewStage === 'proforma_invoice' && (
-                          <ul className="list-disc pl-3 space-y-1 font-semibold leading-relaxed text-left">
-                            <li>This is a Proforma Advance Demand Note only, not a legal Tax Invoice.</li>
-                            <li>Deliveries will commence immediately after receipt of banking credits.</li>
-                            <li>Please quote this PI number on bank transaction remarks for rapid tracking.</li>
-                          </ul>
-                        )}
-                        {previewStage === 'delivery_note' && (
-                          <ul className="list-disc pl-3 space-y-1 font-semibold leading-relaxed text-left">
-                            <li>Material received in sound condition. Subject to site weighbridge tolerances.</li>
-                            <li>Tipper truck driver must return signed copy of this gate challan on slip.</li>
-                            <li>Maintain mix layout temperature above 135°C for standard asphalt laying.</li>
-                          </ul>
-                        )}
-                        {previewStage === 'sales_invoice' && (
-                          <ul className="list-disc pl-3 space-y-1 font-semibold leading-relaxed text-left">
-                            <li>Goods once dispatched/sold from yard will not be returned or credited.</li>
-                            <li>Interest @18% p.a. will be levied for delayed payments exceeding 15 days.</li>
-                            <li>All disputes are subject strictly to Pune, Maharashtra jurisdiction.</li>
-                          </ul>
-                        )}
-                      </>
-                    )}
-                  </div>
-
-                  <div className="text-left text-[10px] text-[#44474e]">
-                    <span className="font-bold text-[#1c1b1f] block uppercase tracking-wider text-[9px] mb-1">Amount in Words:</span>
-                    <p className="font-black text-[var(--color-primary)] bg-[var(--color-primary-container)]/40 p-2.5 rounded-xl border border-[var(--color-primary)]/20 text-center uppercase tracking-wide">
-                      {numberToWords(previewCalculations.grandTotal)}
-                    </p>
-                  </div>
-                </div>
-
-                {/* Subtotals & Taxes */}
-                <div className="bg-[#f3f3fa] p-4.5 rounded-2xl border border-[#e1e2ec] space-y-2.5 text-xs text-right h-fit">
-                  <div className="flex justify-between text-[#44474e] font-bold">
-                    <span>Taxable Material Subtotal:</span>
-                    <span className="text-[#1c1b1f]">{formatCurrency(previewCalculations.subtotal)}</span>
-                  </div>
-
-                  {previewCalculations.transportCharges > 0 && (
-                    <div className="flex justify-between text-[#44474e] font-bold">
-                      <span>Transport / Freight Charges:</span>
-                      <span className="text-[#1c1b1f]">{formatCurrency(previewCalculations.transportCharges)}</span>
-                    </div>
-                  )}
-
-                  <div className="flex justify-between text-[#44474e] font-bold">
-                    <span>Central GST (CGST) ({previewOrder.taxRateGst / 2}%):</span>
-                    <span className="text-[#1c1b1f]">{formatCurrency(previewCalculations.taxAmount / 2)}</span>
-                  </div>
-
-                  <div className="flex justify-between text-[#44474e] font-bold">
-                    <span>State GST (SGST) ({previewOrder.taxRateGst / 2}%):</span>
-                    <span className="text-[#1c1b1f]">{formatCurrency(previewCalculations.taxAmount / 2)}</span>
-                  </div>
-
-                  <div className="h-px bg-[#e1e2ec]" />
-
-                  <div className="flex justify-between items-center font-black text-sm text-[#1c1b1f]">
-                    <span>Grand Total:</span>
-                    <span className="text-base text-[#005ac1]">{formatCurrency(previewCalculations.grandTotal)}</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Signature Blocks */}
-              <div className="grid grid-cols-2 gap-12 pt-16 text-[10px] text-center">
-                <div className="space-y-1">
-                  <div className="h-10 border-b border-dashed border-[#74777f] w-3/4 mx-auto" />
-                  <p className="font-black text-[#1c1b1f] uppercase tracking-wider">Receiver's Seal & Signature</p>
-                  <p className="text-[9px] text-[#74777f]">Materials received in good quantity & grade</p>
-                </div>
-
-                <div className="space-y-1">
-                  <div className="h-10 flex items-end justify-center w-3/4 mx-auto">
-                    <span className="text-[9px] font-mono italic text-[#74777f]/40 uppercase tracking-widest font-black">[APEX HOTMIX STAMP]</span>
-                  </div>
-                  <div className="border-b border-dashed border-[#74777f] w-3/4 mx-auto" />
-                  <p className="font-black text-[#1c1b1f] uppercase tracking-wider">For {settings.companyName || 'APEX ASPHALT INDUSTRIES'}</p>
-                  <p className="text-[9px] text-[#74777f]">Authorized Representative Signatory</p>
-                </div>
-              </div>
-
-              {/* Page footer */}
-              <div className="text-center pt-10 text-[8px] text-[#74777f] font-mono border-t border-[#e1e2ec] mt-12">
-                This is a computer-generated document under the Indian GST Act. Physical signature is optional but legally recognized. Page 1 of 1
-              </div>
-            </div>
-
-            {/* Bottom Controls */}
-            <div className="px-6 py-4 border-t border-[var(--color-outline-variant)] flex justify-end gap-3 bg-[var(--color-surface-container)] print:hidden">
-              <button
-                type="button"
-                onClick={() => setIsPreviewOpen(false)}
-                className="px-5 py-2 border border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] rounded-full text-xs font-semibold hover:bg-[var(--color-surface-container-high)] transition-colors"
-              >
-                Close Viewer
-              </button>
-              <button
-                type="button"
-                onClick={handlePrint}
-                className="flex items-center gap-1.5 px-6 py-2 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold hover:opacity-90 transition-all shadow-md"
-              >
-                <Printer className="w-4 h-4" />
-                Print / Download PDF
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Commercial-document preview (shared component) */}
+      <OrderDocumentPreviewModal
+        isOpen={isPreviewOpen}
+        onClose={() => setIsPreviewOpen(false)}
+        order={previewOrder}
+        stage={previewStage}
+        parties={parties}
+        items={items}
+        settings={settings}
+      />
 
       {/* Add Purchase 3-Stage Workflow Modal */}
       {isPurchaseModalOpen && (

@@ -4,6 +4,7 @@ import {
   Receipt,
   Truck,
   FileCheck,
+  Layers,
 } from 'lucide-react';
 import { Order, OrderItem, SalesStage, PurchaseStage, Sale, Purchase } from '../../types';
 
@@ -208,3 +209,57 @@ export function purchaseToDisplay(p: Purchase): OrderDisplay {
     updatedAt: p.updatedAt,
   } as OrderDisplay;
 }
+
+// --- Stage ladders & locks (PURE — shared by the orders module and the
+// party statement's order details modal) ---
+
+/**
+ * Sales stage hierarchy for the ⋮ popover + issue buttons. The current
+ * (latest issued) stage gates what can still be issued — the user can NEVER
+ * create same-or-lower documents:
+ *   quotation     -> Sales Order, Invoice direct
+ *   sales_order   -> Invoice; "View Proforma" shows the SO as a proforma doc
+ *   sales_invoice -> sale LOCKED: no edit, no further stages, no cancel/delete
+ */
+export const salesStageActionMenu = (order: OrderDisplay): Array<{ stageType: SalesStage; label: string; icon: any }> => {
+  const current = order.stage || 'sales_order';
+  const menu: Array<{ stageType: SalesStage; label: string; icon: any }> = [];
+  if (current === 'sales_invoice') return menu; // locked
+  if (current === 'quotation') {
+    menu.push({ stageType: 'sales_order', label: 'Create Sales Order', icon: Layers });
+    menu.push({ stageType: 'sales_invoice', label: 'Issue GST Tax Invoice', icon: FileText });
+  } else {
+    // sales_order (and legacy proforma/delivery_note rows)
+    menu.push({ stageType: 'sales_invoice', label: 'Issue GST Tax Invoice', icon: FileText });
+  }
+  return menu;
+};
+
+export const isSaleLocked = (order: OrderDisplay) => (order.stage || 'sales_order') === 'sales_invoice';
+export const editLabelFor = (order: OrderDisplay) =>
+  (order.stage || 'sales_order') === 'quotation' ? 'Edit Quotation' : 'Edit Sales Order';
+
+// Purchase stage ladder (mirror of the sales rules):
+//   rfq            -> Create Purchase Order, Record Goods Receiving
+//   purchase_order -> Record Goods Receiving
+//   goods_receipt  -> purchase LOCKED: goods received, no edit, no stages
+export const purchaseStageActionMenu = (order: OrderDisplay): Array<{ stageType: PurchaseStage; label: string; icon: any }> => {
+  const current = order.purchaseStage || 'purchase_order';
+  if (current === 'goods_receipt' || order.status === 'cancelled') return []; // locked
+  if (current === 'rfq') {
+    return [
+      { stageType: 'purchase_order', label: 'Create Purchase Order', icon: Layers },
+      { stageType: 'goods_receipt', label: 'Record Goods Receiving', icon: FileCheck },
+    ];
+  }
+  return [{ stageType: 'goods_receipt', label: 'Record Goods Receiving', icon: FileCheck }];
+};
+
+export const isPurchaseLocked = (order: OrderDisplay) =>
+  (order.purchaseStage || 'purchase_order') === 'goods_receipt' || order.status === 'cancelled';
+export const purchaseEditLabelFor = (order: OrderDisplay) =>
+  (order.purchaseStage || 'purchase_order') === 'rfq' ? 'Edit Request Quotation' : 'Edit Purchase Order';
+export const canViewProforma = (order: OrderDisplay) => {
+  const c = order.stage || 'sales_order';
+  return c === 'sales_order' || c === 'proforma_invoice' || c === 'delivery_note';
+};

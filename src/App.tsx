@@ -137,6 +137,20 @@ function AppContent() {
   const [isVoucherModalOpen, setIsVoucherModalOpen] = useState(false);
   const [voucherModalPartyId, setVoucherModalPartyId] = useState<string | undefined>();
 
+  // Deep link from the party statement: open an order's edit/issue flow in
+  // the Sales or Purchases module (OrdersView consumes it on arrival).
+  const [orderDeepLink, setOrderDeepLink] = useState<{
+    orderId: string;
+    orderType: 'sales' | 'purchase';
+    action: string; // 'edit' | SalesStage | PurchaseStage
+    nonce: number;
+  } | null>(null);
+
+  const handleOpenInOrders = (orderId: string, orderType: 'sales' | 'purchase', action: string) => {
+    setOrderDeepLink({ orderId, orderType, action, nonce: Date.now() });
+    setActiveTab(orderType === 'sales' ? 'sales' : 'purchases');
+  };
+
   // Handlers for Accounts & Transfers
   const handleAddAccount = (accData: any) => {
     db.addAccount(accData);
@@ -454,6 +468,7 @@ function AppContent() {
               onUpdateParty={handleUpdateParty}
               onAddTransaction={handleAddTransaction}
               onRecordPayment={handleRecordPayment}
+              onOpenInOrders={handleOpenInOrders}
             />
           )}
 
@@ -513,6 +528,10 @@ function AppContent() {
               onAddPurchaseStage={handleAddPurchaseStage}
               onDeletePurchase={handleDeletePurchase}
               fixedType="sales"
+              deepLink={orderDeepLink && orderDeepLink.orderType === 'sales'
+                ? { orderId: orderDeepLink.orderId, action: orderDeepLink.action, nonce: orderDeepLink.nonce }
+                : null}
+              onDeepLinkHandled={() => setOrderDeepLink(null)}
             />
           )}
 
@@ -532,6 +551,10 @@ function AppContent() {
               onAddPurchaseStage={handleAddPurchaseStage}
               onDeletePurchase={handleDeletePurchase}
               fixedType="purchase"
+              deepLink={orderDeepLink && orderDeepLink.orderType === 'purchase'
+                ? { orderId: orderDeepLink.orderId, action: orderDeepLink.action, nonce: orderDeepLink.nonce }
+                : null}
+              onDeepLinkHandled={() => setOrderDeepLink(null)}
             />
           )}
 
@@ -619,6 +642,7 @@ function AppContent() {
         onRecordPayment={(partyId, type) => {
           setPaymentModalState({ isOpen: true, partyId, type });
         }}
+        onOpenInOrders={handleOpenInOrders}
       />
 
       <RecordPaymentModal

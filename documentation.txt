@@ -485,10 +485,13 @@ manual SQL, should you prefer to run it yourself:
     detail screen (and the dashboard party modal) render a document-centric
     statement — ONE ROW PER SALE, PER PURCHASE AND PER PAYMENT (rows built
     from the relational masters + standalone vouchers; legacy orders ignored).
-    Rows click through: sale/purchase -> read-only stage document cards (the
-    Sales/Purchases modal's card presentation, extracted into
-    src/components/orders/StageDocumentCards.tsx + OrderDocumentsViewerModal),
-    payments/standalone vouchers -> PaymentVoucherDetailModal. The system's
+    Rows click through: sale/purchase -> THE orders module's details modal
+    (extracted into src/components/orders/OrderDetailModal.tsx — stage tabs,
+    per-stage document cards, issue/edit actions and the commercial-document
+    preview, src/components/orders/OrderDocumentPreviewModal.tsx; the party
+    statement's issue/edit actions deep-link into the Sales/Purchases module,
+    OrdersView consumes an app-level deepLink), payments/standalone vouchers
+    -> PaymentVoucherDetailModal. The system's
     mirroring vouchers (txn-<saleId>-inv/-pay, txn-<purchaseId>-bill/-pay) are
     HIDDEN as rows and fold their server effects into their order row
     (src/components/parties/partyStatement.ts) so the Dr/Cr running balance

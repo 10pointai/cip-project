@@ -17,9 +17,8 @@ import { PrintStatementModal } from '../common/PrintStatementModal';
 import { useAuth } from '../../context/AuthContext';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { PartyLedgerEntry, buildPartyStatement, statementToVoucherTransactions } from './partyStatement';
-import { PartyStatementSummaryCards } from './PartyStatementSummaryCards';
 import { PartyStatementLedger } from './PartyStatementLedger';
-import { OrderDocumentsViewerModal } from '../orders/OrderDocumentsViewerModal';
+import { OrderDetailModal } from '../orders/OrderDetailModal';
 import { PaymentVoucherDetailModal } from './PaymentVoucherDetailModal';
 import { saleToDisplay, purchaseToDisplay, OrderDisplay } from '../orders/orderDisplay';
 
@@ -39,6 +38,8 @@ interface PartyDetailModalProps {
   settings: CompanySettings;
   onEdit: (party: Party) => void;
   onRecordPayment: (partyId: string, type: 'payment_in' | 'payment_out') => void;
+  /** Optional jump to the Sales/Purchases module (issue/edit deep link) */
+  onOpenInOrders?: (orderId: string, orderType: 'sales' | 'purchase', action: string) => void;
 }
 
 export function PartyDetailModal({
@@ -52,6 +53,7 @@ export function PartyDetailModal({
   settings,
   onEdit,
   onRecordPayment,
+  onOpenInOrders,
 }: PartyDetailModalProps) {
   const { hasPermission } = useAuth();
   const canManageParties = hasPermission('manage_parties');
@@ -332,28 +334,56 @@ export function PartyDetailModal({
         </div>
       </div>
 
-      {/* Click-through: sale/purchase → read-only stage document viewer */}
+      {/* Click-through: sale/purchase → THE orders module's details modal */}
       {(() => {
         if (!detailEntry) return null;
         if (detailEntry.kind === 'sale' && detailEntry.sale) {
           const order: OrderDisplay = saleToDisplay(detailEntry.sale);
           return (
-            <OrderDocumentsViewerModal
+            <OrderDetailModal
               isOpen
               onClose={() => setDetailEntry(null)}
               order={order}
-              currencyCode={settings.currency?.code}
+              parties={[party]}
+              items={localDb.getItems()}
+              settings={settings}
+              onIssueStage={onOpenInOrders
+                ? (o, stageType) => {
+                    setDetailEntry(null);
+                    onOpenInOrders(o.id, o.type, String(stageType));
+                  }
+                : undefined}
+              onEditOrder={onOpenInOrders
+                ? (o) => {
+                    setDetailEntry(null);
+                    onOpenInOrders(o.id, o.type, 'edit');
+                  }
+                : undefined}
             />
           );
         }
         if (detailEntry.kind === 'purchase' && detailEntry.purchase) {
           const order: OrderDisplay = purchaseToDisplay(detailEntry.purchase);
           return (
-            <OrderDocumentsViewerModal
+            <OrderDetailModal
               isOpen
               onClose={() => setDetailEntry(null)}
               order={order}
-              currencyCode={settings.currency?.code}
+              parties={[party]}
+              items={localDb.getItems()}
+              settings={settings}
+              onIssueStage={onOpenInOrders
+                ? (o, stageType) => {
+                    setDetailEntry(null);
+                    onOpenInOrders(o.id, o.type, String(stageType));
+                  }
+                : undefined}
+              onEditOrder={onOpenInOrders
+                ? (o) => {
+                    setDetailEntry(null);
+                    onOpenInOrders(o.id, o.type, 'edit');
+                  }
+                : undefined}
             />
           );
         }

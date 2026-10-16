@@ -40,6 +40,8 @@ interface PartiesViewProps {
   onUpdateParty: (id: string, updates: any) => void;
   onAddTransaction: (txData: any) => void;
   onRecordPayment?: (paymentData: any) => void;
+  /** Jump to the Sales/Purchases module with an order's flow deep-linked */
+  onOpenInOrders?: (orderId: string, orderType: 'sales' | 'purchase', action: string) => void;
 }
 
 export function PartiesView({
@@ -54,6 +56,7 @@ export function PartiesView({
   onUpdateParty,
   onAddTransaction,
   onRecordPayment,
+  onOpenInOrders,
 }: PartiesViewProps) {
   const { showToast } = useToast();
   const { hasPermission } = useAuth();
@@ -178,6 +181,7 @@ export function PartiesView({
           onRecordPayment={(partyId, type) => {
             setPaymentModalState({ isOpen: true, partyId, type });
           }}
+          onOpenInOrders={onOpenInOrders}
         />
 
         {/* Modals triggered from Detail Screen */}

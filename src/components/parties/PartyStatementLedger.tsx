@@ -59,21 +59,6 @@ function rowVisual(entry: PartyLedgerEntry): { Icon: any; tone: string } {
   return { Icon: Receipt, tone: 'text-[var(--color-on-surface-variant)]' };
 }
 
-function statusPillClass(status: PartyLedgerEntry['status']): string {
-  switch (status) {
-    case 'paid':
-    case 'settled':
-      return 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]';
-    case 'pending':
-    case 'partially_paid':
-      return 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]';
-    case 'cancelled':
-      return 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]';
-    default:
-      return 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]';
-  }
-}
-
 export function PartyStatementLedger({
   party,
   statement,
@@ -171,13 +156,13 @@ export function PartyStatementLedger({
           <thead>
             <tr className="bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
               <th className="py-3 px-4">Date</th>
+              <th className="py-3 px-3">Type</th>
               <th className="py-3 px-3">Particulars</th>
               <th className="py-3 px-3">Stages</th>
               <th className="py-3 px-3">Reference</th>
               <th className="py-3 px-3 text-right text-[var(--color-primary)]">Debit (Dr / Sales / We Paid)</th>
               <th className="py-3 px-3 text-right text-[var(--color-success)]">Credit (Cr / Purchases / Received)</th>
               <th className="py-3 px-3 text-right">Running Balance</th>
-              <th className="py-3 px-4 text-center">Status</th>
               <th className="py-3 px-2 w-6"></th>
             </tr>
           </thead>
@@ -193,10 +178,11 @@ export function PartyStatementLedger({
                   Opening Balance
                 </span>
               </td>
-              <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">—</td>
               <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">
                 Initial balance registered ({party.openingBalanceType === 'to_receive' ? 'Receivable from Party' : 'Payable to Party'})
               </td>
+              <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">—</td>
+              <td className="py-3 px-3 font-mono text-[var(--color-outline)]">—</td>
               <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-primary)]">
                 {party.openingBalanceType === 'to_receive' ? formatCurrency(party.openingBalance, currencySymbol) : '—'}
               </td>
@@ -207,11 +193,6 @@ export function PartyStatementLedger({
                 {formatCurrency(party.openingBalance, currencySymbol)}{' '}
                 <span className="text-[9px] uppercase font-normal">
                   {party.openingBalanceType === 'to_receive' ? 'Dr' : 'Cr'}
-                </span>
-              </td>
-              <td className="py-3 px-4 text-center">
-                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]">
-                  Initial
                 </span>
               </td>
               <td className="py-3 px-2"></td>
@@ -230,7 +211,6 @@ export function PartyStatementLedger({
               [...filtered].reverse().map((entry) => {
                 const { Icon, tone } = rowVisual(entry);
                 const isOrder = entry.kind === 'sale' || entry.kind === 'purchase';
-                const muted = entry.status === 'cancelled' || entry.status === 'not_posted';
                 const journalChip = entry.journalVoucher && entry.journalVoucher.status !== 'cancelled'
                   ? entry.journalVoucher.voucherNumber
                   : undefined;
@@ -239,22 +219,26 @@ export function PartyStatementLedger({
                   <tr
                     key={entry.id}
                     onClick={() => (isOrder ? onOpenOrder(entry) : onOpenVoucher(entry))}
-                    className={`hover:bg-[var(--color-surface-container)]/50 transition-colors cursor-pointer group ${
-                      muted ? 'opacity-60' : ''
-                    }`}
+                    className="hover:bg-[var(--color-surface-container)]/50 transition-colors cursor-pointer group"
                   >
                     <td className="py-3 px-4 whitespace-nowrap text-[var(--color-on-surface)] font-medium">
                       {formatDate(entry.date)}
                     </td>
-                    <td className="py-3 px-3 text-[var(--color-on-surface)] max-w-xs">
-                      <p className={`inline-flex items-center gap-1.5 font-bold text-[11px] uppercase tracking-wide ${tone}`}>
+                    {/* Type (icon + label — kept its own column, apart from the
+                        particulars text) */}
+                    <td className="py-3 px-3">
+                      <span className={`inline-flex items-center gap-1.5 font-bold text-[11px] uppercase tracking-wide ${tone}`}>
                         <Icon className="w-3.5 h-3.5 shrink-0" />
                         {entry.typeLabel}
-                      </p>
-                      {entry.particulars && (
-                        <p className="font-medium text-[var(--color-on-surface-variant)] truncate mt-0.5">
+                      </span>
+                    </td>
+                    <td className="py-3 px-3 text-[var(--color-on-surface)] max-w-xs">
+                      {entry.particulars ? (
+                        <p className="font-medium text-[var(--color-on-surface)] truncate">
                           {entry.particulars}
                         </p>
+                      ) : (
+                        <span className="text-[var(--color-on-surface-variant)]">—</span>
                       )}
                       {journalChip && (
                         <p className="text-[9px] font-mono text-[var(--color-outline)] mt-0.5">
@@ -316,13 +300,6 @@ export function PartyStatementLedger({
                       {formatCurrency(Math.abs(entry.runningBalance), currencySymbol)}{' '}
                       <span className="text-[9px] uppercase font-normal">
                         {entry.runningBalance > 0 ? 'Dr' : entry.runningBalance < 0 ? 'Cr' : ''}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 text-center">
-                      <span
-                        className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider whitespace-nowrap ${statusPillClass(entry.status)}`}
-                      >
-                        {entry.status.replace('_', ' ')}
                       </span>
                     </td>
                     <td className="py-3 px-2">
