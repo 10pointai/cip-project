@@ -195,7 +195,7 @@ export function PartyStatementLedger({
         <table className="w-full text-left text-xs border-collapse min-w-[1180px]">
           <thead>
             <tr className="bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-              <th className="py-3 px-3">Type</th>
+              <th className="py-3 px-3 w-[150px]">Type</th>
               <th className="py-3 px-3">Particulars</th>
               <th className="py-3 px-3">Stages</th>
               <th className="py-3 px-3">Reference</th>
@@ -287,11 +287,11 @@ export function PartyStatementLedger({
                                   className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border whitespace-nowrap shadow-2xs ${tonePill} border-[var(--color-outline-variant)]/40`}
                                 >
                                   <span className="w-1.5 h-1.5 rounded-full bg-current shrink-0 animate-pulse"></span>
-                                  <span className="text-[10px] font-black tracking-wide">
+                                  <span className="text-[10px] font-black tracking-wide truncate max-w-[104px]">
                                     {label}
                                   </span>
                                   <span className="opacity-60">·</span>
-                                  <span className="font-mono text-[10px] font-black">
+                                  <span className="font-mono text-[10px] font-black truncate max-w-[124px]">
                                     {s.number}
                                   </span>
                                 </span>
@@ -304,11 +304,11 @@ export function PartyStatementLedger({
                                 title={`${s.label} — issued ${s.date}`}
                                 className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full whitespace-nowrap overflow-hidden opacity-55 ${tonePill}`}
                               >
-                                <span className="text-[9px] font-semibold tracking-wide truncate max-w-[120px]">
+                                <span className="text-[9px] font-semibold tracking-wide truncate max-w-[100px]">
                                   {label}
                                 </span>
                                 <span className="opacity-60">·</span>
-                                <span className="font-mono text-[9px] font-semibold">
+                                <span className="font-mono text-[9px] font-semibold truncate max-w-[120px]">
                                   {s.number}
                                 </span>
                               </span>
