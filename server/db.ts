@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import bcrypt from 'bcryptjs';
+import { moveS3Object, orderDocumentRoot } from './services/documentFiles';
 import {
   Party,
   Transaction,
@@ -37,6 +39,9 @@ import {
   SalesOrderStageInput,
   PurchaseOrderStageInput,
   AppUser,
+  AppDocument,
+  SaleOrderDocumentLink,
+  PurchaseOrderDocumentLink,
   UserPermissions,
   UserRole,
   UserStatus,
@@ -57,6 +62,9 @@ import {
   liveSyncPurchaseStages,
   liveSyncBatch,
   liveSyncAuditLog,
+  liveSyncDocument,
+  liveSyncSaleOrderDocLink,
+  liveSyncPurchaseOrderDocLink,
   liveSyncVehicle,
   liveSyncDriver,
   liveSyncTripSlip,
@@ -147,6 +155,9 @@ export interface DatabaseSchema {
   stockMovements: StockMovementRecord[];
   users: AppUser[];
   auditLogs: AuditLog[];
+  documents: AppDocument[];
+  saleOrderDocuments: SaleOrderDocumentLink[];
+  purchaseOrderDocuments: PurchaseOrderDocumentLink[];
 }
 
 /**
@@ -208,6 +219,9 @@ class ServerLocalDatabase {
       transfers: JSON.parse(JSON.stringify(SEED_TRANSFERS)),
       adjustments: JSON.parse(JSON.stringify(SEED_ADJUSTMENTS)),
       users: JSON.parse(JSON.stringify(SEED_USERS)),
+      documents: [],
+      saleOrderDocuments: [],
+      purchaseOrderDocuments: [],
       auditLogs: [
         {
           id: `aud-${Date.now()}`,
@@ -2284,9 +2298,12 @@ class ServerLocalDatabase {
     sale.status = this.computeSalesStatus(sale);
 
     this.data.sales.unshift(sale);
+    delete (sale as any).documentIds; // never persisted — linked below
     this.logAudit('CREATE', 'SALE', saleId, `Registered sale ${sale.saleNumber} (stage ${firstStage.stageType})`);
     this.save();
     this.syncSaleToMysql(sale);
+    const createDocIds = this.extractDocumentIds(data);
+    if (createDocIds.length > 0) this.linkOrderDocuments('sale', saleId, createDocIds);
     return this.hydrateSale(sale);
   }
 
@@ -2421,6 +2438,9 @@ class ServerLocalDatabase {
     if (!opts.skipMysqlSync) {
       this.syncSaleToMysql(existing);
     }
+    // Document links ride on the master-edit payload when present (idempotent)
+    const editDocIds = this.extractDocumentIds(updates);
+    if (editDocIds.length > 0) this.linkOrderDocuments('sale', id, editDocIds);
     return this.hydrateSale(existing);
   }
 
@@ -2516,6 +2536,8 @@ class ServerLocalDatabase {
     this.logAudit('UPDATE', 'SALE_STAGE', id, `Issued stage ${stage.stageType} ${stage.stageNumber} on sale ${sale.saleNumber}`);
     this.save();
     this.syncSaleToMysql(sale);
+    const stageDocIds = this.extractDocumentIds(stageInput);
+    if (stageDocIds.length > 0) this.linkOrderDocuments('sale', id, stageDocIds);
     return this.hydrateSale(sale);
   }
 
@@ -2537,6 +2559,7 @@ class ServerLocalDatabase {
       this.deleteLinkedVouchers(sale, `Deletion reversal for sale ${sale.saleNumber}`);
     }
     this.data.sales.splice(index, 1);
+    this.detachSaleDocuments(id); // drop mappings, soft-delete orphaned docs
     this.logAudit('DELETE', 'SALE', id, `Deleted sale ${sale.saleNumber}`);
     this.save();
     this.syncSaleToMysql(sale, true);
@@ -2630,9 +2653,12 @@ class ServerLocalDatabase {
     purchase.status = this.computePurchaseStatus(purchase);
 
     this.data.purchases.unshift(purchase);
+    delete (purchase as any).documentIds; // never persisted — linked below
     this.logAudit('CREATE', 'PURCHASE', purchaseId, `Registered purchase ${purchase.purchaseNumber} (stage ${stage.stageType})`);
     this.save();
     this.syncPurchaseToMysql(purchase);
+    const createDocIds = this.extractDocumentIds(data);
+    if (createDocIds.length > 0) this.linkOrderDocuments('purchase', purchaseId, createDocIds);
     return this.hydratePurchase(purchase);
   }
 
@@ -2738,6 +2764,9 @@ class ServerLocalDatabase {
     if (!opts.skipMysqlSync) {
       this.syncPurchaseToMysql(existing);
     }
+    // Document links ride on the master-edit payload when present (idempotent)
+    const editDocIds = this.extractDocumentIds(updates);
+    if (editDocIds.length > 0) this.linkOrderDocuments('purchase', id, editDocIds);
     return this.hydratePurchase(existing);
   }
 
@@ -2825,6 +2854,8 @@ class ServerLocalDatabase {
     this.logAudit('UPDATE', 'PURCHASE_STAGE', id, `Added stage ${stageType} ${stageNumber} to purchase ${purchase.purchaseNumber}`);
     this.save();
     this.syncPurchaseToMysql(purchase);
+    const stageDocIds = this.extractDocumentIds(stageInput);
+    if (stageDocIds.length > 0) this.linkOrderDocuments('purchase', id, stageDocIds);
     return this.hydratePurchase(purchase);
   }
 
@@ -2841,6 +2872,7 @@ class ServerLocalDatabase {
       this.deleteLinkedVouchers(purchase, `Deletion reversal for purchase ${purchase.purchaseNumber}`);
     }
     this.data.purchases.splice(index, 1);
+    this.detachPurchaseDocuments(id); // drop mappings, soft-delete orphaned docs
     this.logAudit('DELETE', 'PURCHASE', id, `Deleted purchase ${purchase.purchaseNumber}`);
     this.save();
     this.syncPurchaseToMysql(purchase, true);
@@ -3173,6 +3205,185 @@ class ServerLocalDatabase {
         .sort((a, b) => a.currentBalance - b.currentBalance)
         .slice(0, 5),
     };
+  }
+
+  // --- DOCUMENTS (S3-uploaded files + order mapping) ---
+  // `documents` holds every file uploaded through s3Upload.ts (S3 key +
+  // permanent URL + soft status); sale_order_documents / purchase_order_documents
+  // are the pure FK join tables (order id ↔ document id). S3 objects are NEVER
+  // deleted by the app and no delete UI exists yet (user directive 2026-10-17):
+  // the documents row carries status 'active'/'deleted' — when an order is
+  // deleted its mappings drop and any document no longer mapped anywhere flips
+  // to 'deleted' (soft), its bucket file retained for audit.
+
+  public getDocumentById(id: string): AppDocument | undefined {
+    return (this.data.documents || []).find((d) => d.id === id);
+  }
+
+  public getDocumentsForSale(saleId: string): AppDocument[] {
+    return this.documentsFor('sale', saleId);
+  }
+
+  public getDocumentsForPurchase(purchaseId: string): AppDocument[] {
+    return this.documentsFor('purchase', purchaseId);
+  }
+
+  private documentsFor(kind: 'sale' | 'purchase', orderId: string): AppDocument[] {
+    const links = kind === 'sale' ? this.data.saleOrderDocuments : this.data.purchaseOrderDocuments;
+    const ids = ((links as any[]) || [])
+      .filter((l) => (kind === 'sale' ? l.saleId : l.purchaseId) === orderId)
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+      .map((l) => l.documentId);
+    return (this.data.documents || []).filter(
+      (d) => ids.includes(d.id) && d.status !== 'deleted'
+    );
+  }
+
+  public createDocument(payload: {
+    name: string;
+    s3Key: string;
+    url: string;
+    contentType?: string;
+    sizeBytes?: number;
+  }, uploadedById?: string): AppDocument {
+    if (!this.data.documents) this.data.documents = [];
+    const doc: AppDocument = {
+      id: `doc-${this.nextLedgerMs()}`,
+      name: String(payload.name).slice(0, 255),
+      s3Key: String(payload.s3Key).slice(0, 512),
+      url: String(payload.url),
+      contentType: payload.contentType || undefined,
+      sizeBytes: Number(payload.sizeBytes) || 0,
+      uploadedById: uploadedById || undefined,
+      status: 'active',
+      createdAt: new Date().toISOString(),
+    };
+    this.data.documents.unshift(doc);
+    this.logAudit('CREATE', 'DOCUMENT', doc.id, `Uploaded document ${doc.name}`);
+    this.save();
+    liveSyncDocument(doc);
+    return doc;
+  }
+
+  public linkSaleDocuments(saleId: string, documentIds: string[]): number {
+    return this.linkOrderDocuments('sale', saleId, documentIds);
+  }
+
+  public linkPurchaseDocuments(purchaseId: string, documentIds: string[]): number {
+    return this.linkOrderDocuments('purchase', purchaseId, documentIds);
+  }
+
+  /** Idempotent FK-link writer — mapping rows only (no document mutation). */
+  private linkOrderDocuments(kind: 'sale' | 'purchase', orderId: string, documentIds: string[]): number {
+    if (!Array.isArray(documentIds)) return 0;
+    const validIds = [...new Set(documentIds.map(String).filter(Boolean))].filter((id) =>
+      (this.data.documents || []).some((d) => d.id === id && d.status === 'active')
+    );
+    const links = kind === 'sale'
+      ? (this.data.saleOrderDocuments = this.data.saleOrderDocuments || [])
+      : (this.data.purchaseOrderDocuments = this.data.purchaseOrderDocuments || []);
+    let added = 0;
+    validIds.forEach((docId) => {
+      const exists = links.some((l: any) => l.documentId === docId && (kind === 'sale' ? l.saleId : l.purchaseId) === orderId);
+      if (exists) return;
+      const link = kind === 'sale'
+        ? ({ id: `sod-${this.nextLedgerMs()}`, saleId: orderId, documentId: docId, createdAt: new Date().toISOString() } as SaleOrderDocumentLink)
+        : ({ id: `pod-${this.nextLedgerMs()}`, purchaseId: orderId, documentId: docId, createdAt: new Date().toISOString() } as PurchaseOrderDocumentLink);
+      links.push(link);
+      added += 1;
+      this.logAudit('LINK', 'DOCUMENT', docId, `Document linked to ${kind} ${orderId}`);
+      if (kind === 'sale') liveSyncSaleOrderDocLink(link as SaleOrderDocumentLink);
+      else liveSyncPurchaseOrderDocLink(link as PurchaseOrderDocumentLink);
+    });
+    this.save();
+    this.settlePendingDocumentMoves(kind, orderId, validIds);
+    return added;
+  }
+
+  /**
+   * S3 MOVE-ON-LINK (user key structure): documents uploaded while creating a
+   * new order live under `Pending/<uuid>.<ext>` because the order FK id did
+   * not exist yet. The moment they link to an order, each Pending object is
+   * COPIED into `<Sale|Purchase>/<orderId>/<uuid4>.<ext>` (server-side
+   * CopyObject — no re-upload) and its temp source deleted; the row's s3_key
+   * and url then point at the final location. Fire-and-forget like the other
+   * cloud syncs; idempotent (only Pending/* keys participate).
+   */
+  private settlePendingDocumentMoves(kind: 'sale' | 'purchase', orderId: string, documentIds: string[]): void {
+    const pendingIds = documentIds.filter((docId) => {
+      const doc = (this.data.documents || []).find((d) => d.id === docId);
+      return !!doc && doc.s3Key.startsWith('Pending/');
+    });
+    if (pendingIds.length === 0) return;
+    pendingIds.forEach(async (docId) => {
+      try {
+        const doc = (this.data.documents || []).find((d) => d.id === docId);
+        if (!doc) return;
+        const dot = doc.s3Key.lastIndexOf('.');
+        const ext = dot > -1 ? doc.s3Key.slice(dot) : '';
+        const finalKey = `${orderDocumentRoot(kind)}/${orderId}/${randomUUID()}${ext}`;
+        const moved = await moveS3Object(doc.s3Key, finalKey);
+        if (!moved.ok || !moved.publicUrl) {
+          console.error(`[DB] Document move to final key failed for ${docId}: ${moved.error}`);
+          return;
+        }
+        doc.s3Key = finalKey;
+        doc.url = moved.publicUrl;
+        this.logAudit('MOVE', 'DOCUMENT', docId, `Pending object moved to ${finalKey}`);
+        this.save();
+        liveSyncDocument(doc);
+      } catch (e: any) {
+        console.error(`[DB] Pending document move error for ${docId}:`, e.message);
+      }
+    });
+  }
+
+  /** documentIds riding on create/edit/stage-issue payloads (never persisted) */
+  private extractDocumentIds(payload: any): string[] {
+    const ids = payload && Array.isArray((payload as any).documentIds)
+      ? (payload as any).documentIds.map(String).filter(Boolean)
+      : [];
+    return [...new Set(ids)];
+  }
+
+  public detachSaleDocuments(saleId: string): void {
+    this.detachOrderDocuments('sale', saleId);
+  }
+
+  public detachPurchaseDocuments(purchaseId: string): void {
+    this.detachOrderDocuments('purchase', purchaseId);
+  }
+
+  /** Cascade for order deletion: drop mappings, soft-delete orphaned documents. */
+  private detachOrderDocuments(kind: 'sale' | 'purchase', orderId: string): void {
+    const list = kind === 'sale'
+      ? (this.data.saleOrderDocuments || [])
+      : (this.data.purchaseOrderDocuments || []);
+    const removed = list.filter((l: any) => (kind === 'sale' ? l.saleId : l.purchaseId) === orderId);
+    const kindKey = kind === 'sale' ? 'saleId' : 'purchaseId';
+    if (kind === 'sale') {
+      this.data.saleOrderDocuments = (this.data.saleOrderDocuments || []).filter((l: any) => l.saleId !== orderId);
+    } else {
+      this.data.purchaseOrderDocuments = (this.data.purchaseOrderDocuments || []).filter((l: any) => l.purchaseId !== orderId);
+    }
+    removed.forEach((l: any) => {
+      if (kind === 'sale') liveSyncSaleOrderDocLink(l as SaleOrderDocumentLink, true);
+      else liveSyncPurchaseOrderDocLink(l as PurchaseOrderDocumentLink, true);
+    });
+
+    // A document mapped to NOTHING anymore = soft-deleted (S3 file retained)
+    const otherLinks = kind === 'sale' ? this.data.purchaseOrderDocuments || [] : this.data.saleOrderDocuments || [];
+    removed.forEach((l: any) => {
+      const stillLinked = otherLinks.some((o: any) => o.documentId === l.documentId);
+      const doc = (this.data.documents || []).find((d) => d.id === l.documentId);
+      if (!stillLinked && doc && doc.status !== 'deleted') {
+        doc.status = 'deleted';
+        liveSyncDocument(doc);
+      }
+    });
+    if (removed.length > 0) {
+      this.logAudit('DELETE', 'DOCUMENT', orderId, `${removed.length} document mapping(s) dropped from ${kind} ${orderId} (S3 files retained)`);
+    }
   }
 
   // --- USER MANAGEMENT & AUTH ---

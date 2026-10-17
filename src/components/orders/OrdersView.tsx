@@ -38,6 +38,7 @@ import {
 import { Order, OrderItem, OrderType, SalesStage, PurchaseStage, Party, Item, CompanySettings, Sale, Purchase, PaymentMode } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { AddPurchaseModal } from './AddPurchaseModal';
+import { OrderDocumentsSection, StagedDocument } from './OrderDocumentsSection';
 import { SearchableSelect } from './SearchableSelect';
 import {
   OrderDisplay,
@@ -131,6 +132,9 @@ export function OrdersView({
   const [isStageMenuOpen, setIsStageMenuOpen] = useState(false);
   const stageMenuRef = React.useRef<HTMLDivElement | null>(null);
   const [editingOrder, setEditingOrder] = useState<OrderDisplay | null>(null);
+  // Documents staged while CREATING a brand-new sale (S3-uploaded + registered;
+  // carried as documentIds on the create payload — the server links them)
+  const [stagedSaleDocs, setStagedSaleDocs] = useState<StagedDocument[]>([]);
   const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
   const [editingPurchaseOrder, setEditingPurchaseOrder] = useState<OrderDisplay | null>(null);
   // Purchase mirror of the sales stage machinery: the stage the Add-Purchase
@@ -306,6 +310,7 @@ export function OrdersView({
       })
     );
     setFormError(null);
+    setStagedSaleDocs([]); // fresh document staging per create/edit dialog
     setIsFormOpen(true);
   };
 
@@ -457,6 +462,7 @@ export function OrdersView({
     setFormOrderNumber(suggestStageNumber('sales', stage || 'quotation'));
     setFormError(null);
 
+    setStagedSaleDocs([]); // fresh document staging per create/edit dialog
     setIsFormOpen(true);
   };
 
@@ -577,6 +583,7 @@ export function OrdersView({
       })
     );
     setFormError(null);
+    setStagedSaleDocs([]); // fresh document staging per create/edit dialog
     setIsFormOpen(true);
   };
 
@@ -774,7 +781,8 @@ export function OrdersView({
       });
     } else {
       // Create: master + first stage document (+ toggles for the ONE-SHOT
-      // inventory / cash application)
+      // inventory / cash application). Staged documents ride along as
+      // documentIds — the server links them in the same flow as the sale.
       onAddSale({
         saleNumber: formOrderNumber.trim(),
         partyId: formPartyId,
@@ -787,6 +795,7 @@ export function OrdersView({
         subtotal: formCalculations.subtotal,
         taxAmount,
         totalAmount,
+        documentIds: stagedSaleDocs.map((d) => d.id),
         stage: {
           stageType: formStage,
           stageNumber: formOrderNumber.trim(),
@@ -796,6 +805,7 @@ export function OrdersView({
           ...settleStageFields(),
         },
       });
+      setStagedSaleDocs([]);
     }
 
     setIsFormOpen(false);
@@ -2302,6 +2312,16 @@ export function OrdersView({
                   </div>
                 </div>
               )}
+
+              {/* DOCUMENTS (S3 upload feature): attach while creating (staged),
+                  editing a stage, or issuing a new stage — links to the order
+                  immediately when the order already exists */}
+              <OrderDocumentsSection
+                feature="sale"
+                orderId={editingOrder?.id || stageIssueCtx?.saleId}
+                staged={editingOrder || stageIssueCtx ? undefined : stagedSaleDocs}
+                onStagedChange={editingOrder || stageIssueCtx ? undefined : setStagedSaleDocs}
+              />
 
               {/* Action Buttons */}
               <div className="flex items-center justify-end gap-3 pt-3 border-t border-[var(--color-outline-variant)]">

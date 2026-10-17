@@ -651,7 +651,65 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
-      // 10. Employees, Attendance, Leaves, Payments
+      // 10a. Documents: S3-uploaded files (any feature) + order mapping tables.
+      // documents = one row per uploaded file with its permanent S3 URL and a
+      // soft status flag; sale_order_documents / purchase_order_documents are
+      // pure FK join tables (order id ↔ document id). S3 objects are never
+      // deleted by the app; 'deleted' documents keep their rows (audit).
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS documents (
+          id VARCHAR(64) PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          s3_key VARCHAR(512) NOT NULL,
+          url VARCHAR(1024) NOT NULL,
+          content_type VARCHAR(128),
+          size_bytes BIGINT DEFAULT 0.00,
+          uploaded_by_id VARCHAR(64),
+          status VARCHAR(32) DEFAULT 'active',
+          created_at VARCHAR(64) NOT NULL,
+          INDEX idx_doc_status (status),
+          INDEX idx_doc_uploaded_by (uploaded_by_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      // Backward-compat: status column was added with the soft-life flag
+      try {
+        const [docCols]: any = await conn.query('SHOW COLUMNS FROM documents');
+        const docNames = (docCols || []).map((c: any) => c.Field);
+        if (!docNames.includes('status')) {
+          await conn.query("ALTER TABLE documents ADD COLUMN status VARCHAR(32) DEFAULT 'active' AFTER uploaded_by_id");
+          await conn.query("UPDATE documents SET status = 'active' WHERE status IS NULL");
+          console.log('[MySQL Migration] Added status column to documents table.');
+        }
+      } catch (docStatusErr: any) {
+        console.warn('[MySQL Migration] documents status notice:', docStatusErr.message);
+      }
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS sale_order_documents (
+          id VARCHAR(64) PRIMARY KEY,
+          sale_id VARCHAR(64) NOT NULL,
+          document_id VARCHAR(64) NOT NULL,
+          created_at VARCHAR(64) NOT NULL,
+          UNIQUE KEY uq_sale_doc (sale_id, document_id),
+          INDEX idx_sod_sale (sale_id),
+          INDEX idx_sod_document (document_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS purchase_order_documents (
+          id VARCHAR(64) PRIMARY KEY,
+          purchase_id VARCHAR(64) NOT NULL,
+          document_id VARCHAR(64) NOT NULL,
+          created_at VARCHAR(64) NOT NULL,
+          UNIQUE KEY uq_purchase_doc (purchase_id, document_id),
+          INDEX idx_pod_purchase (purchase_id),
+          INDEX idx_pod_document (document_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      // 10b. Employees, Attendance, Leaves, Payments
       await conn.query(`
         CREATE TABLE IF NOT EXISTS employees (
           id VARCHAR(64) PRIMARY KEY,
@@ -1919,6 +1977,37 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
             tyr.createdAt || null,
             tyr.updatedAt || null,
           ]
+        );
+      }
+
+      // Seed documents + order document mapping tables
+      for (const doc of (snapshot.documents || []) as any[]) {
+        await conn.query(
+          `REPLACE INTO documents (id, name, s3_key, url, content_type, size_bytes, uploaded_by_id, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            doc.id,
+            doc.name,
+            doc.s3Key,
+            doc.url,
+            doc.contentType || null,
+            Number(doc.sizeBytes) || 0,
+            doc.uploadedById || null,
+            doc.status || 'active',
+            doc.createdAt,
+          ]
+        );
+      }
+      for (const l of (snapshot.saleOrderDocuments || []) as any[]) {
+        await conn.query(
+          `REPLACE INTO sale_order_documents (id, sale_id, document_id, created_at) VALUES (?, ?, ?, ?)`,
+          [l.id, l.saleId, l.documentId, l.createdAt]
+        );
+      }
+      for (const l of (snapshot.purchaseOrderDocuments || []) as any[]) {
+        await conn.query(
+          `REPLACE INTO purchase_order_documents (id, purchase_id, document_id, created_at) VALUES (?, ?, ?, ?)`,
+          [l.id, l.purchaseId, l.documentId, l.createdAt]
         );
       }
 

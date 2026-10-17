@@ -26,6 +26,7 @@ import {
   UserRole,
   UserPermissions,
   UserStatus,
+  AppDocument,
 } from '../types';
 
 export interface HealthResponse {
@@ -873,6 +874,47 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify({ filePath, contentType }),
     });
+  }
+
+  // ==========================================
+  // DOCUMENTS (S3 uploads mapped to sales/purchases)
+  // ==========================================
+
+  public async createDocument(payload: {
+    name: string;
+    s3Key: string;
+    url: string;
+    contentType?: string;
+    sizeBytes?: number;
+  }): Promise<{ success: boolean; data?: AppDocument; message?: string }> {
+    return this.request('/documents', { method: 'POST', body: JSON.stringify(payload) });
+  }
+
+  public async getSaleDocuments(saleId: string): Promise<{ success: boolean; count: number; data: AppDocument[] }> {
+    return this.request(`/documents/sale/${saleId}`);
+  }
+
+  public async getPurchaseDocuments(purchaseId: string): Promise<{ success: boolean; count: number; data: AppDocument[] }> {
+    return this.request(`/documents/purchase/${purchaseId}`);
+  }
+
+  public async linkSaleDocuments(saleId: string, documentIds: string[]): Promise<{ success: boolean; added: number }> {
+    return this.request(`/documents/sale/${saleId}/link`, {
+      method: 'POST',
+      body: JSON.stringify({ documentIds }),
+    });
+  }
+
+  public async linkPurchaseDocuments(purchaseId: string, documentIds: string[]): Promise<{ success: boolean; added: number }> {
+    return this.request(`/documents/purchase/${purchaseId}/link`, {
+      method: 'POST',
+      body: JSON.stringify({ documentIds }),
+    });
+  }
+
+  /** Pre-signed GET (1h) — open-in-tab viewing of private bucket objects */
+  public async getDocumentDownloadUrl(id: string): Promise<{ success: boolean; data?: { url: string; expiresIn: number } }> {
+    return this.request(`/documents/${id}/download`);
   }
 
   public async testTransactions(workersCount: number = 10): Promise<{

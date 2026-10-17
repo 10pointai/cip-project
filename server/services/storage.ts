@@ -187,9 +187,12 @@ export async function generatePresignedUploadUrl(
     // 1-hour pre-signed URL expiration
     const uploadUrl = await getSignedUrl(client, command, { expiresIn: 3600 });
     
-    // Construct public or accessible S3 URL
-    const publicUrl = process.env.AWS_S3_CUSTOM_DOMAIN
-      ? `https://${process.env.AWS_S3_CUSTOM_DOMAIN}/${cleanKey}`
+    // Construct public or accessible S3 URL. AWS_S3_CUSTOM_DOMAIN (e.g. a
+    // CloudFront distribution) takes precedence — the SAVED url is the CDN
+    // form, while the upload itself still streams to S3 through the presign.
+    const customDomain = (process.env.AWS_S3_CUSTOM_DOMAIN || '').replace(/\/+$/, '');
+    const publicUrl = customDomain
+      ? `https://${customDomain}/${cleanKey}`
       : `https://${bucket}.s3.${region}.amazonaws.com/${cleanKey}`;
 
     return {

@@ -73,15 +73,39 @@ cloudRouter.post('/seed-from-local', requirePermission('manage_settings'), async
   }
 });
 
-// POST /api/cloud/storage/presigned-url - Generate AWS S3 pre-signed upload URL for evidence
-cloudRouter.post('/storage/presigned-url', requirePermission('manage_evidence'), async (req: Request, res: Response) => {
+// POST /api/cloud/storage/test - Verify S3 credentials/bucket/re-region reachability (HeadBucket)
+cloudRouter.post('/storage/test', requirePermission('manage_settings'), async (req: Request, res: Response) => {
+  try {
+    const result = await testS3Connection();
+    const status = getStorageStatus();
+    res.json({ success: result.ok, test: result, storageStatus: status });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// POST /api/cloud/storage/presigned-url - Generate AWS S3 pre-signed upload URL
+// Authentication-only (no manage_evidence gate): uploads originate from many
+// features (evidence vault, sales vouchers, purchase bills, trip slips...);
+// the caller is responsible for building a legal S3 key via s3Upload.ts.
+cloudRouter.post('/storage/presigned-url', async (req: Request, res: Response) => {
   try {
     const { filePath, contentType } = req.body;
     if (!filePath || !contentType) {
       return res.status(400).json({ success: false, error: 'filePath and contentType are required' });
     }
 
-    const result = await generatePresignedUploadUrl(filePath, contentType);
+    // Defense-in-depth: the key must stay inside the key namespace — reject
+    // traversal segments regardless of S3's own key semantics.
+    const cleanPath = String(filePath)
+      .split('/')
+      .filter((seg) => seg && seg !== '.' && seg !== '..')
+      .join('/');
+    if (!cleanPath) {
+      return res.status(400).json({ success: false, error: 'filePath must be a non-empty S3 object key' });
+    }
+
+    const result = await generatePresignedUploadUrl(cleanPath, String(contentType));
     if (!result) {
       return res.json({
         success: false,

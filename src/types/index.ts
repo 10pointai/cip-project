@@ -158,6 +158,52 @@ export interface Item {
 
 export type StockAdjustmentType = 'increase' | 'decrease';
 
+// ==========================================
+// DOCUMENTS (generic S3 upload records + order mapping)
+// ==========================================
+// Every feature (sales, purchases, and later others) uploads files to AWS S3
+// via s3Upload.ts and persists the resulting link here. Named AppDocument —
+// `Document` collides with the DOM's Document interface.
+
+export type DocumentStatus = 'active' | 'deleted';
+
+export interface AppDocument {
+  id: string;
+  /** Original file name (display field of the record itself — not a denorm copy) */
+  name: string;
+  /** S3 object key, e.g. sales/sales_order/2026/10/...-sinv-26-001.pdf */
+  s3Key: string;
+  /** Permanent S3 object URL — the value saved at upload time */
+  url: string;
+  contentType?: string;
+  sizeBytes?: number;
+  /** FK users.id — who uploaded it (null = system/tech-team upload) */
+  uploadedById?: string;
+  /** Soft-life flag: 'deleted' rows keep their mapping history but hide in UI */
+  status: DocumentStatus;
+  createdAt: string;
+}
+
+/** sales ↔ documents join row (FK-only per the data standard §Golden Rule) */
+export interface SaleOrderDocumentLink {
+  id: string;
+  /** FK sales.id */
+  saleId: string;
+  /** FK documents.id */
+  documentId: string;
+  createdAt: string;
+}
+
+/** purchases ↔ documents join row (FK-only per the data standard §Golden Rule) */
+export interface PurchaseOrderDocumentLink {
+  id: string;
+  /** FK purchases.id */
+  purchaseId: string;
+  /** FK documents.id */
+  documentId: string;
+  createdAt: string;
+}
+
 export interface ItemStockAdjustment {
   id: string;
   adjustmentNumber: string; // e.g. "STK-ADJ-26/001"
@@ -595,6 +641,8 @@ export interface EvidenceFile {
   size: number; // in bytes
   type: string; // MIME type (e.g. "image/jpeg", "image/png", "application/pdf")
   dataUrl?: string; // Data URL / Base64 / SVG or simulated asset URL for preview
+  s3Url?: string; // Permanent AWS S3 object URL — saved at upload time by s3Upload.ts
+  s3Key?: string; // S3 object key (for presigned download / lifecycle ops)
   entityType: EvidenceEntityType;
   entityId?: string;
   entityName?: string;

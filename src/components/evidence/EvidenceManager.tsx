@@ -36,7 +36,20 @@ import {
 } from 'lucide-react';
 import { EvidenceFolder, EvidenceFile, EvidenceEntityType } from '../../types';
 import { useDatabase } from '../../hooks/useDatabase';
+import { useToast } from '../common/Toast';
 import { formatDate } from '../../utils/formatters';
+import { uploadFileToS3 } from '../../services/s3Upload';
+import { UploadProgressBar, UploadRowState } from '../common/UploadProgressBar';
+
+/** One queued file in the upload modal — keeps the raw File for the S3 stream */
+interface EvidenceUploadQueueItem {
+  qid: string;
+  name: string;
+  size: number;
+  type: string;
+  dataUrl?: string;
+  file: File;
+}
 
 interface EvidenceManagerProps {
   initialEntityType?: EvidenceEntityType;
@@ -58,6 +71,7 @@ export function EvidenceManager({
   isEmbedded = false,
 }: EvidenceManagerProps) {
   const { db, evidenceFolders, evidenceFiles, parties, vehicles, employees } = useDatabase();
+  const { showToast } = useToast();
 
   // Navigation State
   const [activeEntityType, setActiveEntityType] = useState<EvidenceEntityType | 'all'>(
@@ -83,9 +97,11 @@ export function EvidenceManager({
 
   // Upload Modal Form
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploadFilesQueue, setUploadFilesQueue] = useState<
-    Array<{ name: string; size: number; type: string; dataUrl?: string }>
-  >([]);
+  const [uploadFilesQueue, setUploadFilesQueue] = useState<EvidenceUploadQueueItem[]>([]);
+  // Per-row upload progress (keyed by qid) rendered by UploadProgressBar
+  const [uploadStates, setUploadStates] = useState<Record<string, UploadRowState>>({});
+  const [isUploading, setIsUploading] = useState(false);
+  const uploadAbortsRef = useRef<Map<string, () => void>>(new Map());
   const [uploadTargetFolderId, setUploadTargetFolderId] = useState<string>(currentFolderId || '');
   const [uploadDescription, setUploadDescription] = useState('');
   const [uploadTags, setUploadTags] = useState('');
@@ -244,10 +260,13 @@ export function EvidenceManager({
     setFolderToEdit(null);
   };
 
-  // Handler: File Upload Submission
-  const handleUploadSubmit = (e: React.FormEvent) => {
+  // Handler: File Upload Submission — streams every queued file to AWS S3
+  // through the shared s3Upload service with live progress; the permanent S3
+  // link is stored on the evidence record (s3Url/s3Key). Files fall back to
+  // local dataUrl records ONLY when S3 is unconfigured on the server.
+  const handleUploadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (uploadFilesQueue.length === 0) return;
+    if (uploadFilesQueue.length === 0 || isUploading) return;
 
     const targetFldId = uploadTargetFolderId || currentFolderId;
     const targetFolder = evidenceFolders.find((f) => f.id === targetFldId);
@@ -263,47 +282,138 @@ export function EvidenceManager({
           .filter(Boolean)
       : [];
 
-    uploadFilesQueue.forEach((file) => {
-      db.addFile({
-        folderId: targetFldId || 'fld-gen-1',
-        name: file.name,
-        size: file.size,
-        type: file.type,
-        dataUrl: file.dataUrl,
+    setIsUploading(true);
+    let uploadedCount = 0;
+    let localCount = 0;
+    const failedQids: string[] = [];
+
+    for (const q of uploadFilesQueue) {
+      const { promise, abort } = uploadFileToS3(q.file, {
+        feature: 'evidence',
         entityType: targetEntityType,
         entityId: targetEntityId,
-        entityName: targetEntityName,
-        linkedEntryType: uploadLinkedEntryType || undefined,
-        linkedEntryId: uploadLinkedEntryId || undefined,
-        description: uploadDescription || `Uploaded ${file.name}`,
-        tags: parsedTags.length > 0 ? parsedTags : ['Evidence'],
+        onProgress: (p) =>
+          setUploadStates((prev) => ({ ...prev, [q.qid]: { status: 'uploading', progress: p } })),
       });
-    });
+      uploadAbortsRef.current.set(q.qid, abort);
+      const res = await promise;
 
-    setUploadFilesQueue([]);
-    setUploadDescription('');
-    setUploadTags('');
-    setUploadLinkedEntryType('');
-    setUploadLinkedEntryId('');
-    setIsUploadOpen(false);
+      if (res.success && res.publicUrl) {
+        uploadedCount += 1;
+        setUploadStates((prev) => ({ ...prev, [q.qid]: { status: 'done', url: res.publicUrl } }));
+        db.addFile({
+          folderId: targetFldId || 'fld-gen-1',
+          name: q.name,
+          size: q.size,
+          type: q.type,
+          dataUrl: q.dataUrl,
+          s3Url: res.publicUrl,
+          s3Key: res.key,
+          entityType: targetEntityType,
+          entityId: targetEntityId,
+          entityName: targetEntityName,
+          linkedEntryType: uploadLinkedEntryType || undefined,
+          linkedEntryId: uploadLinkedEntryId || undefined,
+          description: uploadDescription || `Uploaded ${q.name}`,
+          tags: parsedTags.length > 0 ? parsedTags : ['Evidence'],
+        });
+      } else if (res.error === 'not-configured') {
+        // S3 keys absent on the server — keep the legacy local (dataUrl) record
+        // so the module degrades gracefully until credentials are pasted in .env
+        localCount += 1;
+        setUploadStates((prev) => ({
+          ...prev,
+          [q.qid]: {
+            status: 'local',
+            message: res.message || 'AWS S3 is not configured — stored locally.',
+          },
+        }));
+        db.addFile({
+          folderId: targetFldId || 'fld-gen-1',
+          name: q.name,
+          size: q.size,
+          type: q.type,
+          dataUrl: q.dataUrl,
+          entityType: targetEntityType,
+          entityId: targetEntityId,
+          entityName: targetEntityName,
+          linkedEntryType: uploadLinkedEntryType || undefined,
+          linkedEntryId: uploadLinkedEntryId || undefined,
+          description: uploadDescription || `Uploaded ${q.name}`,
+          tags: parsedTags.length > 0 ? parsedTags : ['Evidence'],
+        });
+      } else {
+        failedQids.push(q.qid);
+        setUploadStates((prev) => ({
+          ...prev,
+          [q.qid]: { status: res.error === 'aborted' ? 'aborted' : 'failed', message: res.message },
+        }));
+      }
+    }
+
+    setIsUploading(false);
+    uploadAbortsRef.current.clear();
+
+    // Progress toast summary
+    if (uploadedCount > 0) showToast(`${uploadedCount} file${uploadedCount > 1 ? 's' : ''} uploaded to AWS S3.`, 'success');
+    if (localCount > 0) showToast(`${localCount} file${localCount > 1 ? 's' : ''} stored locally — AWS S3 not configured.`, 'info');
+
+    const remaining = failedQids.length > 0
+      ? uploadFilesQueue.filter((q) => failedQids.includes(q.qid))
+      : [];
+
+    if (failedQids.length === 0) {
+      setUploadFilesQueue([]);
+      setUploadStates({});
+      setUploadDescription('');
+      setUploadTags('');
+      setUploadLinkedEntryType('');
+      setUploadLinkedEntryId('');
+      setIsUploadOpen(false);
+    } else {
+      // Keep failed rows in the queue so the admin can retry after fixing them
+      setUploadFilesQueue(remaining);
+      const keptStates: Record<string, UploadRowState> = {};
+      failedQids.forEach((qid) => {
+        const s = uploadStates[qid];
+        if (s) keptStates[qid] = s;
+      });
+      setUploadStates(keptStates);
+      showToast(`${failedQids.length} upload${failedQids.length > 1 ? 's' : '' } failed — fix or cancel those rows.`, 'error');
+    }
   };
 
   const handleQueueFiles = (filesList: FileList | null) => {
     if (!filesList) return;
-    const newQueue = [...uploadFilesQueue];
+    const newQueue: EvidenceUploadQueueItem[] = [...uploadFilesQueue];
     Array.from(filesList).forEach((file) => {
+      const qid = `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const reader = new FileReader();
       reader.onload = (e) => {
         newQueue.push({
+          qid,
           name: file.name,
           size: file.size,
           type: file.type || 'application/octet-stream',
           dataUrl: e.target?.result as string,
+          file,
         });
         setUploadFilesQueue([...newQueue]);
       };
       reader.readAsDataURL(file);
     });
+  };
+
+  // Closing the upload dialog abandons any in-flight S3 streams
+  const handleUploadModalClose = () => {
+    if (isUploading) {
+      uploadAbortsRef.current.forEach((abort) => abort());
+      uploadAbortsRef.current.clear();
+      setIsUploading(false);
+    }
+    setUploadFilesQueue([]);
+    setUploadStates({});
+    setIsUploadOpen(false);
   };
 
   // Helper to get folder stats
@@ -889,7 +999,7 @@ export function EvidenceManager({
               </div>
               <button
                 type="button"
-                onClick={() => setIsUploadOpen(false)}
+                onClick={handleUploadModalClose}
                 className="p-1 rounded-full text-[var(--color-outline)] hover:text-[var(--color-on-surface)]"
               >
                 <X className="w-5 h-5" />
@@ -939,27 +1049,37 @@ export function EvidenceManager({
                 </div>
               </div>
 
-              {/* Queued Files preview */}
+              {/* Queued Files preview + live S3 progress */}
               {uploadFilesQueue.length > 0 && (
-                <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-                  {uploadFilesQueue.map((file, idx) => (
-                    <div
-                      key={idx}
-                      className="flex items-center justify-between p-2 bg-[var(--color-surface-container)] rounded-lg text-xs"
-                    >
-                      <span className="truncate max-w-[300px] font-semibold">{file.name}</span>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-[var(--color-outline)]">{formatFileSize(file.size)}</span>
-                        <button
-                          type="button"
-                          onClick={() => setUploadFilesQueue(uploadFilesQueue.filter((_, i) => i !== idx))}
-                          className="text-[var(--color-error)] p-1 hover:bg-[var(--color-error-container)] rounded"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                  {uploadFilesQueue.map((file) => {
+                    const rowState = uploadStates[file.qid] || { status: 'queued' as const };
+                    const canRemoveRow = !isUploading || (rowState.status === 'failed' || rowState.status === 'aborted');
+                    return (
+                      <UploadProgressBar
+                        key={file.qid}
+                        name={file.name}
+                        size={file.size}
+                        state={rowState}
+                        onCancel={() => {
+                          uploadAbortsRef.current.get(file.qid)?.();
+                          uploadAbortsRef.current.delete(file.qid);
+                        }}
+                        onRemove={
+                          canRemoveRow
+                            ? () => {
+                                setUploadFilesQueue(uploadFilesQueue.filter((f) => f.qid !== file.qid));
+                                setUploadStates((prev) => {
+                                  const next = { ...prev };
+                                  delete next[file.qid];
+                                  return next;
+                                });
+                              }
+                            : undefined
+                        }
+                      />
+                    );
+                  })}
                 </div>
               )}
 
@@ -1008,17 +1128,17 @@ export function EvidenceManager({
               <div className="flex items-center justify-end gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setIsUploadOpen(false)}
+                  onClick={handleUploadModalClose}
                   className="px-4 py-2 bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] rounded-full text-xs font-bold transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={uploadFilesQueue.length === 0}
+                  disabled={uploadFilesQueue.length === 0 || isUploading}
                   className="px-5 py-2 bg-[var(--color-primary)] disabled:opacity-50 hover:opacity-90 text-white rounded-full text-xs font-bold shadow-sm transition-all"
                 >
-                  Save & Upload ({uploadFilesQueue.length})
+                  {isUploading ? 'Uploading…' : `Save & Upload (${uploadFilesQueue.length})`}
                 </button>
               </div>
             </form>

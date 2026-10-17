@@ -19,6 +19,7 @@ import {
 } from './orderDisplay';
 import { SaleStageDocCard, PurchaseStageDocCard } from './StageDocumentCards';
 import { OrderDocumentPreviewModal } from './OrderDocumentPreviewModal';
+import { OrderDocumentsSection } from './OrderDocumentsSection';
 import { formatDateTime } from '../../utils/formatters';
 
 /**
@@ -384,6 +385,14 @@ export function OrderDetailModal({
               </div>
             );
           })()}
+
+          {/* DOCUMENTS: available on EVERY order in EVERY stage — locked
+              invoices included (upload-only; no delete per user directive).
+              Uploads link to the order immediately. */}
+          <OrderDocumentsSection
+            feature={selectedOrder.type === 'purchase' ? 'purchase' : 'sale'}
+            orderId={selectedOrder.id}
+          />
 
           {/* Actions Footer */}
           <div className="flex items-center justify-end pt-3 border-t border-[var(--color-outline-variant)]">

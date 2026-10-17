@@ -16,6 +16,7 @@ import { analyticsRouter } from './server/routes/analytics';
 import { backupRouter } from './server/routes/backup';
 import { authRouter } from './server/routes/auth';
 import { usersRouter } from './server/routes/users';
+import { documentsRouter } from './server/routes/documents';
 import { cloudRouter } from './server/routes/cloud';
 import { accountsRouter, transfersRouter, adjustmentsRouter } from './server/routes/accounts';
 import { getConnectionStatus, isMysqlConfigured, testMysqlConnection } from './server/mysql/connection';
@@ -137,6 +138,7 @@ app.get('/api/sync', async (req, res) => {
 // Mount domain routes
 app.use('/api/auth', authRouter);
 app.use('/api/users', usersRouter);
+app.use('/api/documents', documentsRouter);
 app.use('/api/parties', partiesRouter);
 app.use('/api/transactions', transactionsRouter);
 app.use('/api/items', itemsRouter);

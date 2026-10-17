@@ -30,6 +30,7 @@ import {
 } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { SearchableSelect } from './SearchableSelect';
+import { OrderDocumentsSection, StagedDocument } from './OrderDocumentsSection';
 
 interface AddPurchaseModalProps {
   isOpen: boolean;
@@ -253,6 +254,9 @@ export function AddPurchaseModal({
   // bill voucher must keep upserting on later saves). The flow is COMPULSORY
   // at the goods-receipt stage: issuing one defaults to Book on credit.
   const cashAlready = Boolean((existingOrder as any)?.cashApplied);
+  // Documents staged while CREATING a brand-new purchase (S3-uploaded +
+  // registered; carried as documentIds on the create payload)
+  const [stagedPurchaseDocs, setStagedPurchaseDocs] = useState<StagedDocument[]>([]);
   const [settlementType, setSettlementType] = useState<'none' | 'credit' | 'account'>(
     cashAlready
       ? (((existingOrder as any)?.settlementType || 'account') as 'credit' | 'account')
@@ -562,6 +566,7 @@ export function AddPurchaseModal({
         date: date || today,
         notes: notes || undefined,
         items: itemsPayload,
+        documentIds: stagedPurchaseDocs.map((d) => d.id),
         stage: stageInput,
       },
     };
@@ -576,6 +581,7 @@ export function AddPurchaseModal({
     } else {
       onAddPurchase(built.masterPayload);
     }
+    setStagedPurchaseDocs([]);
     onClose();
   };
 
@@ -1397,6 +1403,17 @@ export function AddPurchaseModal({
               </div>
             </div>
           )}
+          {/* DOCUMENTS (S3 upload feature): stage while creating; link
+              immediately when the purchase already exists */}
+          <div className="px-6 pb-3">
+            <OrderDocumentsSection
+              feature="purchase"
+              orderId={existingOrder ? (existingOrder as any).id : undefined}
+              staged={existingOrder ? undefined : stagedPurchaseDocs}
+              onStagedChange={existingOrder ? undefined : setStagedPurchaseDocs}
+            />
+          </div>
+
         </div>
 
         {/* --- FOOTER ACTIONS --- */}

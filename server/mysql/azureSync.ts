@@ -19,6 +19,10 @@ import {
   EmployeeLeave,
   EmployeePayment,
   AppUser,
+  AppDocument,
+  SaleOrderDocumentLink,
+  PurchaseOrderDocumentLink,
+  DocumentStatus,
   CashBankAccount,
   InternalTransfer,
   AccountAdjustment,
@@ -928,6 +932,40 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         details: aud.details,
       }));
 
+      // Documents + order mapping tables (S3 upload records + pure FK joins)
+      const [documentRows]: any[] = await conn.query(
+        'SELECT * FROM documents ORDER BY created_at DESC'
+      );
+      const documents: AppDocument[] = (documentRows || []).map((d: any) => ({
+        id: d.id,
+        name: d.name,
+        s3Key: d.s3_key,
+        url: d.url,
+        contentType: d.content_type || undefined,
+        sizeBytes: Number(d.size_bytes) || 0,
+        uploadedById: d.uploaded_by_id || undefined,
+        status: (d.status as DocumentStatus) || 'active',
+        createdAt: d.created_at,
+      }));
+      const [saleDocRows]: any[] = await conn.query(
+        'SELECT * FROM sale_order_documents ORDER BY created_at ASC'
+      );
+      const saleOrderDocuments: SaleOrderDocumentLink[] = (saleDocRows || []).map((l: any) => ({
+        id: l.id,
+        saleId: l.sale_id,
+        documentId: l.document_id,
+        createdAt: l.created_at,
+      }));
+      const [purchaseDocRows]: any[] = await conn.query(
+        'SELECT * FROM purchase_order_documents ORDER BY created_at ASC'
+      );
+      const purchaseOrderDocuments: PurchaseOrderDocumentLink[] = (purchaseDocRows || []).map((l: any) => ({
+        id: l.id,
+        purchaseId: l.purchase_id,
+        documentId: l.document_id,
+        createdAt: l.created_at,
+      }));
+
       if (!settings) {
         return null;
       }
@@ -962,6 +1000,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         adjustments,
         stockAdjustments,
         stockMovements,
+        documents,
+        saleOrderDocuments,
+        purchaseOrderDocuments,
         auditLogs,
       };
     } finally {
@@ -1842,6 +1883,69 @@ export async function liveSyncUser(u: AppUser, isDelete = false) {
     }
   } catch (e: any) {
     console.error('[Azure MySQL LiveSync] Failed to sync user:', e.message);
+  }
+}
+
+export async function liveSyncDocument(doc: AppDocument, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM documents WHERE id = ?', [doc.id]);
+    } else {
+      await pool.query(
+        `REPLACE INTO documents (
+          id, name, s3_key, url, content_type, size_bytes, uploaded_by_id, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          doc.id,
+          doc.name,
+          doc.s3Key,
+          doc.url,
+          doc.contentType || null,
+          Number(doc.sizeBytes) || 0,
+          doc.uploadedById || null,
+          doc.status || 'active',
+          doc.createdAt,
+        ]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync document:', e.message);
+  }
+}
+
+export async function liveSyncSaleOrderDocLink(link: SaleOrderDocumentLink, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM sale_order_documents WHERE id = ?', [link.id]);
+    } else {
+      await pool.query(
+        `REPLACE INTO sale_order_documents (id, sale_id, document_id, created_at) VALUES (?, ?, ?, ?)`,
+        [link.id, link.saleId, link.documentId, link.createdAt]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync sale document link:', e.message);
+  }
+}
+
+export async function liveSyncPurchaseOrderDocLink(link: PurchaseOrderDocumentLink, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM purchase_order_documents WHERE id = ?', [link.id]);
+    } else {
+      await pool.query(
+        `REPLACE INTO purchase_order_documents (id, purchase_id, document_id, created_at) VALUES (?, ?, ?, ?)`,
+        [link.id, link.purchaseId, link.documentId, link.createdAt]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync purchase document link:', e.message);
   }
 }
 
