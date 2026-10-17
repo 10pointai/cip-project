@@ -67,18 +67,9 @@ export function Header({
         if (!hasPermission('manage_inventory')) return null;
         return null
       case 'production':
+        // No header action — batch runs are logged inside the Production view.
         if (!hasPermission('manage_production')) return null;
-        return (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => window.dispatchEvent(new CustomEvent('app-header-action', { detail: 'log-batch' }))}
-              className="inline-flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-xs"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Log Batch Run</span>
-            </button>
-          </div>
-        );
+        return null;
       case 'sales':
         if (!hasPermission('manage_sales')) return null;
         return null
