@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { Party } from '../../types';
 import { formatCurrency, formatDate } from '../../utils/formatters';
-import { PartyLedgerEntry, PartyStatement, formatLedgerBalance, entryStageLines } from './partyStatement';
+import { PartyLedgerEntry, PartyStatement, formatLedgerBalance, entryStageLines, ledgerMoneySplit } from './partyStatement';
 
 /**
  * Statement of Account & Ledger — the doc-centric party list. One row per
@@ -205,7 +205,7 @@ export function PartyStatementLedger({
 
       {/* Scrollable Ledger Table */}
       <div className="overflow-x-auto">
-        <table className="w-full text-left text-xs border-collapse min-w-[1020px]">
+        <table className="w-full text-left text-xs border-collapse min-w-[1180px]">
           <thead>
             <tr className="bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
               <th className="py-3 px-4">Date</th>
@@ -213,8 +213,10 @@ export function PartyStatementLedger({
               <th className="py-3 px-3">Particulars</th>
               <th className="py-3 px-3">Stages</th>
               <th className="py-3 px-3">Reference</th>
-              <th className="py-3 px-3 text-right">Debit (Dr / Sales / We Paid)</th>
-              <th className="py-3 px-3 text-right">Credit (Cr / Purchases / Received)</th>
+              <th className="py-3 px-3 text-right">Sales</th>
+              <th className="py-3 px-3 text-right">Purchases</th>
+              <th className="py-3 px-3 text-right">Paid In</th>
+              <th className="py-3 px-3 text-right">Paid Out</th>
               <th className="py-3 px-3 text-right">Running Balance</th>
               <th className="py-3 px-2 w-6"></th>
             </tr>
@@ -223,7 +225,7 @@ export function PartyStatementLedger({
             {/* Document-ledger rows */}
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={9} className="py-10 text-center text-xs text-[var(--color-on-surface-variant)] italic">
+                <td colSpan={11} className="py-10 text-center text-xs text-[var(--color-on-surface-variant)] italic">
                   {statement.rows.length === 0
                     ? 'No sales, purchases or payments recorded for this party yet.'
                     : 'No documents found matching your search or active filter.'}
@@ -237,6 +239,19 @@ export function PartyStatementLedger({
                   ? entry.journalVoucher.voucherNumber
                   : undefined;
                 const stageLines = entryStageLines(entry);
+                const money = ledgerMoneySplit(entry);
+                // Settlement notes live on the document columns (sale/purchase):
+                // "Settled" when a payment leg posted, "Booked on credit" while
+                // the due is fully open.
+                const docNote = money.sale || money.purchase
+                  ? (entry.settledAmount
+                      ? { text: 'Settled', cls: `text-[9px] font-semibold mt-0.5 ${amountTone(entry)}` }
+                      : unsettledDuesOpen(entry)
+                        ? { text: 'Booked on credit', cls: 'text-[9px] font-semibold italic mt-0.5 text-[var(--color-error)]' }
+                        : null)
+                  : null;
+                const toneIf = (val: number) =>
+                  val ? amountTone(entry) : 'text-[var(--color-on-surface-variant)]';
                 return (
                   <tr
                     key={entry.id}
@@ -322,33 +337,36 @@ export function PartyStatementLedger({
                     <td className="py-3 px-3 font-mono text-[var(--color-on-surface-variant)] max-w-[140px] truncate">
                       {entry.reference || '—'}
                     </td>
-                    <td className="py-3 px-3 text-right">
-                      <span className={`font-mono font-bold ${amountTone(entry)}`}>
-                        {entry.debit ? formatCurrency(entry.debit, currencySymbol) : '—'}
+                    {/* Sales — this party's billed invoices (voucher-invoiced
+                        manual bills land here too) */}
+                    <td className="py-3 px-2.5 text-right">
+                      <span className={`font-mono font-bold ${toneIf(money.sale)}`}>
+                        {money.sale ? formatCurrency(money.sale, currencySymbol) : '—'}
                       </span>
-                      {entry.debit && entry.settledAmount ? (
-                        <p className={`text-[9px] font-semibold mt-0.5 ${amountTone(entry)}`}>
-                          Settled
-                        </p>
-                      ) : entry.debit && unsettledDuesOpen(entry) ? (
-                        <p className="text-[9px] font-semibold mt-0.5 text-[var(--color-error)] italic">
-                          Booked on credit
-                        </p>
-                      ) : null}
+                      {money.sale > 0 && docNote && (
+                        <p className={docNote.cls}>{docNote.text}</p>
+                      )}
                     </td>
-                    <td className="py-3 px-3 text-right">
-                      <span className={`font-mono font-bold ${amountTone(entry)}`}>
-                        {entry.credit ? formatCurrency(entry.credit, currencySymbol) : '—'}
+                    {/* Purchases — vendor bills */}
+                    <td className="py-3 px-2.5 text-right">
+                      <span className={`font-mono font-bold ${toneIf(money.purchase)}`}>
+                        {money.purchase ? formatCurrency(money.purchase, currencySymbol) : '—'}
                       </span>
-                      {entry.settledAmount && !entry.debit ? (
-                        <p className={`text-[9px] font-semibold mt-0.5 ${amountTone(entry)}`}>
-                          Settled
-                        </p>
-                      ) : entry.credit && unsettledDuesOpen(entry) ? (
-                        <p className="text-[9px] font-semibold mt-0.5 text-[var(--color-error)] italic">
-                          Booked on credit
-                        </p>
-                      ) : null}
+                      {money.purchase > 0 && docNote && (
+                        <p className={docNote.cls}>{docNote.text}</p>
+                      )}
+                    </td>
+                    {/* Paid In — money actually received into a Cash/Bank a/c */}
+                    <td className="py-3 px-2.5 text-right">
+                      <span className={`font-mono font-bold ${toneIf(money.paidIn)}`}>
+                        {money.paidIn ? formatCurrency(money.paidIn, currencySymbol) : '—'}
+                      </span>
+                    </td>
+                    {/* Paid Out — money actually paid out */}
+                    <td className="py-3 px-2.5 text-right">
+                      <span className={`font-mono font-bold ${toneIf(money.paidOut)}`}>
+                        {money.paidOut ? formatCurrency(money.paidOut, currencySymbol) : '—'}
+                      </span>
                     </td>
                     <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-on-surface)] whitespace-nowrap">
                       {formatCurrency(Math.abs(entry.runningBalance), currencySymbol)}{' '}
@@ -379,12 +397,10 @@ export function PartyStatementLedger({
               </td>
               <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">—</td>
               <td className="py-3 px-3 font-mono text-[var(--color-outline)]">—</td>
-              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-error)]">
-                {party.openingBalanceType === 'to_receive' ? formatCurrency(party.openingBalance, currencySymbol) : '—'}
-              </td>
-              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-error)]">
-                {party.openingBalanceType === 'to_pay' ? formatCurrency(party.openingBalance, currencySymbol) : '—'}
-              </td>
+              <td className="py-3 px-2.5 text-right font-mono text-[var(--color-surface-container-highest)]">—</td>
+              <td className="py-3 px-2.5 text-right font-mono text-[var(--color-surface-container-highest)]">—</td>
+              <td className="py-3 px-2.5 text-right font-mono text-[var(--color-surface-container-highest)]">—</td>
+              <td className="py-3 px-2.5 text-right font-mono text-[var(--color-surface-container-highest)]">—</td>
               <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-on-surface)]">
                 {formatCurrency(party.openingBalance, currencySymbol)}{' '}
                 <span className="text-[9px] uppercase font-normal">

@@ -34,7 +34,7 @@ import { PrintStatementModal } from '../common/PrintStatementModal';
 import { EvidenceManager } from '../evidence/EvidenceManager';
 import { useAuth } from '../../context/AuthContext';
 import { cloudStore as localDb } from '../../services/cloudStore';
-import { PartyLedgerEntry, buildPartyStatement, statementToVoucherTransactions } from './partyStatement';
+import { PartyLedgerEntry, buildPartyStatement, statementToVoucherTransactions, ledgerMoneySplit } from './partyStatement';
 import { PartyStatementSummaryCards } from './PartyStatementSummaryCards';
 import { PartyStatementLedger } from './PartyStatementLedger';
 import { PaymentVoucherDetailModal } from './PaymentVoucherDetailModal';
@@ -102,7 +102,7 @@ export function PartyDetailView({
 
   // Export Statement of Account to CSV (documents-first shape)
   const handleExportLedgerCSV = () => {
-    const headers = ['Date', 'Document #', 'Stage/Type', 'Particulars', 'Reference', 'Debit', 'Credit', 'Settled', 'Running Balance', 'Status'];
+    const headers = ['Date', 'Document #', 'Stage/Type', 'Particulars', 'Reference', 'Sales', 'Purchases', 'Paid In', 'Paid Out', 'Settled', 'Running Balance', 'Status'];
 
     const rows = [
       [
@@ -111,24 +111,27 @@ export function PartyDetailView({
         '"Opening Balance"',
         `"Initial balance (${party.openingBalanceType === 'to_receive' ? 'Receivable' : 'Payable'})"`,
         '""',
-        party.openingBalanceType === 'to_receive' ? party.openingBalance : 0,
-        party.openingBalanceType === 'to_pay' ? party.openingBalance : 0,
-        '""',
+        0, 0, 0, 0, '""',
         statement.openingBalance,
         '"Initial"',
       ],
-      ...statement.rows.map((e) => [
-        `"${formatDate(e.date)}"`,
-        `"${e.documentNumber}"`,
-        `"${(e.stageChip ? `${e.stageChip} — ` : '') + e.typeLabel}"`,
-        `"${(e.particulars || '').replace(/"/g, '""')}"`,
-        `"${e.reference || ''}"`,
-        e.debit,
-        e.credit,
-        e.settledAmount ?? 0,
-        e.runningBalance,
-        `"${e.status}"`,
-      ]),
+      ...statement.rows.map((e) => {
+        const money = ledgerMoneySplit(e);
+        return [
+          `"${formatDate(e.date)}"`,
+          `"${e.documentNumber}"`,
+          `"${(e.stageChip ? `${e.stageChip} — ` : '') + e.typeLabel}"`,
+          `"${(e.particulars || '').replace(/"/g, '""')}"`,
+          `"${e.reference || ''}"`,
+          money.sale,
+          money.purchase,
+          money.paidIn,
+          money.paidOut,
+          e.settledAmount ?? 0,
+          e.runningBalance,
+          `"${e.status}"`,
+        ];
+      }),
     ];
 
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');

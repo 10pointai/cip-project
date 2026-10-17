@@ -344,6 +344,39 @@ export function formatLedgerBalance(balance: number): string {
   return `${abs.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${side}`;
 }
 
+/**
+ * FOUR-COLUMN MONEY SPLIT (user decision): each ledger row's amount is
+ * bucketed into exactly one business column —
+ *   Sale rows + manual sale_invoice/debit_note vouchers -> sale
+ *   Purchase rows + manual purchase_bill/credit_note     -> purchase
+ *   payment_in vouchers                                  -> paidIn
+ *   payment_out vouchers                                 -> paidOut
+ * so the statement's money columns read as single-purpose business answers
+ * (what we billed / bought / received / paid — never two meanings per column).
+ */
+export interface LedgerMoneySplit {
+  sale: number;
+  purchase: number;
+  paidIn: number;
+  paidOut: number;
+}
+
+export function ledgerMoneySplit(entry: PartyLedgerEntry): LedgerMoneySplit {
+  const type = entry.transaction?.type;
+  if (entry.kind === 'payment') {
+    if (type === 'payment_in') return { sale: 0, purchase: 0, paidIn: entry.documentAmount, paidOut: 0 };
+    if (type === 'payment_out') return { sale: 0, purchase: 0, paidIn: 0, paidOut: entry.documentAmount };
+    return { sale: 0, purchase: 0, paidIn: 0, paidOut: 0 };
+  }
+  if (entry.kind === 'voucher') {
+    const saleSide = type === 'sale_invoice' || type === 'debit_note';
+    return { sale: saleSide ? entry.documentAmount : 0, purchase: saleSide ? 0 : entry.documentAmount, paidIn: 0, paidOut: 0 };
+  }
+  if (entry.kind === 'sale') return { sale: entry.documentAmount, purchase: 0, paidIn: 0, paidOut: 0 };
+  if (entry.kind === 'purchase') return { sale: 0, purchase: entry.documentAmount, paidIn: 0, paidOut: 0 };
+  return { sale: 0, purchase: 0, paidIn: 0, paidOut: 0 };
+}
+
 /** One line of the ledger's STACKED Stages column: every stage the
  *  sale/purchase has issued, in ladder order, with its document number.
  *  Payment / standalone-voucher rows have no stages (empty array). */
