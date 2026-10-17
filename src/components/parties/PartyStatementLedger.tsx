@@ -59,6 +59,25 @@ function rowVisual(entry: PartyLedgerEntry): { Icon: any; tone: string } {
   return { Icon: Receipt, tone: 'text-[var(--color-on-surface-variant)]' };
 }
 
+// Per-stage-category color coding of the Stages column (user rule):
+//   Quotation / RFQ          -> light blue
+//   Sales Order / Purchase Order (+ legacy delivery note) -> yellow-orange
+//   GST Invoice / Goods Receiving                          -> green
+function stagePillTone(stageType: string): string {
+  switch (stageType) {
+    case 'sales_order':
+    case 'purchase_order':
+    case 'delivery_note':
+      return 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]';
+    case 'sales_invoice':
+    case 'goods_receipt':
+      return 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]';
+    default:
+      // quotation / rfq / proforma_invoice (legacy)
+      return 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]';
+  }
+}
+
 export function PartyStatementLedger({
   party,
   statement,
@@ -225,36 +244,42 @@ export function PartyStatementLedger({
                           {stageLines.map((s, idx) => {
                             const isCurrent = idx === stageLines.length - 1;
                             const label = s.label.replace(/ \(legacy\)/, '');
+                            const tonePill = stagePillTone(s.stageType);
                             if (isCurrent) {
-                              // The LATEST stage gets a filled highlight pill so
-                              // it reads instantly within the stacked ladder
+                              // The LATEST stage gets the filled highlight pill in
+                              // its category tone (blue / orange / green)
                               return (
                                 <span
                                   key={`${s.stageType}-${s.number}-${idx}`}
                                   title={`Current stage — issued ${s.date}`}
-                                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[var(--color-primary-container)] border border-[var(--color-primary)]/30 whitespace-nowrap"
+                                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border whitespace-nowrap shadow-2xs ${tonePill} border-[var(--color-outline-variant)]/40`}
                                 >
-                                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-primary)] shrink-0 animate-pulse"></span>
-                                  <span className="text-[10px] font-black text-[var(--color-on-primary-container)] tracking-wide">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-current shrink-0 animate-pulse"></span>
+                                  <span className="text-[10px] font-black tracking-wide">
                                     {label}
                                   </span>
-                                  <span className="text-[var(--color-on-primary-container)]/60">·</span>
-                                  <span className="font-mono text-[10px] font-black text-[var(--color-on-primary-container)]">
+                                  <span className="opacity-60">·</span>
+                                  <span className="font-mono text-[10px] font-black">
                                     {s.number}
                                   </span>
                                 </span>
                               );
                             }
+                            // Earlier stages: same category tone, softened
                             return (
-                              <p key={`${s.stageType}-${s.number}-${idx}`} className="leading-tight whitespace-nowrap">
-                                <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)]">
+                              <span
+                                key={`${s.stageType}-${s.number}-${idx}`}
+                                title={`${s.label} — issued ${s.date}`}
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full whitespace-nowrap overflow-hidden opacity-55 ${tonePill}`}
+                              >
+                                <span className="text-[9px] font-semibold tracking-wide truncate max-w-[120px]">
                                   {label}
                                 </span>
-                                <span className="text-[var(--color-outline)]"> · </span>
-                                <span className="font-mono text-[10px] text-[var(--color-on-surface-variant)]">
+                                <span className="opacity-60">·</span>
+                                <span className="font-mono text-[9px] font-semibold">
                                   {s.number}
                                 </span>
-                              </p>
+                              </span>
                             );
                           })}
                         </div>
