@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { X, Ban, Edit3 } from 'lucide-react';
+import { X, Ban, Edit3, Boxes, Landmark } from 'lucide-react';
 import { Item, Party, CompanySettings, SalesStage, PurchaseStage } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import {
@@ -168,6 +168,58 @@ export function OrderDetailModal({
               ) : null;
             })()}
           </div>
+
+          {/* Order state strip — the master's one-shot flags as applied:
+              stockyard posting + where the payment flow was booked */}
+          {(() => {
+            const isSale = selectedOrder.type === 'sales';
+            const stockApplied = selectedOrder.inventoryApplied;
+            const cashFlow = selectedOrder.cashApplied
+              ? (selectedOrder.settlementType || 'account')
+              : undefined;
+            const payFlowTone = cashFlow === 'account'
+              ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
+              : cashFlow === 'credit'
+              ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
+              : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)]';
+            return (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {/* Stock: dispatch (sales) / inward (purchase) one-shot flag */}
+                <div className={`p-3 rounded-xl border flex items-center gap-2.5 ${stockApplied
+                  ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
+                  : 'bg-[var(--color-surface-container)] border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)]'}`}>
+                  <Boxes className="w-4 h-4 shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-[9px] font-bold uppercase tracking-wider opacity-80">
+                      {isSale ? 'Stockyard Dispatch' : 'Stock Inward'}
+                    </p>
+                    <p className="text-xs font-black truncate">
+                      {stockApplied ? 'Stock updated' : 'Stock not updated yet'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Payment flow: where/how the payment was booked */}
+                <div className={`p-3 rounded-xl border flex items-center gap-2.5 ${payFlowTone} border-[var(--color-outline-variant)]/40`}>
+                  <Landmark className="w-4 h-4 shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-[9px] font-bold uppercase tracking-wider opacity-80">Payment Flow</p>
+                    {cashFlow === 'account' ? (
+                      <p className="text-xs font-black truncate">
+                        Booked {isSale ? 'receipt' : 'payout'}
+                        {selectedOrder.settlementVoucherNumber ? ` ${selectedOrder.settlementVoucherNumber}` : ''}
+                        {selectedOrder.settlementAccountName ? ` · ${selectedOrder.settlementAccountName}` : ''}
+                      </p>
+                    ) : cashFlow === 'credit' ? (
+                      <p className="text-xs font-black truncate">Booked on credit — party ledger</p>
+                    ) : (
+                      <p className="text-xs font-black truncate">Payment flow not booked yet</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* SALES — every issued stage document (values in its own format) + create buttons */}
           {selectedOrder.type === 'sales' && (
