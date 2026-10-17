@@ -106,6 +106,12 @@ function amountTone(entry: PartyLedgerEntry): string {
     : 'text-[var(--color-success)]';
 }
 
+/** A due is open and NOTHING has been settled against it — the row gets the
+ *  "Booked on credit" note (partial settlements keep their "Settled" note). */
+function unsettledDuesOpen(entry: PartyLedgerEntry): boolean {
+  return entry.isPosted && entry.outstanding > 0;
+}
+
 export function PartyStatementLedger({
   party,
   statement,
@@ -324,6 +330,10 @@ export function PartyStatementLedger({
                         <p className={`text-[9px] font-semibold mt-0.5 ${amountTone(entry)}`}>
                           Settled
                         </p>
+                      ) : entry.debit && unsettledDuesOpen(entry) ? (
+                        <p className="text-[9px] font-semibold mt-0.5 text-[var(--color-error)] italic">
+                          Booked on credit
+                        </p>
                       ) : null}
                     </td>
                     <td className="py-3 px-3 text-right">
@@ -333,6 +343,10 @@ export function PartyStatementLedger({
                       {entry.settledAmount && !entry.debit ? (
                         <p className={`text-[9px] font-semibold mt-0.5 ${amountTone(entry)}`}>
                           Settled
+                        </p>
+                      ) : entry.credit && unsettledDuesOpen(entry) ? (
+                        <p className="text-[9px] font-semibold mt-0.5 text-[var(--color-error)] italic">
+                          Booked on credit
                         </p>
                       ) : null}
                     </td>
