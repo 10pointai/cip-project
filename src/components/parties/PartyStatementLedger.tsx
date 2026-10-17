@@ -167,37 +167,6 @@ export function PartyStatementLedger({
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--color-outline-variant)]">
-            {/* Opening Balance Row */}
-            <tr className="bg-[var(--color-surface-container)]/40 font-semibold">
-              <td className="py-3 px-4 text-[var(--color-on-surface)]">
-                {formatDate(party.createdAt)}
-              </td>
-              <td className="py-3 px-3">
-                <span className="inline-flex items-center gap-1 font-bold text-[var(--color-on-surface)]">
-                  <Building2 className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-                  Opening Balance
-                </span>
-              </td>
-              <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">
-                Initial balance registered ({party.openingBalanceType === 'to_receive' ? 'Receivable from Party' : 'Payable to Party'})
-              </td>
-              <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">—</td>
-              <td className="py-3 px-3 font-mono text-[var(--color-outline)]">—</td>
-              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-error)]">
-                {party.openingBalanceType === 'to_receive' ? formatCurrency(party.openingBalance, currencySymbol) : '—'}
-              </td>
-              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-success)]">
-                {party.openingBalanceType === 'to_pay' ? formatCurrency(party.openingBalance, currencySymbol) : '—'}
-              </td>
-              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-on-surface)]">
-                {formatCurrency(party.openingBalance, currencySymbol)}{' '}
-                <span className="text-[9px] uppercase font-normal">
-                  {party.openingBalanceType === 'to_receive' ? 'Dr' : 'Cr'}
-                </span>
-              </td>
-              <td className="py-3 px-2"></td>
-            </tr>
-
             {/* Document-ledger rows */}
             {filtered.length === 0 ? (
               <tr>
@@ -327,6 +296,36 @@ export function PartyStatementLedger({
                 );
               })
             )}
+            {/* Opening Balance Row */}
+            <tr className="bg-[var(--color-surface-container)]/40 font-semibold">
+              <td className="py-3 px-4 text-[var(--color-on-surface)]">
+                {formatDate(party.createdAt)}
+              </td>
+              <td className="py-3 px-3">
+                <span className="inline-flex items-center gap-1 font-bold text-[var(--color-on-surface)]">
+                  <Building2 className="w-3.5 h-3.5 text-[var(--color-primary)]" />
+                  Opening Balance
+                </span>
+              </td>
+              <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">
+                Initial balance registered ({party.openingBalanceType === 'to_receive' ? 'Receivable from Party' : 'Payable to Party'})
+              </td>
+              <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">—</td>
+              <td className="py-3 px-3 font-mono text-[var(--color-outline)]">—</td>
+              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-error)]">
+                {party.openingBalanceType === 'to_receive' ? formatCurrency(party.openingBalance, currencySymbol) : '—'}
+              </td>
+              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-success)]">
+                {party.openingBalanceType === 'to_pay' ? formatCurrency(party.openingBalance, currencySymbol) : '—'}
+              </td>
+              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-on-surface)]">
+                {formatCurrency(party.openingBalance, currencySymbol)}{' '}
+                <span className="text-[9px] uppercase font-normal">
+                  {party.openingBalanceType === 'to_receive' ? 'Dr' : 'Cr'}
+                </span>
+              </td>
+              <td className="py-3 px-2"></td>
+            </tr>
           </tbody>
         </table>
       </div>
