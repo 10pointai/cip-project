@@ -264,14 +264,14 @@ export function PartyStatementLedger({
                         <Icon className="w-3.5 h-3.5 shrink-0" />
                         {entry.typeLabel}
                       </span>
+                      {/* Date rides under the type label */}
+                      <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
+                        {formatDate(entry.date)}
+                      </p>
                     </td>
                     <td className="py-3 px-3 text-[var(--color-on-surface)] max-w-xs">
                       <p className="font-medium text-[var(--color-on-surface)] truncate">
                         {entry.particulars || '—'}
-                      </p>
-                      {/* Date rides under the particulars text */}
-                      <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
-                        {formatDate(entry.date)}
                       </p>
                       {journalChip && (
                         <p className="text-[9px] font-mono text-[var(--color-outline)] mt-0.5">
@@ -384,10 +384,12 @@ export function PartyStatementLedger({
                   <Building2 className="w-3.5 h-3.5 text-[var(--color-primary)]" />
                   Opening Balance
                 </span>
+                <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
+                  {formatDate(party.createdAt)}
+                </p>
               </td>
               <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">
                 Initial balance registered ({party.openingBalanceType === 'to_receive' ? 'Receivable from Party' : 'Payable to Party'})
-                <p className="text-[10px] mt-0.5">{formatDate(party.createdAt)}</p>
               </td>
               <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">—</td>
               <td className="py-3 px-3 font-mono text-[var(--color-outline)]">—</td>
