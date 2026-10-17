@@ -208,7 +208,6 @@ export function PartyStatementLedger({
         <table className="w-full text-left text-xs border-collapse min-w-[1180px]">
           <thead>
             <tr className="bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-              <th className="py-3 px-4">Date</th>
               <th className="py-3 px-3">Type</th>
               <th className="py-3 px-3">Particulars</th>
               <th className="py-3 px-3">Stages</th>
@@ -225,7 +224,7 @@ export function PartyStatementLedger({
             {/* Document-ledger rows */}
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={11} className="py-10 text-center text-xs text-[var(--color-on-surface-variant)] italic">
+                <td colSpan={10} className="py-10 text-center text-xs text-[var(--color-on-surface-variant)] italic">
                   {statement.rows.length === 0
                     ? 'No sales, purchases or payments recorded for this party yet.'
                     : 'No documents found matching your search or active filter.'}
@@ -258,9 +257,6 @@ export function PartyStatementLedger({
                     onClick={() => (isOrder ? onOpenOrder(entry) : onOpenVoucher(entry))}
                     className="hover:bg-[var(--color-surface-container)]/50 transition-colors cursor-pointer group"
                   >
-                    <td className="py-3 px-4 whitespace-nowrap text-[var(--color-on-surface)] font-medium">
-                      {formatDate(entry.date)}
-                    </td>
                     {/* Type (icon + label — kept its own column, apart from the
                         particulars text) */}
                     <td className="py-3 px-3">
@@ -270,13 +266,13 @@ export function PartyStatementLedger({
                       </span>
                     </td>
                     <td className="py-3 px-3 text-[var(--color-on-surface)] max-w-xs">
-                      {entry.particulars ? (
-                        <p className="font-medium text-[var(--color-on-surface)] truncate">
-                          {entry.particulars}
-                        </p>
-                      ) : (
-                        <span className="text-[var(--color-on-surface-variant)]">—</span>
-                      )}
+                      <p className="font-medium text-[var(--color-on-surface)] truncate">
+                        {entry.particulars || '—'}
+                      </p>
+                      {/* Date rides under the particulars text */}
+                      <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
+                        {formatDate(entry.date)}
+                      </p>
                       {journalChip && (
                         <p className="text-[9px] font-mono text-[var(--color-outline)] mt-0.5">
                           Vch: {journalChip}
@@ -383,9 +379,6 @@ export function PartyStatementLedger({
             )}
             {/* Opening Balance Row */}
             <tr className="bg-[var(--color-surface-container)]/40 font-semibold">
-              <td className="py-3 px-4 text-[var(--color-on-surface)]">
-                {formatDate(party.createdAt)}
-              </td>
               <td className="py-3 px-3">
                 <span className="inline-flex items-center gap-1 font-bold text-[var(--color-on-surface)]">
                   <Building2 className="w-3.5 h-3.5 text-[var(--color-primary)]" />
@@ -394,6 +387,7 @@ export function PartyStatementLedger({
               </td>
               <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">
                 Initial balance registered ({party.openingBalanceType === 'to_receive' ? 'Receivable from Party' : 'Payable to Party'})
+                <p className="text-[10px] mt-0.5">{formatDate(party.createdAt)}</p>
               </td>
               <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">—</td>
               <td className="py-3 px-3 font-mono text-[var(--color-outline)]">—</td>
