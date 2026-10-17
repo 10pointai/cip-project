@@ -145,7 +145,7 @@ export function PartyDetailModal({
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[var(--color-surface-container-lowest)] rounded-full border border-[var(--color-outline-variant)] text-[var(--color-on-surface)] font-semibold hover:bg-[var(--color-surface-container)] transition-colors shadow-2xs"
               >
                 <Phone className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-                Call: {party.phone}
+                {party.phone}
               </a>
               <a
                 href={whatsappUrl}

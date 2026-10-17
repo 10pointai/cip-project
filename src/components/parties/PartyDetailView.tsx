@@ -227,7 +227,7 @@ export function PartyDetailView({
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] rounded-full font-semibold transition-colors shadow-2xs"
             >
               <Phone className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-              <span>Call: {party.phone}</span>
+              <span>{party.phone}</span>
             </a>
           )}
 
