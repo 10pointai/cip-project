@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Users,
   Shield,
@@ -58,7 +59,12 @@ const ALL_PERMISSION_KEYS: Array<{ key: keyof UserPermissions; label: string; ca
 const PRESETS: Record<string, { label: string; permissions: Partial<UserPermissions> }> = {
   full_admin: {
     label: 'Super Admin / Full Access',
-    permissions: ALL_PERMISSION_KEYS.reduce((acc, p) => ({ ...acc, [p.key]: true }), {} as UserPermissions),
+    // manage_users is NOT preset-grantable — the Super Admin role bypasses the
+    // permission matrix server-side, so this preset stays for admins only.
+    permissions: ALL_PERMISSION_KEYS.reduce(
+      (acc, p) => ({ ...acc, [p.key]: p.key !== 'manage_users' }),
+      {} as UserPermissions
+    ),
   },
   finance_billing: {
     label: 'Finance & Billing Admin',
@@ -120,6 +126,13 @@ export function UserManagementView() {
   const [editingUser, setEditingUser] = useState<AppUser | null>(null);
   const [newlyCreatedUser, setNewlyCreatedUser] = useState<AppUser | null>(null);
   const [userToDelete, setUserToDelete] = useState<AppUser | null>(null);
+
+  // Row-action kebab popover (same portal pattern as the sales/purchase list)
+  const [userMenuFor, setUserMenuFor] = useState<string | null>(null);
+  const [userMenuPos, setUserMenuPos] = useState<{ top: number; right: number; flip: boolean } | null>(null);
+  const userActionRef = useRef<HTMLDivElement | null>(null);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
+  const [userToSuspend, setUserToSuspend] = useState<AppUser | null>(null);
 
   // Form state
   const [formData, setFormData] = useState<{
@@ -228,7 +241,9 @@ export function UserManagementView() {
         email: formData.email.trim(),
         phone: formData.phone.trim(),
         role: formData.role,
-        permissions: formData.permissions,
+        // USER & ACCESS CONTROL LOCK: manage_users is never grantable from this
+        // UI (Super Admin only) — belt-and-braces before the server's own strip.
+        permissions: { ...formData.permissions, manage_users: false },
         notes: formData.notes.trim(),
         // HONEST PREVIEW: whatever the identifier card is showing right now
         // (custom-typed name, or the last server suggestion) is what we ask the
@@ -255,12 +270,21 @@ export function UserManagementView() {
     if (!editingUser) return;
 
     try {
+      // SUPER ADMIN PROFILE LOCK: an existing Super Admin's role and permission
+      // matrix are server-managed (tech team provisions Super Admins from the
+      // backend); this form edits their profile details only.
+      const isSuperAdminTarget = editingUser.role === 'super_admin';
       const res = await api.updateUser(editingUser.id, {
         fullName: formData.fullName.trim(),
         email: formData.email.trim(),
         phone: formData.phone.trim(),
-        role: formData.role,
-        permissions: formData.permissions,
+        ...(isSuperAdminTarget
+          ? {}
+          : {
+              role: formData.role,
+              // USER & ACCESS CONTROL LOCK: never grantable from this UI
+              permissions: { ...formData.permissions, manage_users: false },
+            }),
         notes: formData.notes.trim(),
       });
 
@@ -329,6 +353,34 @@ export function UserManagementView() {
     });
     setIsCreateModalOpen(true);
   };
+
+  // Kebab popover — closes on outside click, scroll or resize (portal-safe)
+  const closeUserMenu = () => {
+    setUserMenuFor(null);
+    setUserMenuPos(null);
+  };
+
+  useEffect(() => {
+    if (!userMenuFor) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (
+        userActionRef.current && !userActionRef.current.contains(t) &&
+        userMenuRef.current && !userMenuRef.current.contains(t)
+      ) {
+        closeUserMenu();
+      }
+    };
+    const handleMove = () => closeUserMenu();
+    document.addEventListener('mousedown', handleClickOutside);
+    window.addEventListener('scroll', handleMove, true);
+    window.addEventListener('resize', handleMove);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('scroll', handleMove, true);
+      window.removeEventListener('resize', handleMove);
+    };
+  }, [userMenuFor]);
 
   const openEditDialog = (user: AppUser) => {
     setEditingUser(user);
@@ -671,7 +723,7 @@ export function UserManagementView() {
                         )}
                       </td>
 
-                      {/* Actions */}
+                      {/* Actions — ⋮ opens a portal popover (fixed above the page) */}
                       <td className="py-3.5 px-4 text-right">
                         <div className="flex items-center justify-end gap-1">
                           {user.status === 'pending_setup' && (
@@ -684,37 +736,35 @@ export function UserManagementView() {
                             </button>
                           )}
 
-                          <button
-                            onClick={() => openEditDialog(user)}
-                            className="p-1.5 rounded-lg text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)] transition-all"
-                            title="Edit Permissions"
-                          >
-                            <Edit2 className="w-3.5 h-3.5" />
-                          </button>
-
-                          {user.id !== currentUser?.id && (
-                            <>
-                              <button
-                                onClick={() => handleToggleStatus(user)}
-                                className={`p-1.5 rounded-lg transition-all ${
-                                  user.status === 'active'
-                                    ? 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-error)] hover:bg-[var(--color-error-container)]/30'
-                                    : 'text-[var(--color-success)] hover:bg-[var(--color-success-container)]/30'
-                                }`}
-                                title={user.status === 'active' ? 'Suspend Account' : 'Activate Account'}
-                              >
-                                {user.status === 'active' ? <UserX className="w-3.5 h-3.5" /> : <UserCheck className="w-3.5 h-3.5" />}
-                              </button>
-
-                              <button
-                                onClick={() => setUserToDelete(user)}
-                                className="p-1.5 rounded-lg text-[var(--color-on-surface-variant)] hover:text-[var(--color-error)] hover:bg-[var(--color-error-container)]/30 transition-all"
-                                title="Delete User"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </>
-                          )}
+                          <div className="relative" ref={userActionRef}>
+                            <button
+                              type="button"
+                              title="More Actions"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (userMenuFor === user.id) {
+                                  closeUserMenu();
+                                  return;
+                                }
+                                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                // flip above the button when nothing fits underneath
+                                const flip = rect.bottom + 130 > window.innerHeight;
+                                setUserMenuPos({
+                                  top: flip ? rect.top : rect.bottom,
+                                  right: window.innerWidth - rect.right,
+                                  flip,
+                                });
+                                setUserMenuFor(user.id);
+                              }}
+                              className={`p-1.5 rounded-full transition-colors ${
+                                userMenuFor === user.id
+                                  ? 'text-[var(--color-on-surface)] bg-[var(--color-surface-container-highest)]'
+                                  : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)]'
+                              }`}
+                            >
+                              <MoreVertical className="w-4 h-4" />
+                            </button>
+                          </div>
                         </div>
                       </td>
                     </tr>
@@ -725,6 +775,114 @@ export function UserManagementView() {
           </table>
         </div>
       </div>
+
+      {/* Row action popover — PORTAL: fixed on the page so the list container
+          (overflow-x-auto / overflow-hidden) can never clip it (same pattern
+          as the sales/purchase lists) */}
+      {userMenuFor && userMenuPos && createPortal(
+        <div
+          ref={userMenuRef}
+          style={{
+            position: 'fixed',
+            top: userMenuPos.flip ? userMenuPos.top - 4 : userMenuPos.top + 4,
+            right: Math.max(8, userMenuPos.right + 8),
+            transform: userMenuPos.flip ? 'translateY(-100%)' : 'none',
+          }}
+          className="z-[60] w-56 max-w-[calc(100vw-16px)] rounded-2xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] shadow-2xl overflow-hidden text-left"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <p className="px-3 pt-2.5 pb-1.5 text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
+            Actions — {users.find((u) => u.id === userMenuFor)?.username || ''}
+          </p>
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              const target = users.find((u) => u.id === userMenuFor);
+              if (!target) return;
+              closeUserMenu();
+              openEditDialog(target);
+            }}
+            className="w-full flex items-center gap-2 px-3 py-2 text-left text-[11px] font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50"
+          >
+            <Edit2 className="w-3.5 h-3.5 text-[var(--color-primary)]" />
+            Edit User
+          </button>
+
+          {(() => {
+            const target = users.find((u) => u.id === userMenuFor);
+            if (!target || target.id === currentUser?.id) return null;
+            const suspending = target.status === 'active';
+            return (
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  closeUserMenu();
+                  if (suspending) {
+                    setUserToSuspend(target);
+                  } else {
+                    handleToggleStatus(target);
+                  }
+                }}
+                className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[11px] font-bold hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50 ${
+                  suspending
+                    ? 'text-[var(--color-error)]'
+                    : 'text-[var(--color-success)]'
+                }`}
+              >
+                {suspending ? <UserX className="w-3.5 h-3.5" /> : <UserCheck className="w-3.5 h-3.5" />}
+                {suspending ? 'Suspend User' : 'Activate User'}
+              </button>
+            );
+          })()}
+        </div>,
+        document.body
+      )}
+
+      {/* SUSPEND CONFIRMATION MODAL */}
+      {userToSuspend && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-sm animate-in fade-in">
+          <div
+            className="w-full max-w-sm bg-[var(--color-surface)] text-[var(--color-on-surface)] rounded-3xl border border-[var(--color-outline-variant)] shadow-2xl p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-center mb-4">
+              <div className="w-12 h-12 rounded-full bg-[var(--color-error-container)] text-[var(--color-error)] mx-auto flex items-center justify-center mb-3">
+                <UserX className="w-6 h-6" />
+              </div>
+              <h3 className="text-base font-bold text-[var(--color-on-surface)]">
+                Suspend User Account?
+              </h3>
+              <p className="text-xs text-[var(--color-on-surface-variant)] mt-1">
+                @{userToSuspend.username} ({userToSuspend.fullName}) will immediately lose access
+                and be unable to sign in until re-activated.
+              </p>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setUserToSuspend(null)}
+                className="flex-1 py-2 bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] font-semibold text-xs rounded-full"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = userToSuspend;
+                  setUserToSuspend(null);
+                  handleToggleStatus(target);
+                }}
+                className="flex-1 py-2 bg-[var(--color-error)] text-[var(--color-on-error)] font-bold text-xs rounded-full hover:opacity-90"
+              >
+                Suspend User
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* CREATE USER MODAL */}
       {isCreateModalOpen && (
@@ -818,7 +976,8 @@ export function UserManagementView() {
                       <option value="admin">Admin (Operations / Finance)</option>
                       <option value="manager">Manager (Plant / Logistics)</option>
                       <option value="operator">Operator (Field / Weighbridge)</option>
-                      <option value="super_admin">Super Admin (Root Privileges)</option>
+                      {/* NO super_admin option (user rule): Super Administrators are
+                          provisioned only by the tech team from the backend. */}
                     </select>
                   </div>
                 </div>
@@ -871,28 +1030,17 @@ export function UserManagementView() {
                   <h4 className="text-xs font-extrabold uppercase tracking-wider text-[var(--color-primary)]">
                     2. Feature Permissions Matrix
                   </h4>
-                  {/* Quick Presets */}
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <span className="text-[10px] font-bold text-[var(--color-on-surface-variant)]">Presets:</span>
-                    {Object.entries(PRESETS).map(([k, p]) => (
-                      <button
-                        key={k}
-                        type="button"
-                        onClick={() => setFormData({
-                          ...formData,
-                          permissions: { ...formData.permissions, ...p.permissions } as UserPermissions,
-                        })}
-                        className="px-2 py-0.5 rounded-lg bg-[var(--color-surface-container-high)] hover:bg-[var(--color-primary-container)] text-[10px] font-semibold text-[var(--color-on-surface)] transition-all"
-                      >
-                        {p.label.split(' ')[0]}
-                      </button>
-                    ))}
-                  </div>
+
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-60 overflow-y-auto p-1">
                   {ALL_PERMISSION_KEYS.map((perm) => {
-                    const isChecked = !!formData.permissions[perm.key];
+                    // USER & ACCESS CONTROL LOCK (user rule): manage_users cannot be
+                    // granted to anyone except Super Admins — always unchecked and
+                    // disabled in this matrix; the Super Admin role bypasses the
+                    // matrix entirely server-side.
+                    const isAdminLocked = perm.key === 'manage_users';
+                    const isChecked = isAdminLocked ? false : !!formData.permissions[perm.key];
                     return (
                       <label
                         key={perm.key}
@@ -905,7 +1053,9 @@ export function UserManagementView() {
                         <input
                           type="checkbox"
                           checked={isChecked}
+                          disabled={isAdminLocked}
                           onChange={(e) => {
+                            if (isAdminLocked) return;
                             setFormData({
                               ...formData,
                               permissions: {
@@ -914,11 +1064,11 @@ export function UserManagementView() {
                               },
                             });
                           }}
-                          className="mt-0.5 rounded text-[var(--color-primary)] focus:ring-[var(--color-primary)]"
+                          className="mt-0.5 rounded text-[var(--color-primary)] focus:ring-[var(--color-primary)] disabled:opacity-60"
                         />
                         <div className="min-w-0">
-                          <p className="text-xs font-bold leading-tight">{perm.label}</p>
-                          <p className="text-[10px] opacity-80 leading-tight mt-0.5">{perm.description}</p>
+                          <p className="text-xs font-bold leading-tight">{perm.label} {isAdminLocked && <span className="text-[9px] font-mono text-[var(--color-error)]">SUPER&nbsp;ADMIN&nbsp;ONLY</span>}</p>
+                          <p className="text-[10px] opacity-80 leading-tight mt-0.5">{isAdminLocked ? 'Managed by the tech team — cannot be granted from here' : perm.description}</p>
                         </div>
                       </label>
                     );
@@ -927,18 +1077,7 @@ export function UserManagementView() {
               </div>
 
               {/* Notes */}
-              <div>
-                <label className="block text-xs font-bold text-[var(--color-on-surface)] mb-1">
-                  Internal Notes / Designation
-                </label>
-                <textarea
-                  rows={2}
-                  value={formData.notes}
-                  onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
-                  placeholder="e.g. Senior Asphalt Batching Plant Dispatch Engineer"
-                  className="w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-xl text-xs text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                />
-              </div>
+             
 
               {/* Modal Footer */}
               <div className="pt-4 border-t border-[var(--color-outline-variant)] flex items-center justify-end gap-2.5">
@@ -1038,13 +1177,19 @@ export function UserManagementView() {
                   </label>
                   <select
                     value={formData.role}
+                    disabled={editingUser?.role === 'super_admin'}
                     onChange={(e) => setFormData({ ...formData, role: e.target.value as UserRole })}
-                    className="w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-xl text-xs text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] font-semibold"
+                    className={`w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-xl text-xs text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] font-semibold ${editingUser?.role === 'super_admin' ? 'opacity-60 cursor-not-allowed' : ''}`}
                   >
+                    {/* NO super_admin option (user rule): Super Administrators are
+                        provisioned only by the tech team from the backend. Existing
+                        Super Admins are shown locked and cannot be demoted here. */}
+                    {editingUser?.role === 'super_admin' && (
+                      <option value="super_admin" disabled>Super Admin (lock managed by the tech team)</option>
+                    )}
                     <option value="admin">Admin</option>
                     <option value="manager">Manager</option>
                     <option value="operator">Operator</option>
-                    <option value="super_admin">Super Admin</option>
                   </select>
                 </div>
               </div>
@@ -1060,7 +1205,8 @@ export function UserManagementView() {
                       type="button"
                       onClick={() => setFormData({
                         ...formData,
-                        permissions: ALL_PERMISSION_KEYS.reduce((acc, p) => ({ ...acc, [p.key]: true }), {} as UserPermissions),
+                        // manage_users stays forced-false — it is not grantable here
+                        permissions: ALL_PERMISSION_KEYS.reduce((acc, p) => ({ ...acc, [p.key]: p.key !== 'manage_users' }), {} as UserPermissions),
                       })}
                       className="text-[10px] text-[var(--color-primary)] hover:underline font-bold"
                     >
@@ -1071,6 +1217,7 @@ export function UserManagementView() {
                       type="button"
                       onClick={() => setFormData({
                         ...formData,
+                        // clear-all is total (manage_users is anyway never grantable)
                         permissions: ALL_PERMISSION_KEYS.reduce((acc, p) => ({ ...acc, [p.key]: false }), {} as UserPermissions),
                       })}
                       className="text-[10px] text-[var(--color-on-surface-variant)] hover:underline font-bold"
@@ -1082,7 +1229,15 @@ export function UserManagementView() {
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-60 overflow-y-auto p-1">
                   {ALL_PERMISSION_KEYS.map((perm) => {
-                    const isChecked = !!formData.permissions[perm.key];
+                    // USER & ACCESS CONTROL LOCK (user rule): manage_users cannot be
+                    // granted here to anyone except the Super Admin themselves —
+                    // shown checked-and-disabled only when editing a Super Admin.
+                    const isAdminLocked = perm.key === 'manage_users' && editingUser?.role !== 'super_admin';
+                    const isChecked = isAdminLocked
+                      ? false
+                      : perm.key === 'manage_users'
+                      ? true
+                      : !!formData.permissions[perm.key];
                     return (
                       <label
                         key={perm.key}
@@ -1095,7 +1250,9 @@ export function UserManagementView() {
                         <input
                           type="checkbox"
                           checked={isChecked}
+                          disabled={perm.key === 'manage_users'}
                           onChange={(e) => {
+                            if (perm.key === 'manage_users') return;
                             setFormData({
                               ...formData,
                               permissions: {
@@ -1104,11 +1261,11 @@ export function UserManagementView() {
                               },
                             });
                           }}
-                          className="mt-0.5 rounded text-[var(--color-primary)] focus:ring-[var(--color-primary)]"
+                          className="mt-0.5 rounded text-[var(--color-primary)] focus:ring-[var(--color-primary)] disabled:opacity-60"
                         />
                         <div className="min-w-0">
-                          <p className="text-xs font-bold leading-tight">{perm.label}</p>
-                          <p className="text-[10px] opacity-80 leading-tight mt-0.5">{perm.description}</p>
+                          <p className="text-xs font-bold leading-tight">{perm.label} {perm.key === 'manage_users' && <span className="text-[9px] font-mono text-[var(--color-error)]">SUPER&nbsp;ADMIN&nbsp;ONLY</span>}</p>
+                          <p className="text-[10px] opacity-80 leading-tight mt-0.5">{perm.key === 'manage_users' ? 'Locked to the Super Admin role — not editable here' : perm.description}</p>
                         </div>
                       </label>
                     );
@@ -1116,18 +1273,9 @@ export function UserManagementView() {
                 </div>
               </div>
 
-              {/* Notes */}
-              <div>
-                <label className="block text-xs font-bold text-[var(--color-on-surface)] mb-1">
-                  Internal Notes
-                </label>
-                <textarea
-                  rows={2}
-                  value={formData.notes}
-                  onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
-                  className="w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-xl text-xs text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                />
-              </div>
+              {/* Notes removed from the edit modal (user rule) — formData.notes
+                  still carries the stored notes back unchanged on save, so
+                  existing notes are preserved, just not editable here. */}
 
               {/* Modal Footer */}
               <div className="pt-4 border-t border-[var(--color-outline-variant)] flex items-center justify-end gap-2.5">

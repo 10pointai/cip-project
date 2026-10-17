@@ -68,12 +68,29 @@ usersRouter.post('/', async (req: AuthenticatedRequest, res: Response) => {
       }
     }
 
+    // ROLE GATE (user rule): Super Administrators are provisioned ONLY by the
+    // tech team from the backend — no route minting, ever.
+    if (role === 'super_admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Super Administrators can only be provisioned by the tech team from the backend.',
+      });
+    }
+
+    // PERMISSION GATE (user rule): User & Access Control belongs to the Super
+    // Admin role alone — it bypasses the permission matrix server-side anyway,
+    // so a matrix entry carrying manage_users is always stripped here.
+    const requestedPermissions = {
+      ...(permissions || DEFAULT_USER_PERMISSIONS),
+      manage_users: false as boolean,
+    };
+
     const newUser = await serverDb.createUserAsync({
       fullName,
       email,
       phone,
       role: role || 'admin',
-      permissions: permissions || DEFAULT_USER_PERMISSIONS,
+      permissions: requestedPermissions,
       notes,
       customUsername,
     });
@@ -111,12 +128,31 @@ usersRouter.put('/:id', async (req: AuthenticatedRequest, res: Response) => {
       }
     }
 
+    // ROLE GATE (user rule): no API caller — even a manage_users admin — may
+    // promote anyone to Super Administrator; that grant is backend-only.
+    if (role === 'super_admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Super Administrators can only be provisioned by the tech team from the backend.',
+      });
+    }
+
+    // PERMISSION GATE (user rule): manage_users is un-grantable via the matrix;
+    // for the existing Super Admin's own record the matrix is server-managed and
+    // an incoming payload is ignored wholesale (role bypass makes it moot).
+    const safePermissions =
+      existing.role === 'super_admin'
+        ? existing.permissions
+        : permissions !== undefined
+        ? { ...permissions, manage_users: false as boolean }
+        : existing.permissions;
+
     const updated = await serverDb.updateUserAsync(id, {
       fullName: fullName !== undefined ? fullName : existing.fullName,
       email: email !== undefined ? email : existing.email,
       phone: phone !== undefined ? phone : existing.phone,
       role: role !== undefined ? role : existing.role,
-      permissions: permissions !== undefined ? permissions : existing.permissions,
+      permissions: safePermissions,
       notes: notes !== undefined ? notes : existing.notes,
       status: status !== undefined ? status : existing.status,
     });
