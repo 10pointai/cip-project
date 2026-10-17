@@ -160,7 +160,7 @@ export function PartyStatementLedger({
               <th className="py-3 px-3">Particulars</th>
               <th className="py-3 px-3">Stages</th>
               <th className="py-3 px-3">Reference</th>
-              <th className="py-3 px-3 text-right text-[var(--color-primary)]">Debit (Dr / Sales / We Paid)</th>
+              <th className="py-3 px-3 text-right text-[var(--color-error)]">Debit (Dr / Sales / We Paid)</th>
               <th className="py-3 px-3 text-right text-[var(--color-success)]">Credit (Cr / Purchases / Received)</th>
               <th className="py-3 px-3 text-right">Running Balance</th>
               <th className="py-3 px-2 w-6"></th>
@@ -183,7 +183,7 @@ export function PartyStatementLedger({
               </td>
               <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">—</td>
               <td className="py-3 px-3 font-mono text-[var(--color-outline)]">—</td>
-              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-primary)]">
+              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-error)]">
                 {party.openingBalanceType === 'to_receive' ? formatCurrency(party.openingBalance, currencySymbol) : '—'}
               </td>
               <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-success)]">
@@ -295,7 +295,7 @@ export function PartyStatementLedger({
                       {entry.reference || '—'}
                     </td>
                     <td className="py-3 px-3 text-right">
-                      <span className="font-mono font-bold text-[var(--color-primary)]">
+                      <span className="font-mono font-bold text-[var(--color-error)]">
                         {entry.debit ? formatCurrency(entry.debit, currencySymbol) : '—'}
                       </span>
                       {entry.debit && entry.settledAmount ? (
