@@ -215,8 +215,8 @@ export function PartyStatementLedger({
               <th className="py-3 px-3">Reference</th>
               <th className="py-3 px-3 text-right">Sales</th>
               <th className="py-3 px-3 text-right">Purchases</th>
-              <th className="py-3 px-3 text-right">Paid In</th>
-              <th className="py-3 px-3 text-right">Paid Out</th>
+              <th className="py-3 px-3 text-right w-[96px]">Paid In</th>
+              <th className="py-3 px-3 text-right w-[96px]">Paid Out</th>
               <th className="py-3 px-3 text-right">Running Balance</th>
               <th className="py-3 px-2 w-6"></th>
             </tr>
