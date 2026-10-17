@@ -256,15 +256,33 @@ export function PartyStatementLedger({
                           {stageLines.map((s, idx) => {
                             const isCurrent = idx === stageLines.length - 1;
                             const label = s.label.replace(/ \(legacy\)/, '');
+                            if (isCurrent) {
+                              // The LATEST stage gets a filled highlight pill so
+                              // it reads instantly within the stacked ladder
+                              return (
+                                <span
+                                  key={`${s.stageType}-${s.number}-${idx}`}
+                                  title={`Current stage — issued ${s.date}`}
+                                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[var(--color-primary-container)] border border-[var(--color-primary)]/30 whitespace-nowrap"
+                                >
+                                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-primary)] shrink-0 animate-pulse"></span>
+                                  <span className="text-[10px] font-black text-[var(--color-on-primary-container)] tracking-wide">
+                                    {label}
+                                  </span>
+                                  <span className="text-[var(--color-on-primary-container)]/60">·</span>
+                                  <span className="font-mono text-[10px] font-black text-[var(--color-on-primary-container)]">
+                                    {s.number}
+                                  </span>
+                                </span>
+                              );
+                            }
                             return (
                               <p key={`${s.stageType}-${s.number}-${idx}`} className="leading-tight whitespace-nowrap">
-                                <span
-                                  className={`text-[10px] font-bold ${isCurrent ? 'text-[var(--color-primary)]' : 'text-[var(--color-on-surface-variant)]'}`}
-                                >
+                                <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)]">
                                   {label}
                                 </span>
                                 <span className="text-[var(--color-outline)]"> · </span>
-                                <span className={`font-mono text-[10px] ${isCurrent ? 'font-bold text-[var(--color-on-surface)]' : 'text-[var(--color-on-surface-variant)]'}`}>
+                                <span className="font-mono text-[10px] text-[var(--color-on-surface-variant)]">
                                   {s.number}
                                 </span>
                               </p>
