@@ -10,6 +10,7 @@ import {
   Building2,
   UserCheck,
   HardHat,
+  ChevronLeft,
   ChevronRight,
   Shield,
   ShieldCheck,
@@ -29,6 +30,21 @@ import {
 import { CompanySettings, UserPermissions } from '../../types';
 import { useAuth } from '../../context/AuthContext';
 
+/** Tracks the lg breakpoint (1024px) — collapse only ever applies on the
+ *  desktop layout; the mobile drawer always renders expanded. */
+function useIsDesktop(): boolean {
+  const [isDesktop, setIsDesktop] = React.useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.matchMedia('(min-width: 1024px)').matches : false
+  );
+  React.useEffect(() => {
+    const mq = window.matchMedia('(min-width: 1024px)');
+    const onChange = () => setIsDesktop(mq.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+  return isDesktop;
+}
+
 export type NavigationTab =
   | 'dashboard'
   | 'parties'
@@ -47,6 +63,9 @@ export type NavigationTab =
 interface SidebarProps {
   activeTab: NavigationTab;
   onSelectTab: (tab: NavigationTab) => void;
+  /** Desktop collapse: rail of icons with hover-name tooltips */
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
   partiesCount: number;
   itemsCount?: number;
   salesCount?: number;
@@ -63,6 +82,8 @@ interface SidebarProps {
 export function Sidebar({
   activeTab,
   onSelectTab,
+  collapsed = false,
+  onToggleCollapsed,
   partiesCount,
   itemsCount = 0,
   salesCount = 0,
@@ -184,6 +205,11 @@ export function Sidebar({
     return item.permissionCheck(hasPermission);
   });
 
+  // Collapse only ever applies on the desktop layout — the mobile drawer
+  // (hamburger overlay) always renders expanded.
+  const isDesktop = useIsDesktop();
+  const isRail = isDesktop && collapsed;
+
   return (
     <>
       {/* Mobile Backdrop */}
@@ -196,31 +222,48 @@ export function Sidebar({
 
       {/* Sidebar Container */}
       <aside
-        className={`fixed top-0 bottom-0 left-0 z-40 w-72 bg-[var(--color-surface-container)] text-[var(--color-on-surface)] border-r border-[var(--color-outline-variant)] flex flex-col justify-between transition-transform duration-300 ease-in-out lg:translate-x-0 ${
+        className={`fixed top-0 bottom-0 left-0 z-40 ${isRail ? 'w-[76px]' : 'w-72'} bg-[var(--color-surface-container)] text-[var(--color-on-surface)] border-r border-[var(--color-outline-variant)] flex flex-col justify-between transition-all duration-300 ease-in-out lg:translate-x-0 ${
           isOpenMobile ? 'translate-x-0 shadow-2xl' : '-translate-x-full'
         }`}
       >
         {/* Brand Header */}
-        <div className="p-5 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container-lowest)]/60">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-2xl bg-[var(--color-primary)] text-[var(--color-on-primary)] flex items-center justify-center font-black shadow-md shadow-[var(--color-primary)]/20 shrink-0">
+        <div className={`${isRail ? 'px-2 py-4' : 'p-5'} border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container-lowest)]/60`}>
+          <div className={`flex ${isRail ? 'flex-col items-center gap-2.5' : 'items-center justify-between'}`}>
+            <div className={`flex ${isRail ? 'justify-center' : 'items-center gap-3'} min-w-0`}>
+              <div
+                className="w-10 h-10 rounded-2xl bg-[var(--color-primary)] text-[var(--color-on-primary)] flex items-center justify-center font-black shadow-md shadow-[var(--color-primary)]/20 shrink-0"
+                title={isRail ? (settings.tradeName || settings.companyName) : undefined}
+              >
                 <HardHat className="w-5 h-5" />
               </div>
-              <div className="min-w-0">
-                <h1 className="text-sm font-bold text-[var(--color-on-surface)] tracking-tight truncate">
-                  {settings.tradeName || settings.companyName}
-                </h1>
-                <p className="text-[11px] text-[var(--color-primary)] font-bold uppercase tracking-wider">
-                  Operations Suite
-                </p>
-              </div>
+              {!isRail && (
+                <div className="min-w-0">
+                  <h1 className="text-sm font-bold text-[var(--color-on-surface)] tracking-tight truncate">
+                    {settings.tradeName || settings.companyName}
+                  </h1>
+                  <p className="text-[11px] text-[var(--color-primary)] font-bold uppercase tracking-wider">
+                    Operations Suite
+                  </p>
+                </div>
+              )}
             </div>
+
+            {/* Collapse / expand toggle (desktop only; collapsed = icon rail
+                with hover-name tooltips) */}
+            <button
+              type="button"
+              onClick={onToggleCollapsed}
+              title={isRail ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-label={isRail ? 'Expand sidebar' : 'Collapse sidebar'}
+              className="hidden lg:flex p-1.5 rounded-full text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)] transition-colors"
+            >
+              {isRail ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+            </button>
 
             {/* Mobile close button */}
             <button
               onClick={onCloseMobile}
-              className="lg:hidden p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] rounded-full hover:bg-[var(--color-surface-container-high)]"
+              className={`lg:hidden p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] rounded-full hover:bg-[var(--color-surface-container-high)] ${isRail ? 'hidden' : ''}`}
               aria-label="Close menu"
             >
               <X className="w-5 h-5" />
@@ -232,13 +275,45 @@ export function Sidebar({
         <div className="p-3 space-y-6 overflow-y-auto flex-1">
           {/* Main Modules */}
           <div>
-            <p className="px-4 text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider mb-2">
-              Core Operations
-            </p>
-            <div className="space-y-1">
+            {!isRail && (
+              <p className="px-4 text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider mb-2">
+                Core Operations
+              </p>
+            )}
+            <div className={isRail ? 'space-y-2 flex flex-col items-center' : 'space-y-1'}>
               {primaryNavItems.map((item) => {
                 const Icon = item.icon;
                 const isActive = activeTab === item.id;
+                const hrefTitle = `${item.label}${item.badge !== null ? ` · ${item.badge}` : ''}`;
+
+                if (isRail) {
+                  // RAIL ITEM: icon only (name on hover via title tooltip)
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => {
+                        onSelectTab(item.id);
+                        onCloseMobile();
+                      }}
+                      title={hrefTitle}
+                      aria-label={item.label}
+                      className={`group relative w-full flex items-center justify-center py-2.5 rounded-full transition-all ${
+                        isActive
+                          ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] shadow-xs'
+                          : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)]'
+                      }`}
+                    >
+                      <Icon className="w-4 h-4 shrink-0" />
+                      {item.badge !== null && (
+                        <span
+                          className={`absolute top-1 right-1.5 w-1.5 h-1.5 rounded-full ${
+                            isActive ? 'bg-[var(--color-on-primary)]' : 'bg-[var(--color-primary)]'
+                          }`}
+                        />
+                      )}
+                    </button>
+                  );
+                }
 
                 return (
                   <button
@@ -283,8 +358,46 @@ export function Sidebar({
         </div>
 
         {/* User Session Status */}
-        <div className="p-3 border-t border-[var(--color-outline-variant)] bg-[var(--color-surface-container-low)]">
-          {currentUser ? (
+        <div className={`${isRail ? 'px-2 py-3 flex flex-col items-center gap-2' : 'p-3'} border-t border-[var(--color-outline-variant)] bg-[var(--color-surface-container-low)]`}>
+          {isRail ? (
+            currentUser ? (
+              <>
+                <div
+                  className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-xs uppercase shrink-0 ${
+                    currentUser.role === 'super_admin'
+                      ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)]'
+                      : 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
+                  }`}
+                  title={`${currentUser.fullName} (@${currentUser.username})`}
+                >
+                  {currentUser.fullName.charAt(0)}
+                </div>
+                <button
+                  onClick={() => {
+                    if (onRequestSignOut) {
+                      onRequestSignOut();
+                    } else {
+                      logout();
+                    }
+                  }}
+                  className="p-1.5 rounded-lg text-[var(--color-on-surface-variant)] hover:text-[var(--color-error)] hover:bg-[var(--color-error-container)]/30 transition-all"
+                  title="Sign Out"
+                  aria-label="Sign Out"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={onOpenAuthModal}
+                className="p-2 rounded-xl bg-[var(--color-primary)] text-[var(--color-on-primary)] hover:opacity-95 transition-all shadow-2xs"
+                title="Sign In / Set Password"
+                aria-label="Sign In / Set Password"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+              </button>
+            )
+          ) : currentUser ? (
             <div className="p-2 rounded-2xl bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)]">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2 min-w-0">

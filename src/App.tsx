@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useDatabase } from './hooks/useDatabase';
 import { Sidebar, NavigationTab } from './components/layout/Sidebar';
 import { Header } from './components/layout/Header';
@@ -150,6 +150,23 @@ function AppContent() {
     setOrderDeepLink({ orderId, orderType, action, nonce: Date.now() });
     setActiveTab(orderType === 'sales' ? 'sales' : 'purchases');
   };
+
+  // Sidebar collapse (desktop): rail showing icons with hover-name tooltips.
+  // Persisted per browser — it's a viewing convenience, not business data.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('ops_sidebar_collapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('ops_sidebar_collapsed', sidebarCollapsed ? '1' : '0');
+    } catch {
+      // storage unavailable — collapse state just won't persist
+    }
+  }, [sidebarCollapsed]);
 
   // Handlers for Accounts & Transfers
   const handleAddAccount = (accData: any) => {
@@ -395,6 +412,8 @@ function AppContent() {
       <Sidebar
         activeTab={activeTab}
         onSelectTab={setActiveTab}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
         partiesCount={parties.length}
         itemsCount={items.length}
         salesCount={sales.length + orders.filter(o => o.type === 'sales').length}
@@ -409,7 +428,7 @@ function AppContent() {
       />
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0 lg:pl-72">
+      <div className={`flex-1 flex flex-col min-w-0 ${sidebarCollapsed ? 'lg:pl-[76px]' : 'lg:pl-72'}`}>
         {/* Top Header */}
         <Header
           title={headerInfo.title}
