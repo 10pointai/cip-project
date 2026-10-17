@@ -29,7 +29,7 @@ interface PartyStatementLedgerProps {
   onOpenOrder: (entry: PartyLedgerEntry) => void;
 }
 
-type FilterChip = 'all' | 'sales' | 'purchases' | 'payments_in' | 'payments_out' | 'other' | 'pending';
+type FilterChip = 'all' | 'sales' | 'purchases' | 'payments_in' | 'payments_out' | 'other';
 
 const FILTER_TABS: Array<{ id: FilterChip; label: string }> = [
   { id: 'all', label: 'All' },
@@ -38,7 +38,6 @@ const FILTER_TABS: Array<{ id: FilterChip; label: string }> = [
   { id: 'payments_in', label: 'Payments In' },
   { id: 'payments_out', label: 'Payments Out' },
   { id: 'other', label: 'Other' },
-  { id: 'pending', label: 'Pending Dues' },
 ];
 
 /** Row-level icon + tint per document kind/type */
@@ -133,13 +132,6 @@ export function PartyStatementLedger({
           return entry.kind === 'payment' && entry.transaction?.type === 'payment_in';
         if (filterType === 'payments_out')
           return entry.kind === 'payment' && entry.transaction?.type === 'payment_out';
-        if (filterType === 'pending') {
-          const statusPending = entry.status === 'pending' || entry.status === 'partially_paid';
-          const postedWithOutstanding =
-            entry.isPosted && entry.outstanding > 0
-            && entry.status !== 'paid' && entry.status !== 'settled' && entry.status !== 'cancelled';
-          return statusPending || postedWithOutstanding;
-        }
         return true;
       })
       .filter((entry) => {
@@ -159,16 +151,11 @@ export function PartyStatementLedger({
 
   return (
     <div className="bg-[var(--color-surface-container-lowest)] rounded-[24px] border border-[var(--color-outline-variant)] shadow-xs overflow-hidden space-y-3">
-      {/* Table Header Controls */}
-      <div className="p-4 border-b border-[var(--color-outline-variant)] flex flex-col md:flex-row md:items-center justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
-            Statement of Account & Ledger
-          </h3>
-          <p className="text-xs text-[var(--color-on-surface-variant)]">
-            Every {party.name} sale, purchase and payment in one chronological story (newest first) — click any row for the full document
-          </p>
-        </div>
+      {/* Table Header Controls — heading, then the search + filter row */}
+      <div className="p-4 border-b border-[var(--color-outline-variant)] flex flex-col gap-3">
+        <h3 className="text-sm font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
+          Statement of Account & Ledger
+        </h3>
 
         <div className="flex items-center gap-3 flex-wrap">
           {/* Search inside ledger */}

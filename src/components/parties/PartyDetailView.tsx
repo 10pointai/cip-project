@@ -161,23 +161,6 @@ export function PartyDetailView({
           </button>
 
           <div>
-            {/* Breadcrumbs */}
-            <div className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-outline)] mb-1">
-              <button
-                type="button"
-                onClick={onBack}
-                className="hover:text-[var(--color-primary)] transition-colors"
-              >
-                Parties
-              </button>
-              <ChevronRight className="w-3 h-3" />
-              <span className="text-[var(--color-on-surface-variant)]">{party.category}</span>
-              <ChevronRight className="w-3 h-3" />
-              <span className="text-[var(--color-primary)] font-bold truncate max-w-[200px]">
-                {party.name}
-              </span>
-            </div>
-
             {/* Title & Tags */}
             <div className="flex items-center gap-2.5 flex-wrap">
               <h1 className="text-xl sm:text-2xl font-black text-[var(--color-on-surface)] tracking-tight">
@@ -277,6 +260,17 @@ export function PartyDetailView({
         </div>
 
         <div className="flex items-center gap-4 text-xs text-[var(--color-on-surface-variant)]">
+          {canRecordPayments && (
+            <button
+              type="button"
+              onClick={() => onRecordPayment(party.id, party.type === 'customer' ? 'payment_in' : 'payment_out')}
+              className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-xs transition-all hover:scale-[1.01] active:scale-[0.99] border border-[var(--color-primary)]/50"
+              title="Record a payment for this party — switch between Received / Paid in the modal"
+            >
+              <CreditCard className="w-3.5 h-3.5" />
+              <span>Record Payment</span>
+            </button>
+          )}
           <div className="flex items-center gap-1.5">
             <MapPin className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
             <span>
@@ -304,37 +298,7 @@ export function PartyDetailView({
       />
 
       {/* ========================================================================= */}
-      {/* 4. QUICK ACTION BAR FOR RECORDING VOUCHERS & PAYMENTS                      */}
-      {/* ========================================================================= */}
-      {(canRecordPayments || canManageParties) && (
-        <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-          <div>
-            <h3 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
-              Quick Actions for {party.name}
-            </h3>
-            <p className="text-xs text-[var(--color-on-surface-variant)]">
-              Record direct collections, disbursement vouchers, or sales/purchase invoices
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            {canRecordPayments && (
-              <button
-                type="button"
-                onClick={() => onRecordPayment(party.id, party.type === 'customer' ? 'payment_in' : 'payment_out')}
-                className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-xs transition-all hover:scale-[1.01] active:scale-[0.99]"
-                title="Record a payment for this party — switch between Received / Paid in the modal"
-              >
-                <CreditCard className="w-3.5 h-3.5" />
-                <span>Record Payment</span>
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================================= */}
-      {/* 5. MAIN TAB SELECTOR (LEDGER vs EVIDENCE VAULT)                           */}
+      {/* 4. MAIN TAB SELECTOR (LEDGER vs EVIDENCE VAULT)                           */}
       {/* ========================================================================= */}
       <div className="flex items-center gap-2 border-b border-[var(--color-outline-variant)] pb-1">
         <button
