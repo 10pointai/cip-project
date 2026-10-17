@@ -322,7 +322,7 @@ export function PartyStatementLedger({
                       </span>
                       {entry.debit && entry.settledAmount ? (
                         <p className={`text-[9px] font-semibold mt-0.5 ${amountTone(entry)}`}>
-                          Settled {formatCurrency(entry.settledAmount, currencySymbol)}
+                          Settled
                         </p>
                       ) : null}
                     </td>
@@ -332,7 +332,7 @@ export function PartyStatementLedger({
                       </span>
                       {entry.settledAmount && !entry.debit ? (
                         <p className={`text-[9px] font-semibold mt-0.5 ${amountTone(entry)}`}>
-                          Settled {formatCurrency(entry.settledAmount, currencySymbol)}
+                          Settled
                         </p>
                       ) : null}
                     </td>
