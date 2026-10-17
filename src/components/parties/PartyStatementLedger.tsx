@@ -188,10 +188,11 @@ export function PartyStatementLedger({
         </div>
       </div>
 
-      {/* Scrollable Ledger Table */}
-      <div className="overflow-x-auto">
+      {/* Scrollable Ledger Table — own vertical scroll so the header can
+          stay pinned while the rows scroll under it */}
+      <div className="overflow-auto max-h-[70vh]">
         <table className="w-full text-left text-xs border-collapse min-w-[1180px]">
-          <thead>
+          <thead className="sticky top-0 z-10">
             <tr className="bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
               <th className="py-3 px-3 w-[150px]">Type</th>
               <th className="py-3 px-3">Particulars</th>
