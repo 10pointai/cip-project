@@ -29,7 +29,7 @@ interface PartyStatementLedgerProps {
   onOpenOrder: (entry: PartyLedgerEntry) => void;
 }
 
-type FilterChip = 'all' | 'sales' | 'purchases' | 'payments_in' | 'payments_out' | 'other';
+type FilterChip = 'all' | 'sales' | 'purchases' | 'payments_in' | 'payments_out';
 
 const FILTER_TABS: Array<{ id: FilterChip; label: string }> = [
   { id: 'all', label: 'All' },
@@ -37,7 +37,6 @@ const FILTER_TABS: Array<{ id: FilterChip; label: string }> = [
   { id: 'purchases', label: 'Purchases' },
   { id: 'payments_in', label: 'Payments In' },
   { id: 'payments_out', label: 'Payments Out' },
-  { id: 'other', label: 'Other' },
 ];
 
 /** Row-level icon + tint per document kind/type */
@@ -127,7 +126,6 @@ export function PartyStatementLedger({
         if (filterType === 'all') return true;
         if (filterType === 'sales') return entry.kind === 'sale';
         if (filterType === 'purchases') return entry.kind === 'purchase';
-        if (filterType === 'other') return entry.kind === 'voucher';
         if (filterType === 'payments_in')
           return entry.kind === 'payment' && entry.transaction?.type === 'payment_in';
         if (filterType === 'payments_out')
