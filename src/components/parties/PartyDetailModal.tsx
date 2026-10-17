@@ -216,7 +216,7 @@ export function PartyDetailModal({
                         : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
                     }`}
                   >
-                    {isReceivable ? 'Receivable (Dr)' : isPayable ? 'Payable (Cr)' : 'Settled'}
+                    {isReceivable ? 'Receivable' : isPayable ? 'Payable' : 'Settled'}
                   </span>
                 </div>
                 <p className={`text-xs mt-2 font-medium ${
@@ -322,6 +322,7 @@ export function PartyDetailModal({
               currencySymbol={currencySymbol}
               onOpenOrder={(entry) => setDetailEntry(entry)}
               onOpenVoucher={(entry) => setDetailEntry(entry)}
+              stickyHeaderOffset="top-0"
             />
 
             {party.notes && (

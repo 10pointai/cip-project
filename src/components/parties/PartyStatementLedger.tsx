@@ -27,6 +27,10 @@ interface PartyStatementLedgerProps {
   onOpenVoucher: (entry: PartyLedgerEntry) => void;
   /** Click-through for a sale/purchase row (opens the document viewer) */
   onOpenOrder: (entry: PartyLedgerEntry) => void;
+  /** Sticky thead offset — 'top-16' pins beneath the app header (page
+   *  scrolling); containers that scroll themselves (the dashboard modal)
+   *  pass 'top-0' */
+  stickyHeaderOffset?: string;
 }
 
 type FilterChip = 'all' | 'sales' | 'purchases' | 'payments_in' | 'payments_out';
@@ -116,6 +120,7 @@ export function PartyStatementLedger({
   currencySymbol,
   onOpenVoucher,
   onOpenOrder,
+  stickyHeaderOffset = 'top-16',
 }: PartyStatementLedgerProps) {
   const [filterType, setFilterType] = useState<FilterChip>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -148,7 +153,7 @@ export function PartyStatementLedger({
   }, [statement.rows, filterType, searchQuery]);
 
   return (
-    <div className="bg-[var(--color-surface-container-lowest)] rounded-[24px] border border-[var(--color-outline-variant)] shadow-xs overflow-hidden space-y-3">
+    <div className="bg-[var(--color-surface-container-lowest)] rounded-[24px] border border-[var(--color-outline-variant)] shadow-xs overflow-clip space-y-3">
       {/* Table Header Controls — heading, then the search + filter row */}
       <div className="p-4 border-b border-[var(--color-outline-variant)] flex flex-col gap-3">
         <h3 className="text-sm font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
@@ -188,11 +193,11 @@ export function PartyStatementLedger({
         </div>
       </div>
 
-      {/* Scrollable Ledger Table — own vertical scroll so the header can
-          stay pinned while the rows scroll under it */}
-      <div className="overflow-auto max-h-[70vh]">
+      {/* Ledger Table — NO container scroll: the page scrolls and the header
+          rides sticky beneath the app header (max rows real estate) */}
+      <div>
         <table className="w-full text-left text-xs border-collapse min-w-[1180px]">
-          <thead className="sticky top-0 z-10">
+          <thead className={`sticky ${stickyHeaderOffset} z-20`}>
             <tr className="bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
               <th className="py-3 px-3 w-[150px]">Type</th>
               <th className="py-3 px-3">Particulars</th>

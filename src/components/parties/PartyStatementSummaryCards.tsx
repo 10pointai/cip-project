@@ -78,7 +78,7 @@ export function PartyStatementSummaryCards({ party, statement, currencySymbol }:
                 : 'bg-[var(--color-surface-container-highest)] text-[var(--color-on-surface-variant)]'
             }`}
           >
-            {isReceivable ? 'Receivable (Dr)' : isPayable ? 'Payable (Cr)' : 'Settled'}
+            {isReceivable ? 'Receivable' : isPayable ? 'Payable' : 'Settled'}
           </span>
         </div>
         <p className="text-xs mt-3 font-medium opacity-90">

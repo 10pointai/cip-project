@@ -300,7 +300,7 @@ export function PartyDetailView({
       {/* ========================================================================= */}
       {/* 4. MAIN TAB SELECTOR (LEDGER vs EVIDENCE VAULT)                           */}
       {/* ========================================================================= */}
-      <div className="flex items-center gap-2 border-b border-[var(--color-outline-variant)] pb-1">
+      <div className="flex items-center gap-2 border-[var(--color-outline-variant)] pb-0">
         <button
           type="button"
           onClick={() => setActiveMainTab('ledger')}
