@@ -113,7 +113,7 @@ function itemSummary(items?: Array<{ quantity: number; unit?: string; itemName?:
 export interface PartyStatement {
   party: Party;
   openingBalance: number;   // signed seed (positive = receivable / Dr)
-  rows: PartyLedgerEntry[]; // chronological ascending, runningBalance filled
+  rows: PartyLedgerEntry[]; // registration order (createdAt) ascending, runningBalance filled
 }
 
 export function buildPartyStatement(input: {
@@ -288,14 +288,20 @@ export function buildPartyStatement(input: {
     });
   }
 
-  // --- Sequence: chronological with a running balance ----------------------
+  // --- Sequence: REGISTRATION order with a running balance -----------------
+  // (user rule) The running balance is sequenced by the row's createdAt —
+  // the moment the record was actually registered on this party's ledger —
+  // never by the effective document date: a back-dated document joins the
+  // sequence where it was REGISTERED and does not reshuffle the balance
+  // history before it. Rows without createdAt (defensive) fall back to their
+  // effective date.
   const opening = Number(party.openingBalance) || 0;
   const openingSeed = party.openingBalanceType === 'to_receive' ? opening : -opening;
   const sorted = entries.sort((a, b) => {
+    const ca = registeredAtTs(a) - registeredAtTs(b);
+    if (ca !== 0) return ca;
     const d = (a.date || '').localeCompare(b.date || '');
     if (d !== 0) return d;
-    const ca = (asEpoch(a)) - (asEpoch(b));
-    if (ca !== 0) return ca;
     return a.id.localeCompare(b.id);
   });
   let running = openingSeed;
@@ -307,12 +313,14 @@ export function buildPartyStatement(input: {
   return { party, openingBalance: openingSeed, rows: sorted };
 }
 
-function asEpoch(entry: PartyLedgerEntry): number {
-  const t = entry.transaction;
-  const sale = entry.sale;
-  const purchase = entry.purchase;
-  const createdAt = sale?.createdAt || purchase?.createdAt || t?.createdAt || '';
-  return Date.parse(createdAt) || 0;
+/** The row's registration timestamp (createdAt of its underlying master or
+ *  voucher) — falls back to the row's effective balance date. Display and
+ *  running-balance sequencing both key on this. */
+export function registeredAtTs(entry: PartyLedgerEntry): number {
+  const ts = Date.parse(
+    entry.sale?.createdAt || entry.purchase?.createdAt || entry.transaction?.createdAt || ''
+  );
+  return ts || Date.parse(entry.date) || 0;
 }
 
 /** Expands the statement rows back into their underlying ACTIVE vouchers —

@@ -21,6 +21,7 @@ import { accountsRouter, transfersRouter, adjustmentsRouter } from './server/rou
 import { getConnectionStatus, isMysqlConfigured, testMysqlConnection } from './server/mysql/connection';
 import { runMysqlMigrations } from './server/mysql/migrations';
 import { getStorageStatus } from './server/services/storage';
+import { resolveTokenUser } from './server/middleware/auth';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -45,8 +46,18 @@ app.use((req, res, next) => {
 // REST API ROUTES
 // ==========================================
 
-// Health & System Info
+// Health & System Info — collectionCounts reveal business volume (parties,
+// transactions, users), so this is an authenticated endpoint now. The client
+// reaches it via api.getHealth() (Bearer token attached); BackendStatusModal
+// only opens for signed-in operators.
 app.get('/api/health', (req, res) => {
+  if (!resolveTokenUser(
+    typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer ')
+      ? req.headers.authorization.substring(7)
+      : null
+  )) {
+    return res.status(401).json({ success: false, error: 'Authentication token required. Please sign in.' });
+  }
   const stats = serverDb.getStats();
   const dbStatus = getConnectionStatus();
   const storageStatus = getStorageStatus();
@@ -80,16 +91,43 @@ app.get('/api/health', (req, res) => {
 });
 
 // Full Database Sync Endpoint for Frontend Hydration
+// SECURITY — TIERED SNAPSHOT (the old handler was fully unauthenticated and
+// returned the entire database including users with bcrypt hashes):
+//  - Unauthenticated callers (the pre-login hydration the sign-in screen uses
+//    for company branding) get ONLY `settings` — no users, no parties, no
+//    transactions, no balances.
+//  - Authenticated callers get the full snapshot with credential material
+//    (passwordHash, activationCode) stripped from every user — passwords have
+//    no business being client-side. `/api/users` (manage_users) remains the
+//    only surface that exposes activation codes, since admins must share them.
 app.get('/api/sync', async (req, res) => {
   try {
     if (req.query.fresh === 'true' || req.query.refresh === 'true') {
       await serverDb.initFromMysql();
     }
     const fullSnapshot = serverDb.getFullSnapshot();
+    const authHeader = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
+    const bearer = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : null;
+    const tokenUser = resolveTokenUser(bearer);
+
+    if (!tokenUser) {
+      return res.json({
+        success: true,
+        timestamp: new Date().toISOString(),
+        data: {
+          settings: fullSnapshot.settings,
+          users: [] as unknown[],
+        },
+      });
+    }
+
     res.json({
       success: true,
       timestamp: new Date().toISOString(),
-      data: fullSnapshot,
+      data: {
+        ...fullSnapshot,
+        users: fullSnapshot.users.map(({ passwordHash: _ph, activationCode: _ac, ...safeUser }) => safeUser),
+      },
     });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });

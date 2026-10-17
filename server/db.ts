@@ -2293,7 +2293,7 @@ class ServerLocalDatabase {
   public updateSale(
     id: string,
     updates: Partial<Sale> & { items?: SalesOrderItemInput[]; updateInventory?: boolean },
-    opts: { skipMysqlSync?: boolean } = {}
+    opts: { skipMysqlSync?: boolean; redateCurrentStage?: boolean } = {}
   ): Sale | null {
     const index = (this.data.sales || []).findIndex((s) => s.id === id);
     if (index === -1) {
@@ -2318,6 +2318,15 @@ class ServerLocalDatabase {
       this.logAudit('UPDATE', 'SALE', id, `Party change attempt ignored on ${existing.saleNumber} — sale is party-locked`);
     }
     existing.date = updates.date ?? existing.date;
+    // ORDER DATE = STAGE DOCUMENT DATE (user rule): the stage document must
+    // show the exact order date the user inserted — never the date the stage
+    // row was created or last modified on. A master edit that inserts a date
+    // therefore re-dates the edited (current/latest) stage document too;
+    // stage ISSUANCE is exempt (the addSaleStageDirect composite pre-call —
+    // a new stage carries its own newly inserted date).
+    if (opts.redateCurrentStage && updates.date && latestStage) {
+      latestStage.date = updates.date;
+    }
     existing.notes = updates.notes ?? existing.notes;
     existing.vehicleNo = updates.vehicleNo ?? existing.vehicleNo;
     existing.driverName = updates.driverName ?? existing.driverName;
@@ -2630,7 +2639,7 @@ class ServerLocalDatabase {
   public updatePurchase(
     id: string,
     updates: Partial<Purchase> & { items?: PurchaseOrderItemInput[]; updateInventory?: boolean },
-    opts: { skipMysqlSync?: boolean } = {}
+    opts: { skipMysqlSync?: boolean; redateCurrentStage?: boolean } = {}
   ): Purchase | null {
     const index = (this.data.purchases || []).findIndex((p) => p.id === id);
     if (index === -1) {
@@ -2641,6 +2650,13 @@ class ServerLocalDatabase {
 
     existing.partyId = updates.partyId !== undefined ? (updates.partyId || undefined) : existing.partyId;
     existing.date = updates.date ?? existing.date;
+    // ORDER DATE = STAGE DOCUMENT DATE (user rule) — same as updateSale: a
+    // master edit that inserts a date re-dates the current/latest stage
+    // document; the addPurchaseStageDirect composite pre-call is exempt (the
+    // stage row is re-dated by addPurchaseStage itself right after).
+    if (opts.redateCurrentStage && updates.date && existing.stages && existing.stages.length > 0) {
+      existing.stages[existing.stages.length - 1].date = updates.date;
+    }
     existing.notes = updates.notes ?? existing.notes;
     existing.updatedAt = new Date().toISOString();
 
@@ -3172,27 +3188,24 @@ class ServerLocalDatabase {
   }
 
   public getUserById(id: string, includeSensitive = false): AppUser | undefined {
+    // NO read-path auto-heal here: finders must be pure. Status is forced to
+    // 'active' or a hash minted by a GET would (a) silently un-suspend a
+    // super admin on the request after `PATCH /:id/status`, and (b) mint
+    // Admin@123 out of an auth'd read. The deliberate no-lockout heal for the
+    // super admin lives in the login route only (auth.ts login handler) and at
+    // hydration time (initFromMysql's super-admin ensure + active-hash pass).
     const user = this.data.users?.find((u) => u.id === id);
     if (!user) return undefined;
-    if (!user.passwordHash && (user.role === 'super_admin' || user.username.toLowerCase() === 'admin')) {
-      user.passwordHash = bcrypt.hashSync('Admin@123', 10);
-      user.status = 'active';
-      this.save();
-    }
     if (includeSensitive) return { ...user };
     const { passwordHash, ...safeUser } = user;
     return safeUser as AppUser;
   }
 
   public getUserByUsername(username: string, includeSensitive = false): AppUser | undefined {
+    // Pure finder — see getUserById for why auto-heal does not belong here.
     const normalized = username.trim().toLowerCase();
     const user = this.data.users?.find((u) => u.username.toLowerCase() === normalized);
     if (!user) return undefined;
-    if (!user.passwordHash && (user.role === 'super_admin' || user.username.toLowerCase() === 'admin')) {
-      user.passwordHash = bcrypt.hashSync('Admin@123', 10);
-      user.status = 'active';
-      this.save();
-    }
     if (includeSensitive) return { ...user };
     const { passwordHash, ...safeUser } = user;
     return safeUser as AppUser;
@@ -3240,7 +3253,7 @@ class ServerLocalDatabase {
     permissions: UserPermissions;
     notes?: string;
     customUsername?: string;
-  }): AppUser {
+  }, opts: { skipMysqlSync?: boolean } = {}): AppUser {
     if (!this.data.users) {
       this.data.users = JSON.parse(JSON.stringify(SEED_USERS));
     }
@@ -3248,8 +3261,12 @@ class ServerLocalDatabase {
     const username = payload.customUsername?.trim().toLowerCase() || this.generateUniqueUsername(payload.fullName, payload.role);
     const activationCode = this.generateActivationCode();
 
+    // Monotonic clock id: concurrent creates must never share an id
+    // (same class fixed for acc-/stk-adj- — sweep of bare Date.now() ids).
+    const newId = `usr-${this.nextLedgerMs()}`;
+
     const newUser: AppUser = {
-      id: `usr-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      id: newId,
       fullName: payload.fullName.trim(),
       email: payload.email.trim().toLowerCase(),
       phone: payload.phone?.trim() || '',
@@ -3265,7 +3282,9 @@ class ServerLocalDatabase {
     this.data.users.push(newUser);
     this.logAudit('CREATE', 'USER', newUser.id, `Created new ${newUser.role} account for ${newUser.fullName} (username: ${newUser.username}, pending setup).`);
     this.save();
-    liveSyncUser(newUser).catch((e) => console.error('[DB] Failed liveSync for createUser:', e.message));
+    if (!opts.skipMysqlSync) {
+      liveSyncUser(newUser).catch((e) => console.error('[DB] Failed liveSync for createUser:', e.message));
+    }
 
     const { passwordHash, ...safeUser } = newUser;
     return safeUser as AppUser;
@@ -3280,7 +3299,9 @@ class ServerLocalDatabase {
     notes?: string;
     customUsername?: string;
   }): Promise<AppUser> {
-    const user = this.createUser(payload);
+    // Single AWAITED sync (the sync mutation used to fire twice: once
+    // fire-and-forget inside createUser, once awaited here).
+    const user = this.createUser(payload, { skipMysqlSync: true });
     const fullUser = this.data.users?.find((u) => u.id === user.id);
     if (fullUser) {
       await liveSyncUser(fullUser);
@@ -3288,7 +3309,7 @@ class ServerLocalDatabase {
     return user;
   }
 
-  public updateUser(id: string, updates: Partial<AppUser>): AppUser | null {
+  public updateUser(id: string, updates: Partial<AppUser>, opts: { skipMysqlSync?: boolean } = {}): AppUser | null {
     if (!this.data.users) return null;
     const index = this.data.users.findIndex((u) => u.id === id);
     if (index === -1) return null;
@@ -3303,6 +3324,17 @@ class ServerLocalDatabase {
       }
     }
 
+    // Same lockout class on suspend/pending: a super admin taken out of
+    // 'active' is exactly as dangerous as one demoted — protect the last one.
+    if (existing.role === 'super_admin' && updates.status && ['suspended', 'pending_setup'].includes(updates.status)) {
+      const otherActiveSuperAdmins = this.data.users.filter(
+        (u) => u.role === 'super_admin' && u.status === 'active' && u.id !== id
+      );
+      if (otherActiveSuperAdmins.length === 0) {
+        throw new Error('Cannot deactivate the only active Super Administrator. Re-activate or provision another Super Admin first.');
+      }
+    }
+
     this.data.users[index] = {
       ...existing,
       ...updates,
@@ -3311,14 +3343,18 @@ class ServerLocalDatabase {
 
     this.logAudit('UPDATE', 'USER', id, `Updated user profile for ${existing.username}.`);
     this.save();
-    liveSyncUser(this.data.users[index]).catch((e) => console.error('[DB] Failed liveSync for updateUser:', e.message));
+    if (!opts.skipMysqlSync) {
+      liveSyncUser(this.data.users[index]).catch((e) => console.error('[DB] Failed liveSync for updateUser:', e.message));
+    }
 
     const { passwordHash, ...safeUser } = this.data.users[index];
     return safeUser as AppUser;
   }
 
   public async updateUserAsync(id: string, updates: Partial<AppUser>): Promise<AppUser | null> {
-    const user = this.updateUser(id, updates);
+    // Single AWAITED sync (mirror of createUserAsync — the old wrapper wrote
+    // to MySQL twice per mutation: once fire-and-forget, once awaited).
+    const user = this.updateUser(id, updates, { skipMysqlSync: true });
     const fullUser = this.data.users?.find((u) => u.id === id);
     if (fullUser) {
       await liveSyncUser(fullUser);
@@ -3326,7 +3362,7 @@ class ServerLocalDatabase {
     return user;
   }
 
-  public deleteUser(id: string): boolean {
+  public deleteUser(id: string, opts: { skipMysqlSync?: boolean } = {}): boolean {
     if (!this.data.users) return false;
     const user = this.data.users.find((u) => u.id === id);
     if (!user) return false;
@@ -3341,14 +3377,17 @@ class ServerLocalDatabase {
     this.data.users = this.data.users.filter((u) => u.id !== id);
     this.logAudit('DELETE', 'USER', id, `Deleted user account ${user.username} (${user.fullName}).`);
     this.save();
-    liveSyncUser(user, true).catch((e) => console.error('[DB] Failed liveSync for deleteUser:', e.message));
+    if (!opts.skipMysqlSync) {
+      liveSyncUser(user, true).catch((e) => console.error('[DB] Failed liveSync for deleteUser:', e.message));
+    }
     return true;
   }
 
   public async deleteUserAsync(id: string): Promise<boolean> {
+    // Single AWAITED sync (mirror of createUserAsync/updateUserAsync).
     const user = this.data.users?.find((u) => u.id === id);
     if (!user) return false;
-    const res = this.deleteUser(id);
+    const res = this.deleteUser(id, { skipMysqlSync: true });
     if (res) {
       await liveSyncUser(user, true);
     }

@@ -175,6 +175,7 @@ class ApiClient {
   public async verifySetup(username: string): Promise<{
     success: boolean;
     eligible: boolean;
+    requiresActivationCode?: boolean;
     user: { id: string; fullName: string; username: string; email: string; role: string };
   }> {
     return this.request('/auth/verify-setup', {

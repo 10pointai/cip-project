@@ -37,6 +37,19 @@ export interface PurchaseStageDocDisplay {
   totalAmount: number;
 }
 
+/**
+ * The master row's primary key, shortened to `<prefix>-<timestamp>` (`sale-…`
+ * / `purc-…`): the trailing random suffix is storage noise (user rule) and is
+ * stripped for display. Ids with fewer segments pass through unchanged.
+ */
+export function masterPkShort(orderId?: string): string {
+  if (!orderId) return '';
+  const parts = orderId.split('-');
+  // Drop the trailing random segment (`-37agq5`): ids mint as
+  // `sale|purc-<timestamp>-<random>` (and legacy variants carry one too).
+  return parts.length >= 3 ? parts.slice(0, -1).join('-') : orderId;
+}
+
 export interface StageDocDisplay {
   stageType: SalesStage;
   stageNumber: string;

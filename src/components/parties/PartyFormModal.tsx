@@ -197,9 +197,7 @@ export function PartyFormModal({
               <h2 className="text-base sm:text-lg font-extrabold text-[var(--color-on-surface)]">
                 {initialParty ? 'Edit Party Profile' : 'Add New Party / Business Partner'}
               </h2>
-              <p className="text-xs text-[var(--color-on-surface-variant)]">
-                Add clients, raw material suppliers, stone quarries, or transport fleets
-              </p>
+              
             </div>
           </div>
           <button

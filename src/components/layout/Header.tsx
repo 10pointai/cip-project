@@ -74,18 +74,10 @@ export function Header({
         if (!hasPermission('manage_sales')) return null;
         return null
       case 'purchases':
+        // No header action — purchase creation lives on the Purchases view
+        // (Add Purchase on the search card).
         if (!hasPermission('manage_purchases')) return null;
-        return (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => window.dispatchEvent(new CustomEvent('app-header-action', { detail: 'add-purchase' }))}
-              className="inline-flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-xs"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Add Purchase</span>
-            </button>
-          </div>
-        );
+        return null;
       case 'logistics':
         return (
           <div className="flex items-center gap-2">
@@ -202,34 +194,7 @@ export function Header({
           </button>
         )}
 
-        {/* Theme Mode & Contrast Controls (Only shown on Settings & Design System pages) */}
-        {(activeTab === 'settings' || activeTab === 'design-system') && (
-          <div className="flex items-center gap-1 bg-[var(--color-surface-container-high)] p-1 rounded-full border border-[var(--color-outline-variant)]">
-            <button
-              onClick={toggleMode}
-              className="p-1.5 rounded-full text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface)] transition-all"
-              title={`Switch to ${mode === 'light' ? 'Dark' : 'Light'} Mode`}
-              aria-label="Toggle Theme Mode"
-            >
-              {mode === 'light' ? (
-                <Moon className="w-3.5 h-3.5" />
-              ) : (
-                <Sun className="w-3.5 h-3.5 text-amber-400" />
-              )}
-            </button>
-
-            <select
-              value={contrast}
-              onChange={(e) => setContrast(e.target.value as any)}
-              className="bg-transparent text-[11px] font-semibold text-[var(--color-on-surface)] px-1.5 py-0.5 outline-none cursor-pointer rounded-full hover:bg-[var(--color-surface)]"
-              title="M3 Contrast Level"
-            >
-              <option value="standard" className="bg-[var(--color-surface)] text-[var(--color-on-surface)]">Std Contrast</option>
-              <option value="medium" className="bg-[var(--color-surface)] text-[var(--color-on-surface)]">Med Contrast</option>
-              <option value="high" className="bg-[var(--color-surface)] text-[var(--color-on-surface)]">High Contrast (AAA)</option>
-            </select>
-          </div>
-        )}
+       
 
         {/* Dynamic Action Buttons */}
         <div className="flex items-center gap-1.5 sm:gap-2">
@@ -270,18 +235,7 @@ export function Header({
                 </div>
 
                 <div className="space-y-0.5">
-                  {onOpenAuthModal && (
-                    <button
-                      onClick={() => {
-                        setIsUserMenuOpen(false);
-                        onOpenAuthModal();
-                      }}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)] rounded-xl text-left transition-all"
-                    >
-                      <User className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-                      <span>Account Profile & Security</span>
-                    </button>
-                  )}
+                  
 
                   <button
                     onClick={() => {

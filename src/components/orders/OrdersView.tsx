@@ -15,7 +15,6 @@ import {
   Clock,
   AlertTriangle,
   Ban,
-  Calendar,
   Layers,
   TrendingUp,
   Boxes,
@@ -51,9 +50,11 @@ import {
   editLabelFor,
   purchaseEditLabelFor,
   canViewProforma,
+  masterPkShort,
 } from './orderDisplay';
 import { OrderDetailModal } from './OrderDetailModal';
 import { OrderDocumentPreviewModal } from './OrderDocumentPreviewModal';
+import { formatDateTime } from '../../utils/formatters';
 
 function numberToWords(num: number): string {
   if (num === 0) return 'Zero Rupees Only';
@@ -371,7 +372,7 @@ export function OrdersView({
 
   // Filter and search orders
   const filteredOrders = useMemo(() => {
-    return currentOrders.filter((o) => {
+    const matches = currentOrders.filter((o) => {
       const matchesSearch =
         (o.orderNumber || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
         (o.partyName || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -380,6 +381,13 @@ export function OrdersView({
       const matchesType = fixedType ? true : (typeFilter === 'all' || o.type === typeFilter);
 
       return matchesSearch && matchesType;
+    });
+    // Newest registration first — createdAt is the row's master-creation
+    // timestamp (legacy rows without it fall to the bottom).
+    return matches.sort((a, b) => {
+      const ta = Date.parse(a.createdAt || '') || 0;
+      const tb = Date.parse(b.createdAt || '') || 0;
+      return tb - ta;
     });
   }, [currentOrders, searchTerm, typeFilter, fixedType]);
 
@@ -455,9 +463,6 @@ export function OrdersView({
   React.useEffect(() => {
     const handleHeaderAction = (e: Event) => {
       const customEvent = e as CustomEvent;
-      if (fixedType === 'purchase' && customEvent.detail === 'add-purchase') {
-        setIsStageMenuOpen(true); // mirror of the sales popover
-      }
       if (fixedType === 'purchase' && customEvent.detail === 'create-po') {
         handleOpenCreate('purchase');
       }
@@ -1118,7 +1123,7 @@ export function OrdersView({
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-                <th className="py-3.5 px-4">Date</th>
+                <th className="py-3.5 px-4">{fixedType === 'sales' ? 'Sale ID' : fixedType === 'purchase' ? 'Purchase ID' : 'Order ID'}</th>
                 {!fixedType && <th className="py-3.5 px-3">Type</th>}
                 {fixedType === 'sales' && <th className="py-3.5 px-3">Sales Stage</th>}
                 {fixedType === 'purchase' && <th className="py-3.5 px-3">Purchase Stage</th>}
@@ -1147,11 +1152,17 @@ export function OrdersView({
                       onClick={() => handleOpenDetail(order)}
                       className="hover:bg-[var(--color-surface-container-high)]/40 transition-colors cursor-pointer text-xs"
                     >
-                      {/* Date */}
+                      {/* Sale/Purchase ID column — the master row's primary
+                          key shortened to `sale-<timestamp>` as the main
+                          line; the registration timestamp beneath it
+                          (dd-mm-yyyy + time) */}
                       <td className="py-3.5 px-4">
-                        <div className="font-bold text-[var(--color-on-surface)] flex items-center gap-1">
-                          <Calendar className="w-3 h-3 text-[var(--color-on-surface-variant)]" /> {order.date}
+                        <div className="font-bold text-[var(--color-on-surface)] truncate max-w-[220px]">
+                          {masterPkShort(order.id)}
                         </div>
+                        <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
+                          {formatDateTime(order.createdAt, 'dash')}
+                        </p>
                       </td>
 
                       {/* Type Badge */}

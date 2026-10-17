@@ -139,9 +139,21 @@ export function AddPurchaseModal({
         : existingOrder.orderNumber || ''
       : suggestRef(currentStage)
   );
-  const [date, setDate] = useState<string>(
-    existingOrder && !openStage ? existingOrder.date || today : today
-  );
+  const [date, setDate] = useState<string>(() => {
+    // A saved stage document must keep the EXACT order date the user inserted
+    // when they issued it — never the date the record was created or modified
+    // on. The edit form therefore prefills the TARGET stage document's own
+    // stored date (a plain edit re-saves the current stage document; a
+    // deep-linked stage edit re-saves that same stage). Only a stage that
+    // does not exist yet (a next stage being issued) and fresh creates
+    // default to today — and even then the field stays user-editable.
+    if (!existingOrder) return today;
+    const targetStage = openStage || (existingOrder.purchaseStage as PurchaseStage) || 'purchase_order';
+    const storedStageDate = existingOrder.purchaseStageDocs?.find(
+      (d) => d.stageType === targetStage
+    )?.date;
+    return storedStageDate || today;
+  });
 
   // ---- Vendor ----
   const [partyId, setPartyId] = useState<string>(

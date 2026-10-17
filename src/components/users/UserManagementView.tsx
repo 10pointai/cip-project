@@ -230,7 +230,13 @@ export function UserManagementView() {
         role: formData.role,
         permissions: formData.permissions,
         notes: formData.notes.trim(),
-        customUsername: formData.customUsername.trim() || undefined,
+        // HONEST PREVIEW: whatever the identifier card is showing right now
+        // (custom-typed name, or the last server suggestion) is what we ask the
+        // server to provision — the previewed username is then what actually
+        // gets created, not a fresh random one. Uniqueness is still enforced
+        // server-side (400 on collision); server falls back to its own
+        // generation when empty.
+        customUsername: formData.customUsername.trim() || formData.suggestedUsername.trim() || undefined,
       });
 
       if (res.success) {
@@ -378,49 +384,7 @@ export function UserManagementView() {
 
   return (
     <div className="space-y-6">
-      {/* Top Banner / Stats Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-[var(--color-surface-container)] p-6 rounded-3xl border border-[var(--color-outline-variant)] shadow-xs">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <div className="w-8 h-8 rounded-xl bg-[var(--color-primary)] text-[var(--color-on-primary)] flex items-center justify-center shadow-xs">
-              <ShieldCheck className="w-5 h-5" />
-            </div>
-            <h1 className="text-xl font-extrabold tracking-tight text-[var(--color-on-surface)]">
-              User & Access Control
-            </h1>
-            <span className="px-2.5 py-0.5 rounded-full bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)] text-[10px] font-bold uppercase tracking-wider">
-              JWT Secured
-            </span>
-          </div>
-          <p className="text-xs text-[var(--color-on-surface-variant)]">
-            Provision administrators, manage granular feature permissions, and distribute generated unique usernames for password activation.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2.5">
-          <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[var(--color-surface-container-high)] text-[11px] text-[var(--color-on-surface-variant)] border border-[var(--color-outline-variant)]">
-            <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-            <span>Refreshed on Feature Visit</span>
-          </div>
-
-          <button
-            onClick={() => fetchUsers(false)}
-            disabled={isLoading}
-            className="p-2.5 rounded-full bg-[var(--color-surface-container-high)] hover:bg-[var(--color-surface-container-highest)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] transition-all"
-            title="Refresh Directory from Cloud"
-          >
-            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-          </button>
-
-          <button
-            onClick={openCreateDialog}
-            className="inline-flex items-center gap-2 px-4 py-2.5 bg-[var(--color-primary)] hover:opacity-90 active:scale-98 text-[var(--color-on-primary)] font-bold text-xs rounded-full transition-all shadow-sm"
-          >
-            <UserPlus className="w-4 h-4" />
-            <span>Add New User</span>
-          </button>
-        </div>
-      </div>
+      
 
       {/* KPI Stats Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -500,6 +464,9 @@ export function UserManagementView() {
             <option value="operator">Operators</option>
           </select>
 
+          {/* Add New User */}
+         
+
           {/* Status Filter */}
           <select
             value={statusFilter}
@@ -511,6 +478,18 @@ export function UserManagementView() {
             <option value="pending_setup">Pending Setup</option>
             <option value="suspended">Suspended</option>
           </select>
+
+           {canManageUsers && (
+            <button
+              type="button"
+              onClick={openCreateDialog}
+              className="flex items-center gap-1.5 px-3 py-2 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-xl text-xs font-bold shadow-xs hover:opacity-90 transition-opacity"
+              title="Create a new user"
+            >
+              <UserPlus className="w-4 h-4" />
+              Add New User
+            </button>
+          )}
         </div>
       </div>
 
@@ -666,7 +645,9 @@ export function UserManagementView() {
                             />
                           </div>
                           <span className="text-[11px] font-bold text-[var(--color-on-surface)]">
-                            {user.role === 'super_admin' ? 'All (17)' : `${activePermCount}/17`}
+                            {user.role === 'super_admin'
+                              ? `All (${ALL_PERMISSION_KEYS.length})`
+                              : `${activePermCount}/${ALL_PERMISSION_KEYS.length}`}
                           </span>
                         </div>
                         <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
@@ -1234,6 +1215,7 @@ export function UserManagementView() {
                   <li>Click <strong>Sign In</strong> in the top header</li>
                   <li>Switch to the <strong>First-Time Setup</strong> tab</li>
                   <li>Enter username <code className="font-mono font-bold text-[var(--color-primary)]">{newlyCreatedUser.username}</code></li>
+                  <li>Enter the one-time activation code shown above ({newlyCreatedUser.activationCode})</li>
                   <li>Choose and confirm your private password</li>
                 </ol>
               </div>

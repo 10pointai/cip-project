@@ -355,7 +355,10 @@ export async function createSaleDirect(data: any): Promise<Sale> {
 }
 
 export async function updateSaleDirect(id: string, updates: any): Promise<Sale | null> {
-  return serverDb.updateSale(id, updates);
+  // redateCurrentStage: a master edit that inserts an order date re-dates the
+  // edited (current) stage document with it — stage docs always show the
+  // user-inserted order date, never a created/modified date.
+  return serverDb.updateSale(id, updates, { redateCurrentStage: true });
 }
 
 export async function addSaleStageDirect(id: string, stageInput: any): Promise<Sale | null> {
@@ -391,7 +394,9 @@ export async function createPurchaseDirect(data: any): Promise<Purchase> {
 }
 
 export async function updatePurchaseDirect(id: string, updates: any): Promise<Purchase | null> {
-  return serverDb.updatePurchase(id, updates);
+  // redateCurrentStage: master-edit order-date insertions re-date the current
+  // stage document (mirror of updateSaleDirect — see its comment).
+  return serverDb.updatePurchase(id, updates, { redateCurrentStage: true });
 }
 
 export async function addPurchaseStageDirect(id: string, stageInput: any): Promise<Purchase | null> {

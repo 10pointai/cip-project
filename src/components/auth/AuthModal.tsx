@@ -44,6 +44,7 @@ export function AuthModal({ isOpen, onClose, isMandatory = false }: AuthModalPro
   // First-time setup state
   const [setupUsername, setSetupUsername] = useState('');
   const [activationCode, setActivationCode] = useState('');
+  const [codeRequired, setCodeRequired] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [verifiedUser, setVerifiedUser] = useState<{
@@ -95,6 +96,7 @@ export function AuthModal({ isOpen, onClose, isMandatory = false }: AuthModalPro
       const res = await api.verifySetup(setupUsername.trim());
       if (res.success && res.eligible) {
         setVerifiedUser(res.user);
+        setCodeRequired(!!res.requiresActivationCode);
         showToast(`Account found: ${res.user.fullName} (${res.user.role})`, 'info');
       }
     } catch (err: any) {
@@ -114,13 +116,18 @@ export function AuthModal({ isOpen, onClose, isMandatory = false }: AuthModalPro
       return;
     }
 
-    if (newPassword.length < 6) {
-      setError('Password must be at least 6 characters long.');
+    if (newPassword.length < 8) {
+      setError('Password must be at least 8 characters long.');
       return;
     }
 
     if (newPassword !== confirmPassword) {
       setError('Passwords do not match.');
+      return;
+    }
+
+    if (codeRequired && !activationCode.trim()) {
+      setError('This account requires the activation code your administrator shared with your username.');
       return;
     }
 
@@ -351,6 +358,7 @@ export function AuthModal({ isOpen, onClose, isMandatory = false }: AuthModalPro
                       onChange={(e) => {
                         setSetupUsername(e.target.value);
                         setVerifiedUser(null);
+                        setCodeRequired(false);
                       }}
                       placeholder="e.g. neha.adm5824"
                       className="w-full pl-10 pr-4 py-2.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-2xl text-xs text-[var(--color-on-surface)] placeholder:text-[var(--color-on-surface-variant)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] font-mono"
@@ -388,7 +396,7 @@ export function AuthModal({ isOpen, onClose, isMandatory = false }: AuthModalPro
 
               <div>
                 <label className="block text-xs font-bold text-[var(--color-on-surface)] mb-1.5">
-                  Activation Code (Optional / From Admin Invite)
+                  {codeRequired ? 'Activation Code *' : 'Activation Code (optional / from admin invite)'}
                 </label>
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-[var(--color-on-surface-variant)]">
@@ -396,10 +404,13 @@ export function AuthModal({ isOpen, onClose, isMandatory = false }: AuthModalPro
                   </div>
                   <input
                     type="text"
+                    required={codeRequired}
                     value={activationCode}
                     onChange={(e) => setActivationCode(e.target.value.toUpperCase())}
                     placeholder="e.g. ACT-8N3K9W"
-                    className="w-full pl-10 pr-4 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-2xl text-xs text-[var(--color-on-surface)] placeholder:text-[var(--color-on-surface-variant)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] font-mono"
+                    className={`w-full pl-10 pr-4 py-2 bg-[var(--color-surface-container)] border rounded-2xl text-xs text-[var(--color-on-surface)] placeholder:text-[var(--color-on-surface-variant)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] font-mono ${
+                      codeRequired ? 'border-[var(--color-primary)]' : 'border-[var(--color-outline-variant)]'
+                    }`}
                   />
                 </div>
               </div>

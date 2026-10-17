@@ -43,8 +43,16 @@ import {
   CompanySettings,
   Order,
 } from '../../types';
-import { formatCurrency, formatDate } from '../../utils/formatters';
+import { formatCurrency, formatDate, formatDateTime } from '../../utils/formatters';
+import { formatLedgerBalance } from '../parties/partyStatement';
 import { cloudStore as localDb } from '../../services/cloudStore';
+
+/** A ledger row's registration timestamp (createdAt of its underlying
+ *  transaction/transfer/adjustment/order) — falls back to the row's effective
+ *  date for defensively-incomplete records. Running-balance sequencing and
+ *  the display key on this. */
+const registeredAtTsOf = (row: { createdAt?: string; date?: string }): number =>
+  Date.parse(row.createdAt || '') || Date.parse(row.date || '') || 0;
 
 interface CashBankViewProps {
   accounts: CashBankAccount[];
@@ -219,7 +227,13 @@ export function CashBankView({
   // Selected Account details & Ledger
   const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
 
-  // Build full chronological ledger entries for the selected account
+  // Build the full ledger for the selected account. Running balance is
+  // sequenced by REGISTRATION order (createdAt — the moment the record was
+  // actually registered on the account), never by the effective document
+  // date: a back-dated entry joins the sequence where it was REGISTERED and
+  // does not reshuffle the balance history before it (party-ledger rule). The
+  // list is returned ascending (sequencing order); the display renders it
+  // latest-on-top.
   const accountLedger = useMemo(() => {
     if (!selectedAccountId) return [];
 
@@ -233,6 +247,7 @@ export function CashBankView({
       moneyIn: number;
       moneyOut: number;
       createdAt: string;
+      runningBalance: number;
     }> = [];
 
     // 1. Transactions (Payment in / out / sale / purchase)
@@ -330,8 +345,26 @@ export function CashBankView({
       });
     });
 
-    return list.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [selectedAccountId, transactions, transfers, adjustments, orders]);
+    // --- Sequence: REGISTRATION order with a running balance ---------------
+    // Seeded from the account's opening balance; every entry adds
+    // (moneyIn − moneyOut) in the order it was registered, so the final
+    // running balance ties to account.currentBalance.
+    const sorted = list.sort((a, b) => {
+      const ca = registeredAtTsOf(a) - registeredAtTsOf(b);
+      if (ca !== 0) return ca;
+      const d = (a.date || '').localeCompare(b.date || '');
+      if (d !== 0) return d;
+      return a.id.localeCompare(b.id);
+    });
+    const openingSeed = Number(selectedAccount?.openingBalance) || 0;
+    let running = openingSeed;
+    for (const entry of sorted) {
+      running = Math.round((running + entry.moneyIn - entry.moneyOut) * 100) / 100;
+      entry.runningBalance = running;
+    }
+
+    return sorted;
+  }, [selectedAccountId, selectedAccount, transactions, transfers, adjustments, orders]);
 
   // Handle CSV Export
   const handleExportCSV = () => {
@@ -1337,14 +1370,14 @@ export function CashBankView({
 
           {/* Account Statement Table */}
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs min-w-[700px]">
+            <table className="w-full text-left text-xs min-w-[820px]">
               <thead className="bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] uppercase tracking-wider text-[10px] font-bold border-b border-[var(--color-outline-variant)]">
                 <tr>
                   <th className="py-3 px-4">Date</th>
                   <th className="py-3 px-4">Transaction / Party</th>
                   <th className="py-3 px-4">Ref / Voucher</th>
-                  <th className="py-3 px-4 text-right text-[var(--color-success)]">Money In (Credit)</th>
-                  <th className="py-3 px-4 text-right text-[var(--color-error)]">Money Out (Debit)</th>
+                  <th className="py-3 px-4 text-right">Amount (In/Out)</th>
+                  <th className="py-3 px-4 text-right">Running Balance</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--color-outline-variant)]">
@@ -1355,10 +1388,12 @@ export function CashBankView({
                     </td>
                   </tr>
                 ) : (
-                  accountLedger.map((item) => (
+                  [...accountLedger]
+                    .sort((a, b) => registeredAtTsOf(b) - registeredAtTsOf(a))
+                    .map((item) => (
                     <tr key={item.id} className="hover:bg-[var(--color-surface-container)]/50 transition-colors">
                       <td className="py-3 px-4 text-[var(--color-on-surface)] font-medium">
-                        {formatDate(item.date)}
+                        {formatDateTime(item.createdAt, 'dash')}
                       </td>
                       <td className="py-3 px-4">
                         <div className="font-bold text-[var(--color-on-surface)]">{item.title}</div>
@@ -1367,15 +1402,46 @@ export function CashBankView({
                       <td className="py-3 px-4 font-mono text-[var(--color-on-surface-variant)]">
                         {item.referenceNumber || '—'}
                       </td>
-                      <td className="py-3 px-4 text-right font-bold text-sm text-[var(--color-success)]">
-                        {item.moneyIn > 0 ? `+ ${formatCurrency(item.moneyIn, currencySymbol)}` : '—'}
+                      <td
+                        className={`py-3 px-4 text-right font-bold text-sm ${
+                          item.moneyIn > 0 ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]'
+                        }`}
+                      >
+                        {item.moneyIn > 0
+                          ? `+ ${formatCurrency(item.moneyIn, currencySymbol)}`
+                          : `- ${formatCurrency(item.moneyOut, currencySymbol)}`}
                       </td>
-                      <td className="py-3 px-4 text-right font-bold text-sm text-[var(--color-error)]">
-                        {item.moneyOut > 0 ? `- ${formatCurrency(item.moneyOut, currencySymbol)}` : '—'}
+                      <td
+                        className={`py-3 px-4 text-right font-mono font-bold ${
+                          item.runningBalance >= 0 ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]'
+                        }`}
+                      >
+                        {formatLedgerBalance(item.runningBalance)}
                       </td>
                     </tr>
                   ))
                 )}
+                {/* Opening Balance Row */}
+                <tr className="bg-[var(--color-surface-container)]/40 font-semibold">
+                  <td className="py-3 px-4">
+                    <span className="inline-flex items-center gap-1 font-bold text-[var(--color-on-surface)]">
+                      <Building2 className="w-3.5 h-3.5 text-[var(--color-primary)]" />
+                      Opening Balance
+                    </span>
+                    <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
+                      {formatDateTime(selectedAccount.createdAt, 'dash')}
+                    </p>
+                  </td>
+                  <td className="py-3 px-4 text-[var(--color-on-surface-variant)]">
+                    Initial balance registered ({selectedAccount.type === 'bank' ? 'Bank' : 'Cash'} account)
+                  </td>
+                  <td className="py-3 px-4 font-mono text-[var(--color-outline)]">—</td>
+                  <td className="py-3 px-4 text-right font-mono text-[var(--color-surface-container-highest)]">—</td>
+                  <td className="py-3 px-4 text-right font-mono font-bold text-[var(--color-success)]">
+                    {formatCurrency(selectedAccount.openingBalance, currencySymbol)}{' '}
+                    <span className="text-[9px] uppercase font-normal">Dr</span>
+                  </td>
+                </tr>
               </tbody>
             </table>
           </div>

@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { serverDb } from '../db';
 import { authenticateToken, requirePermission, AuthenticatedRequest } from '../middleware/auth';
 import { UserRole, UserPermissions } from '../../src/types';
+import { DEFAULT_USER_PERMISSIONS } from '../seedData';
 
 export const usersRouter = Router();
 
@@ -72,25 +73,7 @@ usersRouter.post('/', async (req: AuthenticatedRequest, res: Response) => {
       email,
       phone,
       role: role || 'admin',
-      permissions: permissions || {
-        view_dashboard: true,
-        view_financial_metrics: true,
-        manage_parties: true,
-        record_payments: true,
-        manage_cash_bank: true,
-        manage_inventory: true,
-        manage_production: true,
-        manage_sales: true,
-        manage_purchases: true,
-        manage_fleet: true,
-        manage_emi: true,
-        dispatch_trips: true,
-        manage_employees: false,
-        process_payroll: false,
-        manage_evidence: true,
-        manage_users: false,
-        manage_settings: false,
-      },
+      permissions: permissions || DEFAULT_USER_PERMISSIONS,
       notes,
       customUsername,
     });
@@ -114,6 +97,18 @@ usersRouter.put('/:id', async (req: AuthenticatedRequest, res: Response) => {
     const existing = serverDb.getUserById(id);
     if (!existing) {
       return res.status(404).json({ success: false, error: 'User not found.' });
+    }
+
+    // Email uniqueness pre-check (email is UNIQUE in MySQL): without this the
+    // duplicate surfaces only on the cloud as a raw ER_DUP_ENTRY driver error,
+    // and not at all in the in-memory sandbox.
+    if (email !== undefined) {
+      const emailTaken = serverDb
+        .getUsers()
+        .some((u) => u.id !== id && u.email.toLowerCase() === String(email).trim().toLowerCase());
+      if (emailTaken) {
+        return res.status(400).json({ success: false, error: 'A user with this email address already exists.' });
+      }
     }
 
     const updated = await serverDb.updateUserAsync(id, {
@@ -174,6 +169,26 @@ usersRouter.patch('/:id/status', async (req: AuthenticatedRequest, res: Response
 
     if (req.user?.id === id && status === 'suspended') {
       return res.status(400).json({ success: false, error: 'You cannot suspend your own account.' });
+    }
+
+    // (last-active-super-admin lockout guard for suspend/pending_setup lives
+    // centrally in serverDb.updateUser)
+
+    // STATE MACHINE: an account may not be forced active while it still has no
+    // password — that state only arises when the user has completed First-Time
+    // Setup themselves. Activating manually creates an account that cannot
+    // authenticate (login correctly blocks it with a needsSetup error).
+    if (status === 'active') {
+      const target = serverDb.getUserById(id, true);
+      if (target && target.status === 'pending_setup' && !target.passwordHash) {
+        const codeHint = target.activationCode
+          ? ` Share their username (${target.username}) and activation code (${target.activationCode}) — completion of setup activates the account.`
+          : ' Use Reset Invite to re-issue an activation code and have them complete First-Time Setup.';
+        return res.status(400).json({
+          success: false,
+          error: `${target.username} has no password set yet, so it cannot be activated from here.${codeHint}`,
+        });
+      }
     }
 
     const updated = await serverDb.updateUserAsync(id, { status });

@@ -130,6 +130,19 @@ export const FULL_ADMIN_PERMISSIONS: UserPermissions = {
   manage_settings: true,
 };
 
+// Default permission template for a newly provisioned account — wide operational
+// access, but none of the administrative keys. SINGLE SOURCE OF TRUTH: any route
+// or service that needs a "default user" permissions object derives it from this
+// constant instead of re-declaring keys (a third drift-prone copy previously
+// lived in the POST /api/users handler and went stale whenever a key was added).
+export const DEFAULT_USER_PERMISSIONS: UserPermissions = {
+  ...FULL_ADMIN_PERMISSIONS,
+  manage_employees: false,
+  process_payroll: false,
+  manage_users: false,
+  manage_settings: false,
+};
+
 export const SEED_USERS: AppUser[] = [
   {
     id: 'usr-superadmin',

@@ -15,9 +15,11 @@ import {
   editLabelFor,
   StageDocDisplay,
   PurchaseStageDocDisplay,
+  masterPkShort,
 } from './orderDisplay';
 import { SaleStageDocCard, PurchaseStageDocCard } from './StageDocumentCards';
 import { OrderDocumentPreviewModal } from './OrderDocumentPreviewModal';
+import { formatDateTime } from '../../utils/formatters';
 
 /**
  * ORDER DETAILS MODAL — THE shared order story modal of the Sales/Purchases
@@ -128,14 +130,14 @@ export function OrderDetailModal({
             >
               {selectedOrder.type === 'sales' ? 'Sales / Dispatch Order' : 'Purchase / Inward Order'}
             </span>
-              {selectedOrder.type === 'sales' ? (
-                <h3 className="text-base font-black text-[var(--color-on-surface)]">{selectedOrder.date}</h3>
-              ) : (
-                <>
-                  <h3 className="text-base font-black text-[var(--color-on-surface)]">{selectedOrder.orderNumber}</h3>
-                  <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">Booked on {selectedOrder.date}</p>
-                </>
-              )}
+          {/* Master row's primary key (shortened) + creation date as subtext
+              (user rule — not the order/date fields) */}
+          <h3 className="text-base font-black text-[var(--color-on-surface)]">
+            {masterPkShort(selectedOrder.id)}
+          </h3>
+          <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
+            {formatDateTime(selectedOrder.createdAt, 'dash')}
+          </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
             <button
@@ -168,58 +170,6 @@ export function OrderDetailModal({
               ) : null;
             })()}
           </div>
-
-          {/* Order state strip — the master's one-shot flags as applied:
-              stockyard posting + where the payment flow was booked */}
-          {(() => {
-            const isSale = selectedOrder.type === 'sales';
-            const stockApplied = selectedOrder.inventoryApplied;
-            const cashFlow = selectedOrder.cashApplied
-              ? (selectedOrder.settlementType || 'account')
-              : undefined;
-            const payFlowTone = cashFlow === 'account'
-              ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-              : cashFlow === 'credit'
-              ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
-              : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)]';
-            return (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                {/* Stock: dispatch (sales) / inward (purchase) one-shot flag */}
-                <div className={`p-3 rounded-xl border flex items-center gap-2.5 ${stockApplied
-                  ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-                  : 'bg-[var(--color-surface-container)] border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)]'}`}>
-                  <Boxes className="w-4 h-4 shrink-0" />
-                  <div className="min-w-0">
-                    <p className="text-[9px] font-bold uppercase tracking-wider opacity-80">
-                      {isSale ? 'Stockyard Dispatch' : 'Stock Inward'}
-                    </p>
-                    <p className="text-xs font-black truncate">
-                      {stockApplied ? 'Stock updated' : 'Stock not updated yet'}
-                    </p>
-                  </div>
-                </div>
-
-                {/* Payment flow: where/how the payment was booked */}
-                <div className={`p-3 rounded-xl border flex items-center gap-2.5 ${payFlowTone} border-[var(--color-outline-variant)]/40`}>
-                  <Landmark className="w-4 h-4 shrink-0" />
-                  <div className="min-w-0">
-                    <p className="text-[9px] font-bold uppercase tracking-wider opacity-80">Payment Flow</p>
-                    {cashFlow === 'account' ? (
-                      <p className="text-xs font-black truncate">
-                        Booked {isSale ? 'receipt' : 'payout'}
-                        {selectedOrder.settlementVoucherNumber ? ` ${selectedOrder.settlementVoucherNumber}` : ''}
-                        {selectedOrder.settlementAccountName ? ` · ${selectedOrder.settlementAccountName}` : ''}
-                      </p>
-                    ) : cashFlow === 'credit' ? (
-                      <p className="text-xs font-black truncate">Booked on credit — party ledger</p>
-                    ) : (
-                      <p className="text-xs font-black truncate">Payment flow not booked yet</p>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
 
           {/* SALES — every issued stage document (values in its own format) + create buttons */}
           {selectedOrder.type === 'sales' && (
@@ -286,9 +236,12 @@ export function OrderDetailModal({
                       )}
                     </div>
 
-                    {/* The active stage document */}
+                    {/* The active stage document — the CURRENT stage's card
+                        is dated with the order's saved date (user rule) */}
                     <SaleStageDocCard
-                      doc={active}
+                      doc={active.stageType === (selectedOrder.stage || 'sales_order')
+                        ? { ...active, date: selectedOrder.date }
+                        : active}
                       order={selectedOrder}
                       currencyCode={settings.currency?.code}
                       onOpenDocument={openStageDocPreview}
@@ -386,6 +339,51 @@ export function OrderDetailModal({
               })()}
             </div>
           )}
+
+          {/* Order state info — the master's one-shot flags as plain info:
+              stockyard posting + where the payment flow was booked */}
+          {(() => {
+            const isSale = selectedOrder.type === 'sales';
+            const stockApplied = selectedOrder.inventoryApplied;
+            const cashFlow = selectedOrder.cashApplied
+              ? (selectedOrder.settlementType || 'account')
+              : undefined;
+            return (
+              <div className="flex flex-col sm:flex-row sm:items-center gap-x-6 gap-y-1.5">
+                {/* Stock: dispatch (sales) / inward (purchase) one-shot flag */}
+                <div className="flex items-center gap-2 min-w-0">
+                  <Boxes className={`w-4 h-4 shrink-0 ${stockApplied ? 'text-[var(--color-success)]' : 'text-[var(--color-outline)]'}`} />
+                  <p className="text-xs min-w-0">
+                    <span className="text-[var(--color-on-surface-variant)]">
+                      {isSale ? 'Stockyard Dispatch' : 'Stock Inward'}:{' '}
+                    </span>
+                    <span className="font-bold text-[var(--color-on-surface)]">
+                      {stockApplied ? 'stock updated' : 'stock not updated yet'}
+                    </span>
+                  </p>
+                </div>
+
+                {/* Payment flow: where/how the payment was booked */}
+                <div className="flex items-center gap-2 min-w-0">
+                  <Landmark className={`w-4 h-4 shrink-0 ${cashFlow ? 'text-[var(--color-success)]' : 'text-[var(--color-outline)]'}`} />
+                  <p className="text-xs min-w-0">
+                    <span className="text-[var(--color-on-surface-variant)]">Payment flow: </span>
+                    {cashFlow === 'account' ? (
+                      <span className="font-bold text-[var(--color-on-surface)]">
+                        booked {isSale ? 'receipt' : 'payout'}
+                        {selectedOrder.settlementVoucherNumber ? ` ${selectedOrder.settlementVoucherNumber}` : ''}
+                        {selectedOrder.settlementAccountName ? ` · ${selectedOrder.settlementAccountName}` : ''}
+                      </span>
+                    ) : cashFlow === 'credit' ? (
+                      <span className="font-bold text-[var(--color-on-surface)]">booked on credit — party ledger</span>
+                    ) : (
+                      <span className="font-bold text-[var(--color-on-surface)]">not booked yet</span>
+                    )}
+                  </p>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Actions Footer */}
           <div className="flex items-center justify-end pt-3 border-t border-[var(--color-outline-variant)]">

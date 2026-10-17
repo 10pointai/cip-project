@@ -135,6 +135,7 @@ export async function fetchSettingsDirect(): Promise<CompanySettings> {
     tradeName: s.trade_name || current.tradeName,
     gstin: s.gstin || current.gstin,
     pan: s.pan || current.pan,
+    cin: s.cin || current.cin || undefined,
     email: s.email || current.email,
     phone: s.phone || current.phone,
     website: s.website || current.website,
@@ -157,10 +158,10 @@ export async function updateSettingsDirect(settingsData: Partial<CompanySettings
 
   await executeMysqlQuery(
     `REPLACE INTO company_settings (
-      id, company_name, tagline, trade_name, gstin, pan, email, phone, website,
+      id, company_name, tagline, trade_name, gstin, pan, cin, email, phone, website,
       address_street, address_city, address_state, address_state_code, address_pincode,
       invoice_notes, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       'default_settings',
       updated.companyName,
@@ -168,6 +169,7 @@ export async function updateSettingsDirect(settingsData: Partial<CompanySettings
       updated.tradeName || null,
       updated.gstin || null,
       updated.pan || null,
+      updated.cin || null,
       updated.email || null,
       updated.phone || null,
       updated.website || null,

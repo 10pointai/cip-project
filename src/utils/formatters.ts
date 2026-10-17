@@ -160,3 +160,37 @@ export function getDaysAgo(dateString: string): number {
   const diffTime = Math.abs(today.getTime() - past.getTime());
   return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 }
+
+/**
+ * Formats an ISO timestamp to a readable date + time.
+ *  style 'long' (default): "17 Oct 2026, 4:05 PM"
+ *  style 'dash':           "17-10-2026, 4:05 PM"
+ */
+export function formatDateTime(dateString?: string, style: 'long' | 'dash' = 'long'): string {
+  if (!dateString) return '-';
+  try {
+    const date = new Date(dateString);
+    if (isNaN(date.getTime())) return dateString;
+
+    let datePart: string;
+    if (style === 'dash') {
+      const day = String(date.getDate()).padStart(2, '0');
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      datePart = `${day}-${month}-${date.getFullYear()}`;
+    } else {
+      datePart = date.toLocaleDateString('en-IN', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+      });
+    }
+    const timePart = date.toLocaleTimeString('en-IN', {
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    });
+    return `${datePart}, ${timePart}`;
+  } catch {
+    return dateString;
+  }
+}

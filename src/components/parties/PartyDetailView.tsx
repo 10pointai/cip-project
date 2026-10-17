@@ -219,58 +219,61 @@ export function PartyDetailView({
       {/* ========================================================================= */}
       {/* 2. PROFILE, CONTACT & REGISTRATION RIBBON                                  */}
       {/* ========================================================================= */}
-      <div className="bg-[var(--color-surface-container-lowest)] rounded-[24px] border border-[var(--color-outline-variant)] p-4 shadow-xs flex flex-wrap items-center justify-between gap-4 text-xs">
-        <div className="flex items-center gap-3 flex-wrap">
-          {party.phone && (
-            <a
-              href={`tel:${party.phone}`}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] rounded-full font-semibold transition-colors shadow-2xs"
-            >
-              <Phone className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-              <span>{party.phone}</span>
-            </a>
-          )}
+      <div className="bg-[var(--color-surface-container-lowest)] rounded-[24px] border border-[var(--color-outline-variant)] p-4 shadow-xs flex flex-col gap-3 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3 flex-wrap">
+            {party.phone && (
+              <a
+                href={`tel:${party.phone}`}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] rounded-full font-semibold transition-colors shadow-2xs"
+              >
+                <Phone className="w-3.5 h-3.5 text-[var(--color-primary)]" />
+                <span>{party.phone}</span>
+              </a>
+            )}
 
-          {cleanPhone && (
-            <a
-              href={whatsappUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-[var(--color-success-container)] text-[var(--color-on-success-container)] hover:opacity-90 border border-[var(--color-success)]/30 rounded-full font-bold transition-all shadow-2xs"
-            >
-              <MessageSquare className="w-3.5 h-3.5" />
-              <span>WhatsApp Statement</span>
-            </a>
-          )}
+            {cleanPhone && (
+              <a
+                href={whatsappUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-[var(--color-success-container)] text-[var(--color-on-success-container)] hover:opacity-90 border border-[var(--color-success)]/30 rounded-full font-bold transition-all shadow-2xs"
+              >
+                <MessageSquare className="w-3.5 h-3.5" />
+                <span>WhatsApp Statement</span>
+              </a>
+            )}
 
-          {party.email && (
-            <a
-              href={`mailto:${party.email}`}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] rounded-full font-medium transition-colors shadow-2xs"
-            >
-              <Mail className="w-3.5 h-3.5 text-[var(--color-secondary)]" />
-              <span>{party.email}</span>
-            </a>
-          )}
+            {party.email && (
+              <a
+                href={`mailto:${party.email}`}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] rounded-full font-medium transition-colors shadow-2xs"
+              >
+                <Mail className="w-3.5 h-3.5 text-[var(--color-secondary)]" />
+                <span>{party.email}</span>
+              </a>
+            )}
 
-          <div className="flex items-center gap-1 text-[var(--color-on-surface-variant)] px-2">
-            <User className="w-3.5 h-3.5 text-[var(--color-outline)]" />
-            <span>Contact: <strong>{party.contactPerson || 'Direct'}</strong></span>
+            <div className="flex items-center gap-1 text-[var(--color-on-surface-variant)] px-2">
+              <User className="w-3.5 h-3.5 text-[var(--color-outline)]" />
+              <span>Contact: <strong>{party.contactPerson || 'Direct'}</strong></span>
+            </div>
           </div>
-        </div>
 
-        <div className="flex items-center gap-4 text-xs text-[var(--color-on-surface-variant)]">
           {canRecordPayments && (
             <button
               type="button"
               onClick={() => onRecordPayment(party.id, party.type === 'customer' ? 'payment_in' : 'payment_out')}
-              className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-xs transition-all hover:scale-[1.01] active:scale-[0.99] border border-[var(--color-primary)]/50"
+              className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-xs transition-all hover:scale-[1.01] active:scale-[0.99] border border-[var(--color-primary)]/50 shrink-0"
               title="Record a payment for this party — switch between Received / Paid in the modal"
             >
               <CreditCard className="w-3.5 h-3.5" />
               <span>Record Payment</span>
             </button>
           )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-4 text-xs text-[var(--color-on-surface-variant)]">
           <div className="flex items-center gap-1.5">
             <MapPin className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
             <span>

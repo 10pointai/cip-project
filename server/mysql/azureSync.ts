@@ -69,21 +69,42 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
   try {
     const conn = await pool.getConnection();
     try {
-      // 1. Settings
+      // 1. Settings — hydrate EVERY profile field the update path persists.
+      // (Historical bug: this mapping dropped tagline, website and the five
+      // registered-address columns, so each re-hydration silently reset them
+      // to SEED and the address the user saved appeared never to persist.)
+      // The 'default_settings' row is authoritative (updateDirect + snapshot
+      // push both mint it); a stray legacy 'default' row is consolidated away.
       let settings: CompanySettings = { ...SEED_SETTINGS };
-      const [settingRows]: [any[], any] = await conn.query('SELECT * FROM company_settings LIMIT 1');
+      const [settingRows]: [any[], any] = await conn.query(
+        'SELECT * FROM company_settings ORDER BY (id = ?) DESC',
+        ['default_settings'],
+      );
       if (settingRows && settingRows.length > 0) {
         const s = settingRows[0];
         settings = {
           ...SEED_SETTINGS,
           companyName: s.company_name || SEED_SETTINGS.companyName,
           tradeName: s.trade_name || SEED_SETTINGS.tradeName,
+          tagline: s.tagline || SEED_SETTINGS.tagline,
           gstin: s.gstin || SEED_SETTINGS.gstin,
           pan: s.pan || SEED_SETTINGS.pan,
+          cin: s.cin || undefined,
           email: s.email || SEED_SETTINGS.email,
           phone: s.phone || SEED_SETTINGS.phone,
+          website: s.website || SEED_SETTINGS.website,
+          registeredAddress: {
+            street: s.address_street || SEED_SETTINGS.registeredAddress.street,
+            city: s.address_city || SEED_SETTINGS.registeredAddress.city,
+            state: s.address_state || SEED_SETTINGS.registeredAddress.state,
+            stateCode: s.address_state_code || SEED_SETTINGS.registeredAddress.stateCode,
+            pincode: s.address_pincode || SEED_SETTINGS.registeredAddress.pincode,
+          },
           invoiceNotes: s.invoice_notes || SEED_SETTINGS.invoiceNotes,
         };
+        if (settingRows.length > 1) {
+          await conn.query('DELETE FROM company_settings WHERE id <> ?', ['default_settings']);
+        }
       }
 
       // 2. Users
@@ -440,7 +461,18 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
            LEFT JOIN item_locations loc ON loc.id = soi.location_id`
         );
         const [saleStageRows]: [any[], any] = await conn.query(
-          `SELECT * FROM sales_order_stages ORDER BY date ASC, created_at ASC`
+          // Stage rows MUST come back in LADDER order, not date order — a
+          // back-dated stage document (e.g. a PO dated before its RFQ) would
+          // otherwise flip the array and every `stages[last]` "latest stage"
+          // consumer (ladder guards, status computation, document cards).
+          `SELECT * FROM sales_order_stages
+           ORDER BY CASE stage_type
+             WHEN 'quotation' THEN 0
+             WHEN 'sales_order' THEN 1
+             WHEN 'proforma_invoice' THEN 2
+             WHEN 'delivery_note' THEN 3
+             ELSE 4
+           END ASC, created_at ASC, date ASC`
         );
         // Stage-scoped items: bucket key = saleId::stageId ('master' for
         // legacy rows without stage linkage). Each stage row carries its own
@@ -548,7 +580,14 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
            LEFT JOIN item_locations loc ON loc.id = poi.location_id`
         );
         const [purStageRows]: [any[], any] = await conn.query(
-          `SELECT * FROM purchase_order_stages ORDER BY date ASC, created_at ASC`
+          // Ladder order (RFQ -> PO -> GRN) regardless of stage dates — a
+          // back-dated edit must never reorder the stage documents.
+          `SELECT * FROM purchase_order_stages
+           ORDER BY CASE stage_type
+             WHEN 'rfq' THEN 0
+             WHEN 'purchase_order' THEN 1
+             ELSE 2
+           END ASC, created_at ASC, date ASC`
         );
         const purItemsByMaster = new Map<string, PurchaseOrderItem[]>();
         for (const li of purItemRows || []) {
@@ -1738,18 +1777,25 @@ export async function liveSyncSettings(s: CompanySettings) {
   const pool = getMysqlPool();
   if (!pool) return;
   try {
+    // Single canonical row id ('default_settings' — same as the direct
+    // update + snapshot-push paths, which both mint it). The historical
+    // 'default' id created a second competing row that made `SELECT LIMIT 1`
+    // nondeterministic; hydration now consolidates stray older rows.
+    // tagline is written here too — omitting it REPLACE-deleted the value.
     await pool.query(
       `REPLACE INTO company_settings (
-        id, company_name, trade_name, gstin, pan, email, phone, website,
+        id, company_name, tagline, trade_name, gstin, pan, cin, email, phone, website,
         address_street, address_city, address_state, address_state_code, address_pincode,
         invoice_notes, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        'default',
+        'default_settings',
         s.companyName,
+        s.tagline || null,
         s.tradeName || null,
         s.gstin || null,
         s.pan || null,
+        s.cin || null,
         s.email || null,
         s.phone || null,
         s.website || null,

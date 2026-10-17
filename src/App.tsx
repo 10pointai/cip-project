@@ -83,7 +83,11 @@ function AppContent() {
     return () => {
       isMounted = false;
     };
-  }, [activeTab, syncNow]);
+    // isAuthenticated in deps: the pre-login constructor sync now returns a
+    // settings-only tier (GET /api/sync is data-gated), so sign-in MUST trigger
+    // one full authenticated snapshot hydration — without this dep, landing on
+    // the same tab you left the app with left the store hydrated settings-only.
+  }, [activeTab, isAuthenticated, syncNow]);
 
   const checkTabPermission = (tab: NavigationTab): boolean => {
     if (!currentUser) return false;
@@ -351,7 +355,7 @@ function AppContent() {
       case 'settings':
         return {
           title: 'Company & Operations Settings',
-          subtitle: 'Branding, plant sites, GSTIN, bank details & local database management',
+          subtitle: '',
         };
       case 'logistics':
         return {
@@ -371,7 +375,7 @@ function AppContent() {
       case 'production':
         return {
           title: 'Production & Batching Management',
-          subtitle: 'Hot mix plant batching runs, pugmill logs & QC lab test certificates',
+          subtitle: '',
         };
       case 'employees':
         return {
@@ -386,7 +390,7 @@ function AppContent() {
       case 'users':
         return {
           title: 'User & Access Management',
-          subtitle: 'JWT token-based authentication, administrator provisioning, permission matrix, and unique username setup',
+          subtitle: '',
         };
       case 'design-system':
         return {

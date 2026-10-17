@@ -4,6 +4,9 @@ import { serverDb } from '../db';
 import { AppUser, UserPermissions } from '../../src/types';
 
 export const JWT_SECRET = process.env.JWT_SECRET || 'apex-road-infra-ops-mgmt-jwt-secret-key-2026';
+if (!process.env.JWT_SECRET) {
+  console.warn('[Auth] JWT_SECRET is not set — using the built-in development fallback. Set JWT_SECRET in the environment before this server accepts production traffic.');
+}
 
 export interface AuthenticatedRequest extends Request {
   user?: AppUser;
@@ -42,6 +45,21 @@ export function authenticateToken(req: AuthenticatedRequest, res: Response, next
     next();
   } catch (err: any) {
     return res.status(401).json({ success: false, error: 'Invalid or expired session token. Please sign in again.' });
+  }
+}
+
+// Silent credential resolution for tiered endpoints (e.g. GET /api/sync):
+// validates a bearer token without mounting the full middleware stack and
+// without ever writing a response — returns the user or null.
+export function resolveTokenUser(token: string | null | undefined): AppUser | null {
+  if (!token) return null;
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as { id: string; username: string; role: string };
+    const user = serverDb.getUserById(decoded.id);
+    if (!user || user.status !== 'active') return null;
+    return user;
+  } catch {
+    return null;
   }
 }
 

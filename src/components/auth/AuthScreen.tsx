@@ -2,8 +2,6 @@ import React, { useState } from 'react';
 import {
   Building2,
   Shield,
-  KeyRound,
-  Sparkles,
   Lock,
   User,
   ArrowRight,
@@ -45,6 +43,7 @@ export function AuthScreen() {
   // Setup fields
   const [setupUsername, setSetupUsername] = useState('');
   const [activationCode, setActivationCode] = useState('');
+  const [codeRequired, setCodeRequired] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [verifiedUser, setVerifiedUser] = useState<{
@@ -97,6 +96,9 @@ export function AuthScreen() {
       const res = await api.verifySetup(setupUsername.trim());
       if (res.eligible && res.user) {
         setVerifiedUser(res.user);
+        // Server-side rule: accounts provisioned with an activation code can
+        // only complete setup with that code — the field becomes mandatory.
+        setCodeRequired(!!res.requiresActivationCode);
         showToast(`Account verified for ${res.user.fullName}`, 'success');
       } else {
         setError('Account not found or already activated.');
@@ -122,6 +124,10 @@ export function AuthScreen() {
     }
     if (newPassword !== confirmPassword) {
       setError('Passwords do not match. Please re-type carefully.');
+      return;
+    }
+    if (codeRequired && !activationCode.trim()) {
+      setError('This account requires the activation code your administrator shared with your username.');
       return;
     }
 
@@ -162,9 +168,7 @@ export function AuthScreen() {
               <span className="font-black tracking-tight text-base sm:text-lg text-[var(--color-on-surface)]">
                 {settings.companyName}
               </span>
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]">
-                ERP v2.4
-              </span>
+            
             </div>
             <p className="text-xs text-[var(--color-on-surface-variant)] hidden sm:block">
               {settings.tagline}
@@ -172,26 +176,8 @@ export function AuthScreen() {
           </div>
         </div>
 
-        {/* Mode toggle */}
-        <div className="flex items-center gap-2 bg-[var(--color-surface-container-high)] border border-[var(--color-outline-variant)] rounded-full p-1.5 shadow-2xs">
-          <button
-            onClick={toggleMode}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-highest)] transition-colors"
-            title="Toggle Dark / Light Theme"
-          >
-            {mode === 'dark' ? (
-              <>
-                <Sun className="w-3.5 h-3.5 text-amber-400" />
-                <span className="text-[11px]">Light Mode</span>
-              </>
-            ) : (
-              <>
-                <Moon className="w-3.5 h-3.5 text-slate-700" />
-                <span className="text-[11px]">Dark Mode</span>
-              </>
-            )}
-          </button>
-        </div>
+       
+       
       </header>
 
       {/* Main Center Card Stage */}
@@ -207,9 +193,7 @@ export function AuthScreen() {
               <h1 className="text-xl sm:text-2xl font-black text-[var(--color-on-surface)] tracking-tight">
                 Enterprise Operations Portal
               </h1>
-              <p className="text-xs text-[var(--color-on-surface-variant)] mt-1">
-                Authorized access required for Plant, Fleet, & Ledger Management
-              </p>
+              
 
               {/* Mode Switcher Segmented Control */}
               <div className="mt-5 grid grid-cols-2 p-1 bg-[var(--color-surface-container)] rounded-full border border-[var(--color-outline-variant)]">
@@ -225,7 +209,6 @@ export function AuthScreen() {
                       : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
                   }`}
                 >
-                  <KeyRound className="w-3.5 h-3.5" />
                   <span>Sign In</span>
                 </button>
                 <button
@@ -240,8 +223,7 @@ export function AuthScreen() {
                       : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
                   }`}
                 >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>First-Time Setup</span>
+                  <span>Sign-up</span>
                 </button>
               </div>
             </div>
@@ -281,13 +263,7 @@ export function AuthScreen() {
                     <label className="block text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
                       Password
                     </label>
-                    <button
-                      type="button"
-                      onClick={() => setAuthMode('first_time_setup')}
-                      className="text-[11px] font-semibold text-[var(--color-primary)] hover:underline"
-                    >
-                      New user? Setup password
-                    </button>
+                    
                   </div>
                   <div className="relative">
                     <Lock className="w-4 h-4 text-[var(--color-on-surface-variant)] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -348,6 +324,7 @@ export function AuthScreen() {
                         onChange={(e) => {
                           setSetupUsername(e.target.value);
                           setVerifiedUser(null);
+                          setCodeRequired(false);
                         }}
                         placeholder="e.g. your username"
                         className="w-full pl-10 pr-3.5 py-2.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] focus:border-[var(--color-primary)] rounded-xl text-sm text-[var(--color-on-surface)] outline-none font-mono"
@@ -384,15 +361,25 @@ export function AuthScreen() {
 
                 <div>
                   <label className="block text-xs font-bold text-[var(--color-on-surface)] mb-1.5 uppercase tracking-wider">
-                    Activation Code (Optional)
+                    {codeRequired ? 'Activation Code *' : 'Activation Code'}
                   </label>
                   <input
                     type="text"
+                    required={codeRequired}
                     value={activationCode}
                     onChange={(e) => setActivationCode(e.target.value.toUpperCase())}
                     placeholder="e.g. ACT-8N3K9W"
-                    className="w-full px-3.5 py-2.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] focus:border-[var(--color-primary)] rounded-xl text-sm text-[var(--color-on-surface)] outline-none font-mono tracking-widest uppercase"
+                    className={`w-full px-3.5 py-2.5 bg-[var(--color-surface-container)] border rounded-xl text-sm text-[var(--color-on-surface)] outline-none font-mono tracking-widest uppercase ${
+                      codeRequired
+                        ? 'border-[var(--color-primary)]'
+                        : 'border-[var(--color-outline-variant)] focus:border-[var(--color-primary)]'
+                    }`}
                   />
+                  <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-1">
+                    
+                      Required — the one-time code your administrator shared with your username.
+                      
+                  </p>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -447,35 +434,12 @@ export function AuthScreen() {
               </form>
             )}
 
-            {/* Card Footer Note */}
-            <div className="px-6 py-3.5 bg-[var(--color-surface-container-low)] border-t border-[var(--color-outline-variant)] flex items-center justify-between text-[11px] text-[var(--color-on-surface-variant)]">
-              <span className="flex items-center gap-1.5">
-                <Lock className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-                256-Bit Encrypted JWT Session
-              </span>
-              <span>Enterprise Operations Cloud Engine</span>
-            </div>
+           
+           
           </div>
         </div>
 
-        {/* Feature Highlights Grid Below Main Card */}
-        <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-2xl text-center">
-          <div className="p-3 rounded-2xl bg-[var(--color-surface-container-low)] border border-[var(--color-outline-variant)]">
-            <Fuel className="w-4 h-4 mx-auto mb-1 text-[var(--color-primary)]" />
-            <p className="text-xs font-bold text-[var(--color-on-surface)]">Batching & Production</p>
-            <p className="text-[10px] text-[var(--color-on-surface-variant)]">Real-time aggregate & bitumen consumption</p>
-          </div>
-          <div className="p-3 rounded-2xl bg-[var(--color-surface-container-low)] border border-[var(--color-outline-variant)]">
-            <Truck className="w-4 h-4 mx-auto mb-1 text-[var(--color-secondary)]" />
-            <p className="text-xs font-bold text-[var(--color-on-surface)]">Fleet & Trip Logistics</p>
-            <p className="text-[10px] text-[var(--color-on-surface-variant)]">Dumpers, transit mixers & driver payroll</p>
-          </div>
-          <div className="p-3 rounded-2xl bg-[var(--color-surface-container-low)] border border-[var(--color-outline-variant)]">
-            <Layers className="w-4 h-4 mx-auto mb-1 text-[var(--color-tertiary)]" />
-            <p className="text-xs font-bold text-[var(--color-on-surface)]">Audited General Ledger</p>
-            <p className="text-[10px] text-[var(--color-on-surface-variant)]">Cash/bank transfers & GST evidence repository</p>
-          </div>
-        </div>
+       
       </main>
 
       {/* Footer */}

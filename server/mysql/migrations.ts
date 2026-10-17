@@ -188,6 +188,7 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           trade_name VARCHAR(255),
           gstin VARCHAR(32),
           pan VARCHAR(32),
+          cin VARCHAR(32),
           email VARCHAR(255),
           phone VARCHAR(64),
           website VARCHAR(255),
@@ -206,6 +207,19 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           updated_at VARCHAR(64)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
+
+      // Backward-compat: the CIN field was added to the company profile after
+      // the table's first deployment — add the column if it is missing.
+      try {
+        const [csCols]: any = await conn.query('SHOW COLUMNS FROM company_settings');
+        const csNames = (csCols || []).map((c: any) => c.Field);
+        if (!csNames.includes('cin')) {
+          await conn.query('ALTER TABLE company_settings ADD COLUMN cin VARCHAR(32) NULL AFTER pan');
+          console.log('[MySQL Migration] Added cin column to company_settings.');
+        }
+      } catch (csAlterErr: any) {
+        console.warn('[MySQL Migration] company_settings cin notice:', csAlterErr.message);
+      }
 
       // 2. Users Table
       await conn.query(`
@@ -1575,10 +1589,10 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
         const s = snapshot.settings;
         await conn.query(
           `REPLACE INTO company_settings (
-            id, company_name, tagline, trade_name, gstin, pan, email, phone, website,
+            id, company_name, tagline, trade_name, gstin, pan, cin, email, phone, website,
             address_street, address_city, address_state, address_state_code, address_pincode,
             invoice_notes, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             'default_settings',
             s.companyName,
@@ -1586,6 +1600,7 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
             s.tradeName || null,
             s.gstin || null,
             s.pan || null,
+            s.cin || null,
             s.email || null,
             s.phone || null,
             s.website || null,

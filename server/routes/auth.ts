@@ -142,9 +142,21 @@ authRouter.post('/verify-setup', (req, res) => {
       });
     }
 
+    // Activation codes are COMPULSORY for all new sign-ups (user directive) —
+    // an account with no code on file cannot self-serve setup; the admin must
+    // re-issue one via Reset Invite.
+    if (!user.activationCode) {
+      return res.status(400).json({
+        success: false,
+        eligible: false,
+        error: `No activation code is on file for "${username}". Ask your administrator to use the Reset Invite option to re-issue one.`,
+      });
+    }
+
     res.json({
       success: true,
       eligible: true,
+      requiresActivationCode: true,
       user: {
         id: user.id,
         fullName: user.fullName,
@@ -167,8 +179,8 @@ authRouter.post('/setup-password', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Username and new password are required.' });
     }
 
-    if (password.length < 6) {
-      return res.status(400).json({ success: false, error: 'Password must be at least 6 characters long.' });
+    if (password.length < 8) {
+      return res.status(400).json({ success: false, error: 'Password must be at least 8 characters long.' });
     }
 
     const user = serverDb.getUserByUsername(username, true);
@@ -187,18 +199,34 @@ authRouter.post('/setup-password', async (req, res) => {
       });
     }
 
-    // If activation code was provided or is required, verify if matching
-    if (user.activationCode && activationCode) {
-      if (user.activationCode.toUpperCase() !== activationCode.trim().toUpperCase()) {
-        return res.status(400).json({ success: false, error: 'Invalid activation code provided.' });
-      }
+    // ACTIVATION CODE IS COMPULSORY (user directive): sign-ups are gated by the
+    // one-time code issued with the username — it is the proof-of-invite tying
+    // setup to the account holder the admin provisioned. No code sent is a hard
+    // reject; the old "no stored code" back-compat path is likewise closed — a
+    // pending account without a code on file gets one only via admin Reset Invite.
+    if (!activationCode || !activationCode.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Activation code required. Ask your administrator for the one-time code issued with your account.',
+      });
+    }
+    if (!user.activationCode) {
+      return res.status(400).json({
+        success: false,
+        error: `No activation code is on file for "${username}". Ask your administrator to use the Reset Invite option to re-issue one.`,
+      });
+    }
+    if (user.activationCode.toUpperCase() !== activationCode.trim().toUpperCase()) {
+      return res.status(400).json({ success: false, error: 'Invalid activation code provided.' });
     }
 
-    // Hash password and activate user
+    // Hash password and activate user. activationCode is consumed ONE-TIME
+    // (undefined clears it) — a used code must never re-activate the account.
     const passwordHash = bcrypt.hashSync(password, 10);
     const updated = await serverDb.updateUserAsync(user.id, {
       passwordHash,
       status: 'active',
+      activationCode: undefined,
       lastLoginAt: new Date().toISOString(),
     });
 
@@ -228,7 +256,7 @@ authRouter.get('/me', authenticateToken, (req: AuthenticatedRequest, res: Respon
 });
 
 // POST /api/auth/change-password - Change password for authenticated session
-authRouter.post('/change-password', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+authRouter.post('/change-password', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { currentPassword, newPassword } = req.body;
     const userId = req.user!.id;
@@ -237,8 +265,8 @@ authRouter.post('/change-password', authenticateToken, (req: AuthenticatedReques
       return res.status(400).json({ success: false, error: 'Current password and new password are required.' });
     }
 
-    if (newPassword.length < 6) {
-      return res.status(400).json({ success: false, error: 'New password must be at least 6 characters long.' });
+    if (newPassword.length < 8) {
+      return res.status(400).json({ success: false, error: 'New password must be at least 8 characters long.' });
     }
 
     const user = serverDb.getUserById(userId, true);
@@ -252,7 +280,9 @@ authRouter.post('/change-password', authenticateToken, (req: AuthenticatedReques
     }
 
     const passwordHash = bcrypt.hashSync(newPassword, 10);
-    serverDb.updateUser(userId, { passwordHash });
+    // Awaited so a MySQL write failure fails the request instead of silently
+    // diverging between the sandbox and the cloud (sandbox-only mutation class).
+    await serverDb.updateUserAsync(userId, { passwordHash });
 
     res.json({ success: true, message: 'Password updated successfully.' });
   } catch (error: any) {

@@ -45,15 +45,7 @@ export function SignOutConfirmModal({
             Are you sure you want to sign out, <strong className="text-[var(--color-primary)]">{currentUser?.fullName || 'User'}</strong>?
           </p>
 
-          <div className="p-3 rounded-2xl bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] text-xs text-[var(--color-on-surface-variant)] space-y-1.5">
-            <div className="flex items-center gap-2 text-[var(--color-on-surface)] font-semibold">
-              <ShieldCheck className="w-4 h-4 text-[var(--color-primary)]" />
-              <span>Session & Data Safety</span>
-            </div>
-            <p>
-              Your token will be cleared and the application will lock into the secure Sign In screen. All saved entries and vouchers remain intact.
-            </p>
-          </div>
+       
         </div>
 
         {/* Actions */}
