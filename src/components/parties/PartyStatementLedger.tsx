@@ -78,6 +78,34 @@ function stagePillTone(stageType: string): string {
   }
 }
 
+/** MONEY-COLUMN COLOR = DUES STATUS (user rule — the Debit/Credit coloring
+ *  previously misread settled payments as negative):
+ *   - Sale/Purchase rows: RED while a due is still open (booked on credit —
+ *     the client must still pay us / the vendor must still be paid), GREEN
+ *     once the payment is fully settled, neutral when nothing was posted.
+ *   - Payment rows keep the cash direction: Received = green, Made = red. */
+function amountTone(entry: PartyLedgerEntry): string {
+  if (entry.kind === 'payment') {
+    return entry.transaction?.type === 'payment_in'
+      ? 'text-[var(--color-success)]'
+      : 'text-[var(--color-error)]';
+  }
+  if (entry.kind === 'voucher' && entry.transaction) {
+    const t = entry.transaction;
+    if (t.status === 'cancelled') return 'text-[var(--color-on-surface-variant)]';
+    if (t.type === 'payment_in') return 'text-[var(--color-success)]';
+    if (t.type === 'payment_out') return 'text-[var(--color-error)]';
+    return t.status === 'pending' || t.status === 'partially_paid'
+      ? 'text-[var(--color-error)]'
+      : 'text-[var(--color-success)]';
+  }
+  // Order rows: color by outstanding dues
+  if (entry.status === 'cancelled' || !entry.isPosted) return 'text-[var(--color-on-surface-variant)]';
+  return entry.outstanding > 0
+    ? 'text-[var(--color-error)]'
+    : 'text-[var(--color-success)]';
+}
+
 export function PartyStatementLedger({
   party,
   statement,
@@ -179,8 +207,8 @@ export function PartyStatementLedger({
               <th className="py-3 px-3">Particulars</th>
               <th className="py-3 px-3">Stages</th>
               <th className="py-3 px-3">Reference</th>
-              <th className="py-3 px-3 text-right text-[var(--color-error)]">Debit (Dr / Sales / We Paid)</th>
-              <th className="py-3 px-3 text-right text-[var(--color-success)]">Credit (Cr / Purchases / Received)</th>
+              <th className="py-3 px-3 text-right">Debit (Dr / Sales / We Paid)</th>
+              <th className="py-3 px-3 text-right">Credit (Cr / Purchases / Received)</th>
               <th className="py-3 px-3 text-right">Running Balance</th>
               <th className="py-3 px-2 w-6"></th>
             </tr>
@@ -289,21 +317,21 @@ export function PartyStatementLedger({
                       {entry.reference || '—'}
                     </td>
                     <td className="py-3 px-3 text-right">
-                      <span className="font-mono font-bold text-[var(--color-error)]">
+                      <span className={`font-mono font-bold ${amountTone(entry)}`}>
                         {entry.debit ? formatCurrency(entry.debit, currencySymbol) : '—'}
                       </span>
                       {entry.debit && entry.settledAmount ? (
-                        <p className="text-[9px] font-semibold text-[var(--color-success)] mt-0.5">
+                        <p className={`text-[9px] font-semibold mt-0.5 ${amountTone(entry)}`}>
                           Settled {formatCurrency(entry.settledAmount, currencySymbol)}
                         </p>
                       ) : null}
                     </td>
                     <td className="py-3 px-3 text-right">
-                      <span className="font-mono font-bold text-[var(--color-success)]">
+                      <span className={`font-mono font-bold ${amountTone(entry)}`}>
                         {entry.credit ? formatCurrency(entry.credit, currencySymbol) : '—'}
                       </span>
                       {entry.settledAmount && !entry.debit ? (
-                        <p className="text-[9px] font-semibold text-[var(--color-primary)] mt-0.5">
+                        <p className={`text-[9px] font-semibold mt-0.5 ${amountTone(entry)}`}>
                           Settled {formatCurrency(entry.settledAmount, currencySymbol)}
                         </p>
                       ) : null}
@@ -340,7 +368,7 @@ export function PartyStatementLedger({
               <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-error)]">
                 {party.openingBalanceType === 'to_receive' ? formatCurrency(party.openingBalance, currencySymbol) : '—'}
               </td>
-              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-success)]">
+              <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-error)]">
                 {party.openingBalanceType === 'to_pay' ? formatCurrency(party.openingBalance, currencySymbol) : '—'}
               </td>
               <td className="py-3 px-3 text-right font-mono font-bold text-[var(--color-on-surface)]">
