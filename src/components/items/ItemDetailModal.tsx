@@ -17,6 +17,7 @@ import {
   MapPin,
 } from 'lucide-react';
 import { Item, ItemCategory } from '../../types';
+import { EntityDocumentsSection } from '../common/EntityDocumentsSection';
 
 interface ItemDetailModalProps {
   item: Item;
@@ -343,6 +344,10 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
               Updated: {new Date(item.updatedAt).toLocaleDateString('en-IN')}
             </span>
           </div>
+
+          {/* Documents (S3 upload feature) — uploads link to the item
+              immediately, even while this modal is open */}
+          <EntityDocumentsSection feature="item" entityId={item.id} />
         </div>
 
         {/* Footer Actions */}

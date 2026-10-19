@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Building2, User, Phone, MapPin, CreditCard, ShieldCheck, AlertCircle, Info, Sparkles } from 'lucide-react';
 import { Party, PartyType, PartyCategory } from '../../types';
 import { INDIAN_STATES, validateGSTIN } from '../../utils/formatters';
+import { EntityDocumentsSection, StagedDocument } from '../common/EntityDocumentsSection';
 
 interface PartyFormModalProps {
   isOpen: boolean;
@@ -55,6 +56,17 @@ export function PartyFormModal({
   const [gstValidation, setGstValidation] = useState<{ isValid: boolean; stateName?: string; message?: string }>({
     isValid: true,
   });
+  // DOCUMENTS (S3 upload feature): staged while creating a NEW party (the
+  // link happens server-side when the authoritative id is minted —
+  // documentIds ride the create payload); an existing party links each
+  // upload IMMEDIATELY (section runs in entityId mode).
+  const [stagedPartyDocs, setStagedPartyDocs] = useState<StagedDocument[]>([]);
+
+  useEffect(() => {
+    if (isOpen) {
+      setStagedPartyDocs([]);
+    }
+  }, [isOpen, initialParty ]);
 
   useEffect(() => {
     if (initialParty) {
@@ -179,7 +191,10 @@ export function PartyFormModal({
       openingBalanceType,
       notes: notes.trim(),
       isActive,
-    });
+      // Staged documents (new-party flow) — the server links them in the same
+      // create flow and moves each S3 object from Pending/ under Party/<id>/
+      ...(stagedPartyDocs.length > 0 ? { documentIds: stagedPartyDocs.map((d) => d.id) } : {}),
+    } as any);
 
     onClose();
   };
@@ -560,6 +575,15 @@ export function PartyFormModal({
               className="w-full px-4 py-2.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
             />
           </div>
+
+          {/* 8. Documents (S3 upload feature): stage while creating; link
+              immediately when the party already exists */}
+          <EntityDocumentsSection
+            feature="party"
+            entityId={initialParty?.id}
+            staged={initialParty ? undefined : stagedPartyDocs}
+            onStagedChange={initialParty ? undefined : setStagedPartyDocs}
+          />
 
           {/* Footer Actions */}
           <div className="pt-4 border-t border-[var(--color-outline-variant)] flex items-center justify-between">

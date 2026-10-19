@@ -40,6 +40,7 @@ import { PartyStatementLedger } from './PartyStatementLedger';
 import { PaymentVoucherDetailModal } from './PaymentVoucherDetailModal';
 import { OrderDetailModal } from '../orders/OrderDetailModal';
 import { saleToDisplay, purchaseToDisplay, OrderDisplay } from '../orders/orderDisplay';
+import { EntityDocumentsSection } from '../common/EntityDocumentsSection';
 
 interface PartyDetailViewProps {
   party: Party;
@@ -350,6 +351,10 @@ export function PartyDetailView({
           isEmbedded={true}
         />
       )}
+
+      {/* Party documents (S3 upload feature) — uploads link to the party
+          immediately; shown beneath the tabs regardless of which is active */}
+      <EntityDocumentsSection feature="party" entityId={party.id} />
 
       {/* Click-through: sale/purchase → THE orders module's details modal
           (same presentation + actions). Issue/edit actions deep-link into the

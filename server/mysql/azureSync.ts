@@ -22,6 +22,8 @@ import {
   AppDocument,
   SaleOrderDocumentLink,
   PurchaseOrderDocumentLink,
+  PartyDocumentLink,
+  ItemDocumentLink,
   DocumentStatus,
   CashBankAccount,
   InternalTransfer,
@@ -938,7 +940,8 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
       );
       const documents: AppDocument[] = (documentRows || []).map((d: any) => ({
         id: d.id,
-        name: d.name,
+        fileName: d.file_name || d.name,
+        documentName: d.document_name || undefined,
         s3Key: d.s3_key,
         url: d.url,
         contentType: d.content_type || undefined,
@@ -962,6 +965,24 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
       const purchaseOrderDocuments: PurchaseOrderDocumentLink[] = (purchaseDocRows || []).map((l: any) => ({
         id: l.id,
         purchaseId: l.purchase_id,
+        documentId: l.document_id,
+        createdAt: l.created_at,
+      }));
+      const [partyDocRows]: any[] = await conn.query(
+        'SELECT * FROM parties_documents ORDER BY created_at ASC'
+      );
+      const partyDocuments: PartyDocumentLink[] = (partyDocRows || []).map((l: any) => ({
+        id: l.id,
+        partyId: l.party_id,
+        documentId: l.document_id,
+        createdAt: l.created_at,
+      }));
+      const [itemDocRows]: any[] = await conn.query(
+        'SELECT * FROM inventory_documents ORDER BY created_at ASC'
+      );
+      const itemDocuments: ItemDocumentLink[] = (itemDocRows || []).map((l: any) => ({
+        id: l.id,
+        itemId: l.item_id,
         documentId: l.document_id,
         createdAt: l.created_at,
       }));
@@ -1003,6 +1024,8 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         documents,
         saleOrderDocuments,
         purchaseOrderDocuments,
+        partyDocuments,
+        itemDocuments,
         auditLogs,
       };
     } finally {
@@ -1895,11 +1918,12 @@ export async function liveSyncDocument(doc: AppDocument, isDelete = false) {
     } else {
       await pool.query(
         `REPLACE INTO documents (
-          id, name, s3_key, url, content_type, size_bytes, uploaded_by_id, status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, file_name, document_name, s3_key, url, content_type, size_bytes, uploaded_by_id, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           doc.id,
-          doc.name,
+          doc.fileName,
+          doc.documentName || null,
           doc.s3Key,
           doc.url,
           doc.contentType || null,
@@ -1946,6 +1970,40 @@ export async function liveSyncPurchaseOrderDocLink(link: PurchaseOrderDocumentLi
     }
   } catch (e: any) {
     console.error('[Azure MySQL LiveSync] Failed to sync purchase document link:', e.message);
+  }
+}
+
+export async function liveSyncPartyDocLink(link: PartyDocumentLink, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM parties_documents WHERE id = ?', [link.id]);
+    } else {
+      await pool.query(
+        `REPLACE INTO parties_documents (id, party_id, document_id, created_at) VALUES (?, ?, ?, ?)`,
+        [link.id, link.partyId, link.documentId, link.createdAt]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync party document link:', e.message);
+  }
+}
+
+export async function liveSyncItemDocLink(link: ItemDocumentLink, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM inventory_documents WHERE id = ?', [link.id]);
+    } else {
+      await pool.query(
+        `REPLACE INTO inventory_documents (id, item_id, document_id, created_at) VALUES (?, ?, ?, ?)`,
+        [link.id, link.itemId, link.documentId, link.createdAt]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync item document link:', e.message);
   }
 }
 

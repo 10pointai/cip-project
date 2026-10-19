@@ -659,7 +659,8 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
       await conn.query(`
         CREATE TABLE IF NOT EXISTS documents (
           id VARCHAR(64) PRIMARY KEY,
-          name VARCHAR(255) NOT NULL,
+          file_name VARCHAR(255) NOT NULL,
+          document_name VARCHAR(255) NULL,
           s3_key VARCHAR(512) NOT NULL,
           url VARCHAR(1024) NOT NULL,
           content_type VARCHAR(128),
@@ -672,17 +673,26 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
-      // Backward-compat: status column was added with the soft-life flag
+      // Backward-compat for deployments created before the naming split:
+      // `name` renamed to `file_name`; user-entered `document_name` added.
       try {
         const [docCols]: any = await conn.query('SHOW COLUMNS FROM documents');
         const docNames = (docCols || []).map((c: any) => c.Field);
-        if (!docNames.includes('status')) {
+        if (docNames.includes('name') && !docNames.includes('file_name')) {
+          await conn.query('ALTER TABLE documents CHANGE name file_name VARCHAR(255) NOT NULL');
+          console.log('[MySQL Migration] Renamed documents.name to documents.file_name.');
+        }
+        if (!docNames.includes('document_name')) {
+          await conn.query('ALTER TABLE documents ADD COLUMN document_name VARCHAR(255) NULL AFTER file_name');
+          console.log('[MySQL Migration] Added document_name column to documents table.');
+        }
+        if (!docNames.includes('status') && !docNames.includes('name')) {
           await conn.query("ALTER TABLE documents ADD COLUMN status VARCHAR(32) DEFAULT 'active' AFTER uploaded_by_id");
           await conn.query("UPDATE documents SET status = 'active' WHERE status IS NULL");
           console.log('[MySQL Migration] Added status column to documents table.');
         }
       } catch (docStatusErr: any) {
-        console.warn('[MySQL Migration] documents status notice:', docStatusErr.message);
+        console.warn('[MySQL Migration] documents columns notice:', docStatusErr.message);
       }
 
       await conn.query(`
@@ -706,6 +716,33 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           UNIQUE KEY uq_purchase_doc (purchase_id, document_id),
           INDEX idx_pod_purchase (purchase_id),
           INDEX idx_pod_document (document_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      // 10a-i. Party/item document mappings — same FK join shape as the
+      // order document tables: a document may be mapped to a party and/or an
+      // item; S3 objects are never deleted (audit), rows drop on owner delete.
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS parties_documents (
+          id VARCHAR(64) PRIMARY KEY,
+          party_id VARCHAR(64) NOT NULL,
+          document_id VARCHAR(64) NOT NULL,
+          created_at VARCHAR(64) NOT NULL,
+          UNIQUE KEY uq_party_doc (party_id, document_id),
+          INDEX idx_pd_party (party_id),
+          INDEX idx_pd_document (document_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS inventory_documents (
+          id VARCHAR(64) PRIMARY KEY,
+          item_id VARCHAR(64) NOT NULL,
+          document_id VARCHAR(64) NOT NULL,
+          created_at VARCHAR(64) NOT NULL,
+          UNIQUE KEY uq_item_doc (item_id, document_id),
+          INDEX idx_id_item (item_id),
+          INDEX idx_id_document (document_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
@@ -1983,11 +2020,12 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
       // Seed documents + order document mapping tables
       for (const doc of (snapshot.documents || []) as any[]) {
         await conn.query(
-          `REPLACE INTO documents (id, name, s3_key, url, content_type, size_bytes, uploaded_by_id, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `REPLACE INTO documents (id, file_name, document_name, s3_key, url, content_type, size_bytes, uploaded_by_id, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             doc.id,
-            doc.name,
+            doc.fileName || doc.name,
+            doc.documentName || null,
             doc.s3Key,
             doc.url,
             doc.contentType || null,
@@ -2008,6 +2046,18 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
         await conn.query(
           `REPLACE INTO purchase_order_documents (id, purchase_id, document_id, created_at) VALUES (?, ?, ?, ?)`,
           [l.id, l.purchaseId, l.documentId, l.createdAt]
+        );
+      }
+      for (const l of (snapshot.partyDocuments || []) as any[]) {
+        await conn.query(
+          `REPLACE INTO parties_documents (id, party_id, document_id, created_at) VALUES (?, ?, ?, ?)`,
+          [l.id, l.partyId, l.documentId, l.createdAt]
+        );
+      }
+      for (const l of (snapshot.itemDocuments || []) as any[]) {
+        await conn.query(
+          `REPLACE INTO inventory_documents (id, item_id, document_id, created_at) VALUES (?, ?, ?, ?)`,
+          [l.id, l.itemId, l.documentId, l.createdAt]
         );
       }
 

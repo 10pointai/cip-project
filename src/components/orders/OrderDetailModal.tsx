@@ -391,7 +391,7 @@ export function OrderDetailModal({
               Uploads link to the order immediately. */}
           <OrderDocumentsSection
             feature={selectedOrder.type === 'purchase' ? 'purchase' : 'sale'}
-            orderId={selectedOrder.id}
+            entityId={selectedOrder.id}
           />
 
           {/* Actions Footer */}

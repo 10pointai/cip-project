@@ -881,7 +881,8 @@ class ApiClient {
   // ==========================================
 
   public async createDocument(payload: {
-    name: string;
+    fileName: string;
+    documentName: string;
     s3Key: string;
     url: string;
     contentType?: string;
@@ -907,6 +908,28 @@ class ApiClient {
 
   public async linkPurchaseDocuments(purchaseId: string, documentIds: string[]): Promise<{ success: boolean; added: number }> {
     return this.request(`/documents/purchase/${purchaseId}/link`, {
+      method: 'POST',
+      body: JSON.stringify({ documentIds }),
+    });
+  }
+
+  public async getPartyDocuments(partyId: string): Promise<{ success: boolean; count: number; data: AppDocument[] }> {
+    return this.request(`/documents/party/${partyId}`);
+  }
+
+  public async getItemDocuments(itemId: string): Promise<{ success: boolean; count: number; data: AppDocument[] }> {
+    return this.request(`/documents/item/${itemId}`);
+  }
+
+  public async linkPartyDocuments(partyId: string, documentIds: string[]): Promise<{ success: boolean; added: number }> {
+    return this.request(`/documents/party/${partyId}/link`, {
+      method: 'POST',
+      body: JSON.stringify({ documentIds }),
+    });
+  }
+
+  public async linkItemDocuments(itemId: string, documentIds: string[]): Promise<{ success: boolean; added: number }> {
+    return this.request(`/documents/item/${itemId}/link`, {
       method: 'POST',
       body: JSON.stringify({ documentIds }),
     });

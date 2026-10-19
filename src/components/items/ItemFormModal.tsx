@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { Item, ItemCategory, ItemUnit, ItemLocation, ItemType, ItemLocationStock } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
+import { EntityDocumentsSection, StagedDocument } from '../common/EntityDocumentsSection';
 
 interface ItemFormModalProps {
   initialItem?: Item | null;
@@ -129,6 +130,11 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   );
   const [isActive, setIsActive] = useState(initialItem?.isActive ?? true);
   const [error, setError] = useState('');
+  // DOCUMENTS (S3 upload feature): staged while creating a NEW item (the
+  // link happens server-side when the authoritative id is minted —
+  // documentIds ride the create payload); an existing item links each
+  // upload IMMEDIATELY (section runs in entityId mode).
+  const [stagedItemDocs, setStagedItemDocs] = useState<StagedDocument[]>([]);
 
   // Calculate opening valuation preview
   const totalAllocatedOpeningStock = formLocations.reduce(
@@ -308,6 +314,10 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
           technicalSpecs: technicalSpecs.trim(),
           remarks: remarks.trim(),
           isActive,
+          // Staged documents (new-item flow) — the server links them in the
+          // same create flow and moves each S3 object from Pending/ under
+          // Inventory/<id>/
+          ...(stagedItemDocs.length > 0 ? { documentIds: stagedItemDocs.map((d) => d.id) } : {}),
           ...(type === 'product' ? {
             openingStock: totalOpeningStock,
             openingStockPrice: opPrice,
@@ -796,6 +806,15 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
               className="w-full px-4 py-2.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
             />
           </div>
+
+          {/* Documents (S3 upload feature): stage while creating; link
+              immediately when the item already exists */}
+          <EntityDocumentsSection
+            feature="item"
+            entityId={initialItem?.id}
+            staged={initialItem ? undefined : stagedItemDocs}
+            onStagedChange={initialItem ? undefined : setStagedItemDocs}
+          />
 
           {/* Active Status & Footer Action */}
           <div className="pt-3 border-t border-[var(--color-outline-variant)] flex items-center justify-between">

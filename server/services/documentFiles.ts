@@ -55,6 +55,15 @@ export async function moveS3Object(fromKey: string, toKey: string): Promise<S3Mo
 }
 
 /** Root folder per feature — every later feature adds its own root here */
-export function orderDocumentRoot(kind: 'sale' | 'purchase'): string {
-  return kind === 'sale' ? 'Sale' : 'Purchase';
+export function orderDocumentRoot(kind: 'sale' | 'purchase' | 'party' | 'item'): string {
+  switch (kind) {
+    case 'sale':
+      return 'Sale';
+    case 'purchase':
+      return 'Purchase';
+    case 'party':
+      return 'Party';
+    case 'item':
+      return 'Inventory';
+  }
 }

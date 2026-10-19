@@ -247,8 +247,12 @@ class CloudStore {
 
   // Parties
   public addParty(partyData: Omit<Party, 'id' | 'currentBalance' | 'createdAt' | 'updatedAt'>): Party {
+    // documentIds ride the create payload (staged documents — the server links
+    // them once the authoritative party id is minted) but are NEVER stored on
+    // the optimistic local party row.
+    const { documentIds, ...storedPartyData } = partyData as typeof partyData & { documentIds?: string[] };
     const newParty: Party = {
-      ...partyData,
+      ...storedPartyData,
       id: `pty-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
       currentBalance: partyData.openingBalance ? (partyData.openingBalanceType === 'to_receive' ? partyData.openingBalance : -partyData.openingBalance) : 0,
       createdAt: new Date().toISOString(),
@@ -363,24 +367,28 @@ class CloudStore {
 
   // Items & Products
   public addItem(itemData: Partial<Item>): Item {
+    // documentIds ride the create payload (staged documents — the server links
+    // them once the authoritative item id is minted) but are NEVER stored on
+    // the optimistic local item row.
+    const { documentIds, ...storedItemData } = itemData as typeof itemData & { documentIds?: string[] };
     const newItem: Item = {
       id: `itm-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-      name: itemData.name || '',
-      code: itemData.code || '',
-      type: itemData.type || 'product',
-      categoryId: itemData.categoryId || '',
-      categoryName: itemData.categoryName || '',
-      unit: itemData.unit || 'MT',
-      hsnSacCode: itemData.hsnSacCode || '',
-      taxRateGst: itemData.taxRateGst ?? 18,
-      salePrice: itemData.salePrice || 0,
-      purchasePrice: itemData.purchasePrice || 0,
-      isActive: itemData.isActive ?? true,
-      currentStock: itemData.currentStock || 0,
-      minStockLevel: itemData.minStockLevel || 0,
+      name: storedItemData.name || '',
+      code: storedItemData.code || '',
+      type: storedItemData.type || 'product',
+      categoryId: storedItemData.categoryId || '',
+      categoryName: storedItemData.categoryName || '',
+      unit: storedItemData.unit || 'MT',
+      hsnSacCode: storedItemData.hsnSacCode || '',
+      taxRateGst: storedItemData.taxRateGst ?? 18,
+      salePrice: storedItemData.salePrice || 0,
+      purchasePrice: storedItemData.purchasePrice || 0,
+      isActive: storedItemData.isActive ?? true,
+      currentStock: storedItemData.currentStock || 0,
+      minStockLevel: storedItemData.minStockLevel || 0,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      ...itemData,
+      ...storedItemData,
     } as Item;
     this.items.unshift(newItem);
     this.notify();

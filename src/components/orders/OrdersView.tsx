@@ -2318,7 +2318,7 @@ export function OrdersView({
                   immediately when the order already exists */}
               <OrderDocumentsSection
                 feature="sale"
-                orderId={editingOrder?.id || stageIssueCtx?.saleId}
+                entityId={editingOrder?.id || stageIssueCtx?.saleId}
                 staged={editingOrder || stageIssueCtx ? undefined : stagedSaleDocs}
                 onStagedChange={editingOrder || stageIssueCtx ? undefined : setStagedSaleDocs}
               />

@@ -1408,7 +1408,7 @@ export function AddPurchaseModal({
           <div className="px-6 pb-3">
             <OrderDocumentsSection
               feature="purchase"
-              orderId={existingOrder ? (existingOrder as any).id : undefined}
+              entityId={existingOrder ? (existingOrder as any).id : undefined}
               staged={existingOrder ? undefined : stagedPurchaseDocs}
               onStagedChange={existingOrder ? undefined : setStagedPurchaseDocs}
             />

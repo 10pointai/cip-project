@@ -169,9 +169,11 @@ export type DocumentStatus = 'active' | 'deleted';
 
 export interface AppDocument {
   id: string;
-  /** Original file name (display field of the record itself — not a denorm copy) */
-  name: string;
-  /** S3 object key, e.g. sales/sales_order/2026/10/...-sinv-26-001.pdf */
+  /** Original file name (e.g. "Weighbridge Slip 26_001.pdf") — captured from the File object */
+  fileName: string;
+  /** User-entered document name, taken in an input against the upload (required; primary display label) */
+  documentName?: string;
+  /** S3 object key, e.g. Sale/<saleId>/<uuid4>.pdf */
   s3Key: string;
   /** Permanent S3 object URL — the value saved at upload time */
   url: string;
@@ -199,6 +201,26 @@ export interface PurchaseOrderDocumentLink {
   id: string;
   /** FK purchases.id */
   purchaseId: string;
+  /** FK documents.id */
+  documentId: string;
+  createdAt: string;
+}
+
+/** parties ↔ documents join row (FK-only) — table parties_documents */
+export interface PartyDocumentLink {
+  id: string;
+  /** FK parties.id */
+  partyId: string;
+  /** FK documents.id */
+  documentId: string;
+  createdAt: string;
+}
+
+/** items ↔ documents join row (FK-only) — table inventory_documents */
+export interface ItemDocumentLink {
+  id: string;
+  /** FK items.id */
+  itemId: string;
   /** FK documents.id */
   documentId: string;
   createdAt: string;

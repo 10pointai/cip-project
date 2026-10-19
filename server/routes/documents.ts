@@ -16,17 +16,26 @@ documentsRouter.use(authenticateToken);
  * presigned-URL endpoint (s3Upload.ts); this only registers the record that
  * features will map their orders to. uploaded_by_id is taken from the JWT —
  * the client never supplies it (FK-only trust).
- * body: { name, s3Key, url, contentType?, sizeBytes? }
+ * body: { fileName, documentName (user-entered, REQUIRED), s3Key, url, contentType?, sizeBytes? }
  */
 documentsRouter.post('/', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { name, s3Key, url, contentType, sizeBytes } = req.body || {};
-    if (!name || !s3Key || !url) {
-      return res.status(400).json({ success: false, error: 'name, s3Key and url are required.' });
+    const { fileName, name, documentName, s3Key, url, contentType, sizeBytes } = req.body || {};
+    if (!fileName && !name) {
+      return res.status(400).json({ success: false, error: 'fileName is required.' });
+    }
+    // USER RULE: the document name is taken from the uploader in the input
+    // shown against each upload — a record cannot be registered without one.
+    if (!documentName || !String(documentName).trim()) {
+      return res.status(400).json({ success: false, error: 'Document name is required — name the document in the upload row before saving.' });
+    }
+    if (!s3Key || !url) {
+      return res.status(400).json({ success: false, error: 's3Key and url are required.' });
     }
     const doc = serverDb.createDocument(
       {
-        name: String(name),
+        fileName: String(fileName || name),
+        documentName: String(documentName).trim().slice(0, 255),
         s3Key: String(s3Key),
         url: String(url),
         contentType: contentType ? String(contentType) : undefined,
@@ -34,7 +43,7 @@ documentsRouter.post('/', async (req: AuthenticatedRequest, res: Response) => {
       },
       req.user?.id
     );
-    res.status(201).json({ success: true, data: doc, message: `Document "${doc.name}" registered.` });
+    res.status(201).json({ success: true, data: doc, message: `Document "${doc.documentName || doc.fileName}" registered.` });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -97,6 +106,69 @@ documentsRouter.post(
       const { documentIds } = req.body || {};
       const added = serverDb.linkPurchaseDocuments(req.params.purchaseId, Array.isArray(documentIds) ? documentIds : []);
       res.json({ success: true, added, message: `${added} document(s) linked to the purchase.` });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+);
+
+// GET /api/documents/item/:itemId — documents attached to an inventory item
+documentsRouter.get(
+  '/item/:itemId',
+  requirePermission('manage_inventory'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const docs = serverDb.getDocumentsForItem(req.params.itemId);
+      res.json({ success: true, count: docs.length, data: docs });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+);
+
+// GET /api/documents/party/:partyId — documents attached to a party (payment-
+// recording operators read these from the party detail screen too)
+documentsRouter.get(
+  '/party/:partyId',
+  requireEitherPermission('manage_parties', 'record_payments'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const docs = serverDb.getDocumentsForParty(req.params.partyId);
+      res.json({ success: true, count: docs.length, data: docs });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+);
+
+// POST /api/documents/item/:itemId/link — map already-uploaded documents to an
+// inventory item (used by the item create/edit form's staged uploads AND by
+// the detail-modal "upload more" uploader)
+documentsRouter.post(
+  '/item/:itemId/link',
+  requirePermission('manage_inventory'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { documentIds } = req.body || {};
+      const added = serverDb.linkItemDocuments(req.params.itemId, Array.isArray(documentIds) ? documentIds : []);
+      res.json({ success: true, added, message: `${added} document(s) linked to the item.` });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+);
+
+// POST /api/documents/party/:partyId/link — map already-uploaded documents to
+// a party (used by the party create/edit form's staged uploads AND by the
+// party detail screen's "upload more" uploader)
+documentsRouter.post(
+  '/party/:partyId/link',
+  requirePermission('manage_parties'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { documentIds } = req.body || {};
+      const added = serverDb.linkPartyDocuments(req.params.partyId, Array.isArray(documentIds) ? documentIds : []);
+      res.json({ success: true, added, message: `${added} document(s) linked to the party.` });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }

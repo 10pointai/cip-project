@@ -5,6 +5,7 @@ import { S3UploadProgress, formatBytes } from '../../services/s3Upload';
 export type UploadRowState =
   | { status: 'queued' }
   | { status: 'uploading'; progress: S3UploadProgress }
+  | { status: 'awaiting-name' }
   | { status: 'done'; url?: string }
   | { status: 'failed'; message?: string }
   | { status: 'aborted' }
@@ -16,6 +17,8 @@ interface UploadProgressBarProps {
   state: UploadRowState;
   onCancel?: () => void;
   onRemove?: () => void;
+  /** Slot under the row body — used for the per-upload document-name input */
+  extra?: React.ReactNode;
 }
 
 /**
@@ -23,7 +26,7 @@ interface UploadProgressBarProps {
  * Renders: file identity → phase label → determinate linear progress with
  * live bytes/percent, and terminal states (done/error/aborted).
  */
-export function UploadProgressBar({ name, size, state, onCancel, onRemove }: UploadProgressBarProps) {
+export function UploadProgressBar({ name, size, state, onCancel, onRemove, extra }: UploadProgressBarProps) {
   const uploading = state.status === 'uploading';
   const percent = state.status === 'uploading' ? state.progress.percent : 0;
   const phaseLabel =
@@ -35,6 +38,8 @@ export function UploadProgressBar({ name, size, state, onCancel, onRemove }: Upl
         : 'Uploading to AWS S3…'
       : state.status === 'queued'
       ? 'Queued'
+      : state.status === 'awaiting-name'
+      ? 'Uploaded — name it to save'
       : state.status === 'done'
       ? 'Uploaded to AWS S3'
       : state.status === 'local'
@@ -46,8 +51,8 @@ export function UploadProgressBar({ name, size, state, onCancel, onRemove }: Upl
       : '';
 
   const tone =
-    state.status === 'done'
-      ? 'text-[var(--color-success)]'
+    state.status === 'done' || state.status === 'awaiting-name'
+      ? 'text-[var(--color-warning)]'
       : state.status === 'failed' || state.status === 'aborted'
       ? 'text-[var(--color-error)]'
       : state.status === 'local'
@@ -85,7 +90,7 @@ export function UploadProgressBar({ name, size, state, onCancel, onRemove }: Upl
           </span>
           <div className="flex items-center gap-2 shrink-0">
             <span className={`text-[10px] font-semibold ${tone}`}>{phaseLabel}</span>
-            {(uploading || ['done', 'failed', 'aborted'].includes(state.status)) && (onRemove || (uploading ? onCancel : null)) ? (
+            {(uploading || ['done', 'failed', 'aborted', 'awaiting-name'].includes(state.status)) && (onRemove || (uploading ? onCancel : null)) ? (
               uploading && onCancel ? (
                 <button
                   type="button"
@@ -134,6 +139,8 @@ export function UploadProgressBar({ name, size, state, onCancel, onRemove }: Upl
         ) : (
           <p className="text-[9px] text-[var(--color-on-surface-variant)]">{formatBytes(size)}</p>
         )}
+
+        {extra && <div className="mt-2">{extra}</div>}
 
         {state.status === 'failed' && state.message && (
           <p className="text-[9px] text-[var(--color-error)] mt-0.5">{state.message}</p>
