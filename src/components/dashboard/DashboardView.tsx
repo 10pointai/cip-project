@@ -134,12 +134,6 @@ export function DashboardView({
 
         <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
           <div className="space-y-2">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="px-3 py-1 bg-[var(--color-success-container)] text-[var(--color-on-success-container)] border border-[var(--color-success)]/30 rounded-full text-xs font-medium flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-success)] animate-pulse"></span>
-                System Online
-              </span>
-            </div>
             <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--color-on-primary)]">
               {settings.companyName}
             </h1>
