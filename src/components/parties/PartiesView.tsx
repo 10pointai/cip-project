@@ -623,7 +623,7 @@ export function PartiesView({
                       </td>
                       <td
                         className={`py-3.5 px-4 text-right font-mono font-bold text-sm ${
-                          isReceivable ? 'text-[var(--color-primary)]' : isPayable ? 'text-[var(--color-error)]' : 'text-[var(--color-on-surface-variant)]'
+                          isReceivable ? 'text-[var(--color-success)]' : isPayable ? 'text-[var(--color-error)]' : 'text-[var(--color-on-surface-variant)]'
                         }`}
                       >
                         {formatCurrency(Math.abs(party.currentBalance), settings.currency.symbol)}{' '}

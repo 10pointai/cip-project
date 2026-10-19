@@ -392,7 +392,18 @@ class CloudStore {
     } as Item;
     this.items.unshift(newItem);
     this.notify();
-    api.createItem(itemData).catch((err) => console.error('[CloudStore] addItem cloud error:', err));
+    // Adopt the SERVER-minted item (authoritative id) — an immediate edit
+    // without a refresh must never target the optimistic placeholder id.
+    api
+      .createItem(itemData)
+      .then((res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.items = this.items.map((it) => (it.id === newItem.id ? { ...created } : it));
+          this.notify();
+        }
+      })
+      .catch((err) => console.error('[CloudStore] addItem cloud error:', err));
     return newItem;
   }
 
@@ -436,7 +447,20 @@ class CloudStore {
     };
     this.categories.push(newCat);
     this.notify();
-    api.createCategory(cat).catch((err) => console.error('[CloudStore] addCategory cloud error:', err));
+    // Adopt the SERVER-minted category (authoritative id) — items immediately
+    // referencing this category must never keep the optimistic placeholder id.
+    // The server creator honors a supplied id (createCategory's contract), so
+    // the optimistic id rides the payload — client & server agree instantly.
+    api
+      .createCategory(newCat)
+      .then((res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.categories = this.categories.map((c) => (c.id === newCat.id ? { ...created } : c));
+          this.notify();
+        }
+      })
+      .catch((err) => console.error('[CloudStore] addCategory cloud error:', err));
     return newCat;
   }
 
@@ -479,7 +503,18 @@ class CloudStore {
     };
     this.units.push(newUnit);
     this.notify();
-    api.createUnit(unit).catch((err) => console.error('[CloudStore] addUnit cloud error:', err));
+    // Adopt the SERVER-minted unit (authoritative id) — swap out the placeholder.
+    // The server creator honors a supplied id, so it rides the payload.
+    api
+      .createUnit(newUnit)
+      .then((res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.units = this.units.map((u) => (u.id === newUnit.id ? { ...created } : u));
+          this.notify();
+        }
+      })
+      .catch((err) => console.error('[CloudStore] addUnit cloud error:', err));
     return newUnit;
   }
 
@@ -525,7 +560,19 @@ class CloudStore {
     };
     this.locations.push(newLoc);
     this.notify();
-    api.createLocation(loc).catch((err) => console.error('[CloudStore] addLocation cloud error:', err));
+    // Adopt the SERVER-minted location (authoritative id) — item location
+    // rows referencing it must never keep the optimistic placeholder id.
+    // The server creator honors a supplied id, so it rides the payload.
+    api
+      .createLocation(newLoc)
+      .then((res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.locations = this.locations.map((l) => (l.id === newLoc.id ? { ...created } : l));
+          this.notify();
+        }
+      })
+      .catch((err) => console.error('[CloudStore] addLocation cloud error:', err));
     return newLoc;
   }
 
@@ -630,7 +677,18 @@ class CloudStore {
     };
     this.accounts.unshift(newAcc);
     this.notify();
-    api.createAccount(data).catch((err) => console.error('[CloudStore] addAccount cloud error:', err));
+    // Adopt the SERVER-minted account (authoritative id) — vouchers/payments
+    // posted against it must never carry the optimistic placeholder id.
+    api
+      .createAccount(data)
+      .then((res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.accounts = this.accounts.map((a) => (a.id === newAcc.id ? { ...created } : a));
+          this.notify();
+        }
+      })
+      .catch((err) => console.error('[CloudStore] addAccount cloud error:', err));
     return newAcc;
   }
 
@@ -1024,7 +1082,21 @@ class CloudStore {
     };
     this.productionBatches.unshift(newBatch);
     this.notify();
-    api.createBatch(batchData).catch((err) => console.error('[CloudStore] addProductionBatch cloud error:', err));
+    // Adopt the SERVER-minted batch (authoritative id) — production edits
+    // and consumption views must never target the optimistic placeholder id.
+    // The create also MOVES INVENTORY (raw deduction) — resync so item stocks
+    // adopt the ledger everywhere.
+    api
+      .createBatch(batchData)
+      .then(async (res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.productionBatches = this.productionBatches.map((b) => (b.id === newBatch.id ? { ...created } : b));
+          this.notify();
+        }
+        await this.syncWithServer(true);
+      })
+      .catch((err) => console.error('[CloudStore] addProductionBatch cloud error:', err));
     return newBatch;
   }
 
@@ -1053,7 +1125,18 @@ class CloudStore {
     };
     this.vehicles.unshift(newVeh);
     this.notify();
-    api.createVehicle(v).catch((err) => console.error('[CloudStore] addVehicle cloud error:', err));
+    // Adopt the SERVER-minted vehicle (authoritative id) — trip slips and
+    // tyre mounts referencing it must never keep the placeholder id.
+    api
+      .createVehicle(v)
+      .then((res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.vehicles = this.vehicles.map((veh) => (veh.id === newVeh.id ? { ...created } : veh));
+          this.notify();
+        }
+      })
+      .catch((err) => console.error('[CloudStore] addVehicle cloud error:', err));
     return newVeh;
   }
 
@@ -1096,7 +1179,18 @@ class CloudStore {
     };
     this.drivers.unshift(newDriver);
     this.notify();
-    api.createDriver(d).catch((err) => console.error('[CloudStore] addDriver cloud error:', err));
+    // Adopt the SERVER-minted driver (authoritative id) — trip slips referencing
+    // the driver must never keep the optimistic placeholder id.
+    api
+      .createDriver(d)
+      .then((res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.drivers = this.drivers.map((dr) => (dr.id === newDriver.id ? { ...created } : dr));
+          this.notify();
+        }
+      })
+      .catch((err) => console.error('[CloudStore] addDriver cloud error:', err));
     return newDriver;
   }
 
@@ -1149,7 +1243,21 @@ class CloudStore {
     };
     this.tripSlips.unshift(newSlip);
     this.notify();
-    api.createTripSlip(s).catch((err) => console.error('[CloudStore] addTripSlip cloud error:', err));
+    // Adopt the SERVER-minted slip (authoritative id) — follow-up edits and
+    // vehicle/driver status syncs must never target the placeholder id. The
+    // create also flips vehicle/driver status server-side — resync so the
+    // fleet lists adopt it.
+    api
+      .createTripSlip(s)
+      .then(async (res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.tripSlips = this.tripSlips.map((ts) => (ts.id === newSlip.id ? { ...created } : ts));
+          this.notify();
+        }
+        await this.syncWithServer(true);
+      })
+      .catch((err) => console.error('[CloudStore] addTripSlip cloud error:', err));
     return newSlip;
   }
 
@@ -1196,7 +1304,18 @@ class CloudStore {
     };
     this.tyres.unshift(newTyre);
     this.notify();
-    api.createTyre(t).catch((err) => console.error('[CloudStore] addTyre cloud error:', err));
+    // Adopt the SERVER-minted tyre (authoritative id) — mount/dismount records
+    // referencing it must never keep the optimistic placeholder id.
+    api
+      .createTyre(t)
+      .then((res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.tyres = this.tyres.map((ty) => (ty.id === newTyre.id ? { ...created } : ty));
+          this.notify();
+        }
+      })
+      .catch((err) => console.error('[CloudStore] addTyre cloud error:', err));
     return newTyre;
   }
 
@@ -1243,7 +1362,18 @@ class CloudStore {
     };
     this.employees.unshift(newEmp);
     this.notify();
-    api.createEmployee(emp).catch((err) => console.error('[CloudStore] addEmployee cloud error:', err));
+    // Adopt the SERVER-minted employee (authoritative id) — attendance,
+    // leave and payroll records must never target the placeholder id.
+    api
+      .createEmployee(emp)
+      .then((res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.employees = this.employees.map((e) => (e.id === newEmp.id ? { ...created } : e));
+          this.notify();
+        }
+      })
+      .catch((err) => console.error('[CloudStore] addEmployee cloud error:', err));
     return newEmp;
   }
 
@@ -1275,24 +1405,29 @@ class CloudStore {
   }
 
   public bulkAddAttendance(records: any[]): void {
-    records.forEach((r, idx) => {
-      const rec: EmployeeAttendance = {
-        id: r.id || `att-${Date.now()}-${idx}`,
-        employeeId: r.employeeId || '',
-        employeeName: r.employeeName || '',
-        date: r.date || new Date().toISOString().split('T')[0],
-        status: r.status || 'present',
-        ...r,
-      };
+    const recs: EmployeeAttendance[] = records.map((r, idx) => ({
+      id: r.id || `att-${Date.now()}-${idx}`,
+      employeeId: r.employeeId || '',
+      employeeName: r.employeeName || '',
+      date: r.date || new Date().toISOString().split('T')[0],
+      status: r.status || 'present',
+      ...r,
+    }));
+    recs.forEach((rec) => {
       const existingIdx = this.attendance.findIndex((a) => a.employeeId === rec.employeeId && a.date === rec.date);
       if (existingIdx >= 0) {
         this.attendance[existingIdx] = { ...this.attendance[existingIdx], ...rec };
       } else {
         this.attendance.push(rec);
       }
-      api.recordAttendance(rec).catch((err) => console.error('[CloudStore] recordAttendance cloud error:', err));
     });
     this.notify();
+    // One post per record; the server re-mints every attendance id
+    // (recordAttendance ignores the posted one) — resync once all rows land
+    // so local ids are authoritative.
+    Promise.all(
+      recs.map((rec) => api.recordAttendance(rec).catch((err) => console.error('[CloudStore] recordAttendance cloud error:', err)))
+    ).then(() => this.syncWithServer(true));
   }
 
   public updateAttendance(id: string, updates: Partial<EmployeeAttendance>): void {
@@ -1327,7 +1462,18 @@ class CloudStore {
     };
     this.leaves.unshift(newLeave);
     this.notify();
-    api.applyLeave(leave).catch((err) => console.error('[CloudStore] addLeave cloud error:', err));
+    // Adopt the SERVER-minted leave (authoritative id) — approval edits made
+    // before any refresh must never target the optimistic placeholder id.
+    api
+      .applyLeave(leave)
+      .then((res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.leaves = this.leaves.map((l) => (l.id === newLeave.id ? { ...created } : l));
+          this.notify();
+        }
+      })
+      .catch((err) => console.error('[CloudStore] addLeave cloud error:', err));
     return newLeave;
   }
 
@@ -1369,7 +1515,18 @@ class CloudStore {
     };
     this.employeePayments.unshift(newPay);
     this.notify();
-    api.addEmployeePayment(pay).catch((err) => console.error('[CloudStore] addEmployeePayment cloud error:', err));
+    // Adopt the SERVER-minted payment (authoritative id) — voucher detail
+    // edits must never target the optimistic placeholder id.
+    api
+      .addEmployeePayment(pay)
+      .then((res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.employeePayments = this.employeePayments.map((p) => (p.id === newPay.id ? { ...created } : p));
+          this.notify();
+        }
+      })
+      .catch((err) => console.error('[CloudStore] addEmployeePayment cloud error:', err));
     return newPay;
   }
 
