@@ -27,6 +27,89 @@ import {
 } from '../types';
 import { api } from './api';
 
+// ---------------------------------------------------------------------------
+// PER-FEATURE LOADING MAPS
+// ---------------------------------------------------------------------------
+
+/** The 25 store collections, as addressable fetch targets. */
+export type CollectionName =
+  | 'parties' | 'transactions' | 'settings' | 'items' | 'categories' | 'units'
+  | 'locations' | 'productionBatches' | 'orders' | 'sales' | 'purchases'
+  | 'vehicles' | 'drivers' | 'tripSlips' | 'tyres' | 'employees' | 'attendance'
+  | 'leaves' | 'employeePayments' | 'accounts' | 'transfers' | 'adjustments'
+  | 'stockAdjustments' | 'evidenceFolders' | 'evidenceFiles';
+
+export interface SidebarCounts {
+  parties: number;
+  items: number;
+  sales: number;
+  purchases: number;
+  orders: number;
+  accounts: number;
+  employees: number;
+}
+
+// Boot lookups — the small master/lookup tables that global modals (Record
+// Payment, New Voucher, PartyDetail), sidebar badges and cross-tab dropdowns
+// read from ANY tab. Loaded once per sign-in. Heavy browsing data
+// (transactions, sales, purchases, stock adjustments, attendance, ...) is
+// deliberately NOT here — it is per-feature.
+const BOOT_LOOKUPS: CollectionName[] = [
+  'settings', 'parties', 'items', 'categories', 'units', 'locations', 'accounts',
+  'orders', 'vehicles', 'drivers', 'tripSlips', 'tyres',
+];
+
+// Collections touched by a sale/purchase write (they can mint or compensate
+// journal + settlement vouchers, move party/account balances and stock).
+const SALE_TOUCH: CollectionName[] = ['sales', 'transactions', 'parties', 'accounts', 'items'];
+const PURCHASE_TOUCH: CollectionName[] = ['purchases', 'transactions', 'parties', 'accounts', 'items'];
+
+// Sidebar tab → the heavy collections fetched on EVERY visit to that tab
+// (lookup dependencies come from BOOT_LOOKUPS). Tab ids mirror the Sidebar's
+// NavigationTab union without importing a component type into the service
+// layer. users/settings/design tabs need nothing here.
+const FEATURE_COLLECTIONS: Record<string, CollectionName[]> = {
+  dashboard: ['transactions'],
+  parties: ['parties', 'transactions', 'sales', 'purchases', 'accounts'],
+  'cash-bank': ['accounts', 'transfers', 'adjustments', 'transactions', 'parties', 'employeePayments'],
+  items: ['items', 'categories', 'units', 'locations', 'stockAdjustments'],
+  sales: ['sales', 'purchases', 'transactions', 'accounts'],
+  purchases: ['purchases', 'sales', 'transactions', 'accounts'],
+  production: ['productionBatches', 'items'],
+  logistics: ['vehicles', 'drivers', 'tripSlips', 'tyres'],
+  // attendance reads are date-scoped (daily sheet / register fetch their own
+  // window); accounts ride along — recording a payroll payout needs them.
+  employees: ['employees', 'leaves', 'employeePayments', 'accounts'],
+  evidence: ['evidenceFolders', 'evidenceFiles', 'parties'],
+};
+
+// Collection → REST fetch. Both evidence members of one GET /documents/evidence
+// call and `settings` (single record) are handled specially in loadCollections.
+const COLLECTION_FETCHERS: Partial<Record<CollectionName, () => Promise<{ success: boolean; data?: unknown[] }>>> = {
+  parties: () => api.getParties(),
+  transactions: () => api.getTransactions(),
+  items: () => api.getItems(),
+  categories: () => api.getCategories(),
+  units: () => api.getUnits(),
+  locations: () => api.getLocations(),
+  productionBatches: () => api.getBatches(),
+  orders: () => api.getOrders(),
+  sales: () => api.getSales(),
+  purchases: () => api.getPurchases(),
+  vehicles: () => api.getVehicles(),
+  drivers: () => api.getDrivers(),
+  tripSlips: () => api.getTripSlips(),
+  tyres: () => api.getTyres(),
+  employees: () => api.getEmployees(),
+  attendance: () => api.getAttendance(),
+  leaves: () => api.getLeaves(),
+  employeePayments: () => api.getEmployeePayments(),
+  accounts: () => api.getAccounts(),
+  transfers: () => api.getTransfers(),
+  adjustments: () => api.getAdjustments(),
+  stockAdjustments: () => api.getStockAdjustments(),
+};
+
 const DEFAULT_CLEAN_SETTINGS: CompanySettings = {
   companyName: 'Operations Enterprise Ltd.',
   tradeName: 'Operations & Materials Plant',
@@ -104,7 +187,7 @@ class CloudStore {
   constructor() {
     if (typeof window !== 'undefined') {
       setTimeout(() => {
-        this.syncWithServer(true);
+        this.loadSettingsOnly();
       }, 50);
     }
   }
@@ -191,6 +274,185 @@ class CloudStore {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // PER-FEATURE LOADING
+  // ---------------------------------------------------------------------------
+  // The app no longer rides one monolithic snapshot for every tab. Each sidebar
+  // tab fetches only the collections it consumes (loadFeature), global modal /
+  // dropdown dependencies load once at sign-in (BOOT_LOOKUPS), and mutations
+  // refresh only the collections they actually affect (targeted
+  // loadCollections calls at each write site). syncWithServer remains ONLY for
+  // the explicit full-refetch affordances (BackendStatusModal "Sync Now",
+  // backup restore). No view code changed — collections still land in this
+  // store and reach views through the same useDatabase() getters.
+  private featureLoading = false;
+  private counts: SidebarCounts | null = null;
+
+  /**
+   * Fetches the given collections from their per-entity endpoints and assigns
+   * them. Assignment order matters: parties MUST land before transactions so
+   * the valid-party filter (getTransactions) sees the party list. Every other
+   * collection is authoritative per-entity data — an empty [] overwrites what
+   * was locally held, unlike syncWithServer's keep-if-absent semantics.
+   */
+  public async loadCollections(names: CollectionName[]): Promise<void> {
+    if (typeof window === 'undefined' || names.length === 0) return;
+    const unique = Array.from(new Set(names));
+    this.featureLoading = true;
+    this.notify();
+    try {
+      const arrayNames = unique.filter(
+        (n) => n !== 'settings' && n !== 'evidenceFolders' && n !== 'evidenceFiles'
+      );
+      const settled = await Promise.all(
+        arrayNames.map(async (name) => [name, await COLLECTION_FETCHERS[name]!().catch(() => null)] as const)
+      );
+
+      const loaded: Partial<Record<CollectionName, unknown[]>> = {};
+      let anySuccess = false;
+      for (const [name, res] of settled) {
+        if (res && res.success && Array.isArray(res.data)) {
+          loaded[name] = res.data;
+          anySuccess = true;
+        }
+      }
+
+      if (unique.includes('evidenceFolders') || unique.includes('evidenceFiles')) {
+        const ev = await api.getEvidence().catch(() => null);
+        if (ev && ev.success && ev.data) {
+          if (unique.includes('evidenceFolders')) this.evidenceFolders = ev.data.evidenceFolders || [];
+          if (unique.includes('evidenceFiles')) this.evidenceFiles = ev.data.evidenceFiles || [];
+          anySuccess = true;
+        }
+      }
+
+      // parties first, so the transaction filter below runs against the fresh set
+      if (loaded.parties) this.parties = loaded.parties as Party[];
+      if (loaded.orders) this.orders = loaded.orders as Order[];
+      if (loaded.transactions) {
+        // Filter by valid parties ONLY when the party list is already known
+        // (fresh in this load, or previously loaded). Until then keep every
+        // row — the server JOINs party names itself, so worst case the filter
+        // is a client-side refinement, never a correctness requirement.
+        const guardTransactions = Boolean(loaded.parties) || this.parties.length > 0;
+        if (guardTransactions) {
+          const validPartyIds = new Set(this.parties.map((p) => p.id));
+          this.transactions = (loaded.transactions as Transaction[]).filter((t) => validPartyIds.has(t.partyId));
+        } else {
+          this.transactions = loaded.transactions as Transaction[];
+        }
+      }
+      if (loaded.items) this.items = loaded.items as Item[];
+      if (loaded.categories) this.categories = loaded.categories as ItemCategory[];
+      if (loaded.units) this.units = loaded.units as ItemUnit[];
+      if (loaded.locations) this.locations = loaded.locations as ItemLocation[];
+      if (loaded.productionBatches) this.productionBatches = loaded.productionBatches as ProductionBatchRun[];
+      if (loaded.sales) this.sales = loaded.sales as Sale[];
+      if (loaded.purchases) this.purchases = loaded.purchases as Purchase[];
+      if (loaded.vehicles) this.vehicles = loaded.vehicles as Vehicle[];
+      if (loaded.drivers) this.drivers = loaded.drivers as Driver[];
+      if (loaded.tripSlips) this.tripSlips = loaded.tripSlips as TripSlip[];
+      if (loaded.tyres) this.tyres = loaded.tyres as Tyre[];
+      if (loaded.employees) this.employees = loaded.employees as Employee[];
+      if (loaded.attendance) this.attendance = loaded.attendance as EmployeeAttendance[];
+      if (loaded.leaves) this.leaves = loaded.leaves as EmployeeLeave[];
+      if (loaded.employeePayments) this.employeePayments = loaded.employeePayments as EmployeePayment[];
+      if (loaded.accounts) this.accounts = loaded.accounts as CashBankAccount[];
+      if (loaded.transfers) this.transfers = loaded.transfers as InternalTransfer[];
+      if (loaded.adjustments) this.adjustments = loaded.adjustments as AccountAdjustment[];
+      if (loaded.stockAdjustments) this.stockAdjustments = loaded.stockAdjustments as ItemStockAdjustment[];
+      if (loaded.evidenceFolders) this.evidenceFolders = loaded.evidenceFolders as EvidenceFolder[];
+      if (loaded.evidenceFiles) this.evidenceFiles = loaded.evidenceFiles as EvidenceFile[];
+
+      const settingsRes = unique.includes('settings') ? await api.getSettings().catch(() => null) : null;
+      if (settingsRes && settingsRes.success) {
+        this.settings = settingsRes.data;
+        anySuccess = true;
+      }
+
+      this.isServerOnline = anySuccess;
+      this.lastSyncTime = new Date().toLocaleTimeString();
+    } catch (err) {
+      console.warn('[CloudStore] Per-feature load failed:', err);
+      this.isServerOnline = false;
+    } finally {
+      this.featureLoading = false;
+      this.notify();
+    }
+  }
+
+  /** Fetches only the tab's own (heavy) collections on each sidebar visit. */
+  public async loadFeature(tab: string): Promise<void> {
+    const names = FEATURE_COLLECTIONS[tab] || [];
+    await this.loadCollections(names);
+  }
+
+  /**
+   * One boot batch per sign-in: the small master/lookup tables that global
+   * modals, dropdowns and name-resolution read from ANY tab, plus sidebar
+   * counts. Heavy per-feature data is deliberately NOT here.
+   */
+  public async loadBootLookups(): Promise<void> {
+    await this.loadCollections(BOOT_LOOKUPS);
+    await this.refreshCounts();
+  }
+
+  /** Pre-login hydration: branding settings only (previously the tiered /api/sync). */
+  public async loadSettingsOnly(): Promise<void> {
+    try {
+      const res = await api.getSettings();
+      if (res && res.success) {
+        this.settings = res.data;
+        this.isServerOnline = true;
+        this.lastSyncTime = new Date().toLocaleTimeString();
+      } else {
+        this.isServerOnline = false;
+      }
+    } catch {
+      this.isServerOnline = false;
+    }
+    this.notify();
+  }
+
+  public async refreshCounts(): Promise<void> {
+    try {
+      const res = await api.getCounts();
+      if (res && res.success && res.data) {
+        this.counts = {
+          parties: Number(res.data.parties ?? this.parties.length),
+          items: Number(res.data.items ?? this.items.length),
+          sales: Number(res.data.sales ?? this.sales.length),
+          purchases: Number(res.data.purchases ?? this.purchases.length),
+          orders: Number(res.data.orders ?? this.orders.length),
+          accounts: Number(res.data.accounts ?? this.accounts.length),
+          employees: Number(res.data.employees ?? this.employees.length),
+        };
+      }
+    } catch (err) {
+      console.warn('[CloudStore] Counts fetch failed:', err);
+    }
+    this.notify();
+  }
+
+  public getCounts(): SidebarCounts | null {
+    return this.counts ? { ...this.counts } : null;
+  }
+
+  public isFeatureLoading(): boolean {
+    return this.featureLoading;
+  }
+
+  /**
+   * Targeted post-mutation refresh — the per-feature replacement for the old
+   * post-write full snapshot. Refreshes only the collections the write can
+   * affect (plus sidebar counts where they can move). Fire-and-forget,
+   * matching the previous syncWithServer call-shape.
+   */
+  private refreshAfter(names: CollectionName[], withCounts = true): void {
+    this.loadCollections(names);
+    if (withCounts) this.refreshCounts();
+  }
+
   // --- GETTERS ---
   public getParties(): Party[] { return [...this.parties]; }
   public getPartyById(id: string): Party | undefined { return this.parties.find((p) => p.id === id); }
@@ -273,6 +535,9 @@ class CloudStore {
           this.notify();
         }
       })
+      // Refresh AFTER adoption, so a post-POST list response can never race in
+      // front of the server-minted record and wipe it.
+      .then(() => this.refreshAfter(['parties']))
       .catch((err) => console.error('[CloudStore] addParty cloud error:', err));
     return newParty;
   }
@@ -287,22 +552,26 @@ class CloudStore {
     }));
     this.parties = [...created, ...this.parties];
     this.notify();
-    partiesData.forEach((p, idx) => {
-      // Capture each server-minted party and swap the optimistic record by
-      // index (created[idx] corresponds to partiesData[idx]).
-      api
-        .createParty(p)
-        .then((res) => {
-          const srv = res?.data;
-          if (srv?.id) {
-            this.parties = this.parties.map((q) =>
-              q.id === created[idx]?.id ? { ...srv } : q
-            );
-            this.notify();
-          }
-        })
-        .catch((err) => console.error('[CloudStore] addPartiesBulk cloud error:', err));
-    });
+    Promise.all(
+      partiesData.map((p, idx) =>
+        // Capture each server-minted party and swap the optimistic record by
+        // index (created[idx] corresponds to partiesData[idx]).
+        api
+          .createParty(p)
+          .then((res) => {
+            const srv = res?.data;
+            if (srv?.id) {
+              this.parties = this.parties.map((q) =>
+                q.id === created[idx]?.id ? { ...srv } : q
+              );
+              this.notify();
+            }
+          })
+          .catch((err) => console.error('[CloudStore] addPartiesBulk cloud error:', err))
+      )
+      // ONE authoritative refresh after every row is registered — never before,
+      // or a pre-POST list response would wipe the adopted rows.
+    ).then(() => this.refreshAfter(['parties']));
     return created;
   }
 
@@ -317,7 +586,7 @@ class CloudStore {
     });
     if (updated) {
       this.notify();
-      api.updateParty(id, updates).catch((err) => console.error('[CloudStore] updateParty cloud error:', err));
+      api.updateParty(id, updates).then(() => this.refreshAfter(['parties'], false)).catch((err) => console.error('[CloudStore] updateParty cloud error:', err));
     }
     return updated;
   }
@@ -328,7 +597,9 @@ class CloudStore {
       this.parties = this.parties.filter((p) => p.id !== id);
       this.transactions = this.transactions.filter((t) => t.partyId !== id);
       this.notify();
-      api.deleteParty(id).catch((err) => console.error('[CloudStore] deleteParty cloud error:', err));
+      // The server also removes the party's vouchers (server-side sweep that
+      // touches account balances) — refresh transactions + accounts too.
+      api.deleteParty(id).then(() => this.refreshAfter(['parties', 'transactions', 'accounts'])).catch((err) => console.error('[CloudStore] deleteParty cloud error:', err));
       return true;
     }
     return false;
@@ -353,7 +624,7 @@ class CloudStore {
       party.currentBalance = (party.currentBalance || 0) + delta;
     }
     this.notify();
-    api.createTransaction(txData).then(() => this.syncWithServer(true)).catch((err) => console.error('[CloudStore] addTransaction cloud error:', err));
+    api.createTransaction(txData).then(() => this.refreshAfter(['parties', 'transactions', 'accounts'])).catch((err) => console.error('[CloudStore] addTransaction cloud error:', err));
     return newTx;
   }
 
@@ -361,7 +632,7 @@ class CloudStore {
   public updateSettings(newSettings: Partial<CompanySettings>): CompanySettings {
     this.settings = { ...this.settings, ...newSettings };
     this.notify();
-    api.updateSettings(newSettings).catch((err) => console.error('[CloudStore] updateSettings cloud error:', err));
+    api.updateSettings(newSettings).then(() => this.refreshAfter(['settings'], false)).catch((err) => console.error('[CloudStore] updateSettings cloud error:', err));
     return this.settings;
   }
 
@@ -403,6 +674,8 @@ class CloudStore {
           this.notify();
         }
       })
+      // AFTER adoption (same no-race rule as addParty)
+      .then(() => this.refreshAfter(['items']))
       .catch((err) => console.error('[CloudStore] addItem cloud error:', err));
     return newItem;
   }
@@ -418,7 +691,9 @@ class CloudStore {
     });
     if (updated) {
       this.notify();
-      api.updateItem(id, updates).catch((err) => console.error('[CloudStore] updateItem cloud error:', err));
+      // Item hydrations (categoryName, stock valuation) resolve via JOINs —
+      // refresh the collection after the edit so display fields follow.
+      api.updateItem(id, updates).then(() => this.refreshAfter(['items'], false)).catch((err) => console.error('[CloudStore] updateItem cloud error:', err));
     }
     return updated;
   }
@@ -428,7 +703,7 @@ class CloudStore {
     if (exists) {
       this.items = this.items.filter((i) => i.id !== id);
       this.notify();
-      api.deleteItem(id).catch((err) => console.error('[CloudStore] deleteItem cloud error:', err));
+      api.deleteItem(id).then(() => this.refreshAfter(['items'])).catch((err) => console.error('[CloudStore] deleteItem cloud error:', err));
       return true;
     }
     return false;
@@ -475,7 +750,7 @@ class CloudStore {
     });
     if (updated) {
       this.notify();
-      api.updateCategory(id, updates).catch((err) => console.error('[CloudStore] updateCategory cloud error:', err));
+      api.updateCategory(id, updates).then(() => this.refreshAfter(['categories', 'items'], false)).catch((err) => console.error('[CloudStore] updateCategory cloud error:', err));
     }
     return updated;
   }
@@ -485,7 +760,7 @@ class CloudStore {
     if (exists) {
       this.categories = this.categories.filter((c) => c.id !== id);
       this.notify();
-      api.deleteCategory(id).catch((err) => console.error('[CloudStore] deleteCategory cloud error:', err));
+      api.deleteCategory(id).then(() => this.refreshAfter(['categories', 'items'], false)).catch((err) => console.error('[CloudStore] deleteCategory cloud error:', err));
       return true;
     }
     return false;
@@ -529,7 +804,7 @@ class CloudStore {
     });
     if (updated) {
       this.notify();
-      api.updateUnit(id, updates).catch((err) => console.error('[CloudStore] updateUnit cloud error:', err));
+      api.updateUnit(id, updates).then(() => this.refreshAfter(['units', 'items'], false)).catch((err) => console.error('[CloudStore] updateUnit cloud error:', err));
     }
     return updated;
   }
@@ -539,7 +814,7 @@ class CloudStore {
     if (exists) {
       this.units = this.units.filter((u) => u.id !== id);
       this.notify();
-      api.deleteUnit(id).catch((err) => console.error('[CloudStore] deleteUnit cloud error:', err));
+      api.deleteUnit(id).then(() => this.refreshAfter(['units', 'items'], false)).catch((err) => console.error('[CloudStore] deleteUnit cloud error:', err));
       return true;
     }
     return false;
@@ -587,7 +862,7 @@ class CloudStore {
     });
     if (updated) {
       this.notify();
-      api.updateLocation(id, updates).catch((err) => console.error('[CloudStore] updateLocation cloud error:', err));
+      api.updateLocation(id, updates).then(() => this.refreshAfter(['locations', 'items'], false)).catch((err) => console.error('[CloudStore] updateLocation cloud error:', err));
     }
     return updated;
   }
@@ -597,7 +872,7 @@ class CloudStore {
     if (exists) {
       this.locations = this.locations.filter((l) => l.id !== id);
       this.notify();
-      api.deleteLocation(id).catch((err) => console.error('[CloudStore] deleteLocation cloud error:', err));
+      api.deleteLocation(id).then(() => this.refreshAfter(['locations', 'items'], false)).catch((err) => console.error('[CloudStore] deleteLocation cloud error:', err));
       return true;
     }
     return false;
@@ -638,7 +913,7 @@ class CloudStore {
       else itm.currentStock -= adj.quantity || 0;
     }
     this.notify();
-    api.createStockAdjustment(adj).then(() => this.syncWithServer(true)).catch((err) => console.error('[CloudStore] createStockAdjustment cloud error:', err));
+    api.createStockAdjustment(adj).then(() => this.refreshAfter(['items', 'stockAdjustments'])).catch((err) => console.error('[CloudStore] createStockAdjustment cloud error:', err));
     return newAdj;
   }
 
@@ -650,11 +925,11 @@ class CloudStore {
       // Notify the server so it reverts the stock and deletes the voucher row.
       // Only re-sync after the server confirms, otherwise the deleted voucher resurrects.
       api.deleteStockAdjustment(id)
-        .then(() => this.syncWithServer(true))
+        .then(() => this.refreshAfter(['items', 'stockAdjustments']))
         .catch((err) => {
           console.error('[CloudStore] deleteStockAdjustment cloud error:', err);
-          // Server delete failed - re-sync to restore the authoritative state
-          this.syncWithServer(true);
+          // Server delete failed - re-fetch to restore the authoritative state
+          this.refreshAfter(['items', 'stockAdjustments']);
         });
       return true;
     }
@@ -688,6 +963,7 @@ class CloudStore {
           this.notify();
         }
       })
+      .then(() => this.refreshAfter(['accounts']))
       .catch((err) => console.error('[CloudStore] addAccount cloud error:', err));
     return newAcc;
   }
@@ -703,7 +979,7 @@ class CloudStore {
     });
     if (updated) {
       this.notify();
-      api.updateAccount(id, updates).catch((err) => console.error('[CloudStore] updateAccount cloud error:', err));
+      api.updateAccount(id, updates).then(() => this.refreshAfter(['accounts'])).catch((err) => console.error('[CloudStore] updateAccount cloud error:', err));
     }
     return updated;
   }
@@ -713,7 +989,7 @@ class CloudStore {
     if (exists) {
       this.accounts = this.accounts.filter((a) => a.id !== id);
       this.notify();
-      api.deleteAccount(id).catch((err) => console.error('[CloudStore] deleteAccount cloud error:', err));
+      api.deleteAccount(id).then(() => this.refreshAfter(['accounts'], true)).catch((err) => console.error('[CloudStore] deleteAccount cloud error:', err));
       return true;
     }
     return false;
@@ -741,7 +1017,7 @@ class CloudStore {
       this.accounts.find((a) => a.id === newTrf.toAccountId)?.name || newTrf.toAccountName || undefined;
     this.transfers.unshift(newTrf);
     this.notify();
-    api.createTransfer(data).then(() => this.syncWithServer(true)).catch((err) => console.error('[CloudStore] addTransfer cloud error:', err));
+    api.createTransfer(data).then(() => this.refreshAfter(['accounts', 'transfers', 'transactions'])).catch((err) => console.error('[CloudStore] addTransfer cloud error:', err));
     return newTrf;
   }
 
@@ -750,7 +1026,7 @@ class CloudStore {
     if (exists) {
       this.transfers = this.transfers.filter((t) => t.id !== id);
       this.notify();
-      api.deleteTransfer(id).then(() => this.syncWithServer(true)).catch((err) => console.error('[CloudStore] deleteTransfer cloud error:', err));
+      api.deleteTransfer(id).then(() => this.refreshAfter(['accounts', 'transfers', 'transactions'])).catch((err) => console.error('[CloudStore] deleteTransfer cloud error:', err));
       return true;
     }
     return false;
@@ -778,7 +1054,7 @@ class CloudStore {
     newAdj.accountType = adjAcc?.type || newAdj.accountType || undefined;
     this.adjustments.unshift(newAdj);
     this.notify();
-    api.createAdjustment(data).then(() => this.syncWithServer(true)).catch((err) => console.error('[CloudStore] addAdjustment cloud error:', err));
+    api.createAdjustment(data).then(() => this.refreshAfter(['accounts', 'adjustments', 'transactions'], false)).catch((err) => console.error('[CloudStore] addAdjustment cloud error:', err));
     return newAdj;
   }
 
@@ -787,7 +1063,7 @@ class CloudStore {
     if (exists) {
       this.adjustments = this.adjustments.filter((a) => a.id !== id);
       this.notify();
-      api.deleteAdjustment(id).then(() => this.syncWithServer(true)).catch((err) => console.error('[CloudStore] deleteAdjustment cloud error:', err));
+      api.deleteAdjustment(id).then(() => this.refreshAfter(['accounts', 'adjustments', 'transactions'], false)).catch((err) => console.error('[CloudStore] deleteAdjustment cloud error:', err));
       return true;
     }
     return false;
@@ -848,7 +1124,8 @@ class CloudStore {
           this.sales = this.sales.map((s) => (s.id === optimistic.id ? { ...created } : s));
           this.notify();
         }
-        await this.syncWithServer(true);
+        await this.loadCollections(SALE_TOUCH);
+        this.refreshCounts();
       })
       .catch((err) => console.error('[CloudStore] addSale cloud error:', err));
     return optimistic;
@@ -870,7 +1147,7 @@ class CloudStore {
       this.notify();
       api
         .updateSale(id, updates)
-        .then(() => this.syncWithServer(true))
+        .then(() => this.refreshAfter(SALE_TOUCH))
         .catch((err) => console.error('[CloudStore] updateSale cloud error:', err));
     }
     return updated;
@@ -907,7 +1184,7 @@ class CloudStore {
     this.notify();
     api
       .addSaleStage(id, stageInput)
-      .then(() => this.syncWithServer(true))
+      .then(() => this.refreshAfter(SALE_TOUCH))
       .catch((err) => console.error('[CloudStore] addSaleStage cloud error:', err));
     return this.sales.find((s) => s.id === id) || null;
   }
@@ -919,10 +1196,10 @@ class CloudStore {
       this.notify();
       api
         .deleteSale(id)
-        .then(() => this.syncWithServer(true))
+        .then(() => this.refreshAfter(SALE_TOUCH))
         .catch((err) => {
           console.error('[CloudStore] deleteSale cloud error:', err);
-          this.syncWithServer(true);
+          this.refreshAfter(SALE_TOUCH);
         });
       return true;
     }
@@ -978,7 +1255,8 @@ class CloudStore {
           this.purchases = this.purchases.map((p) => (p.id === optimistic.id ? { ...created } : p));
           this.notify();
         }
-        await this.syncWithServer(true);
+        await this.loadCollections(PURCHASE_TOUCH);
+        this.refreshCounts();
       })
       .catch((err) => console.error('[CloudStore] addPurchase cloud error:', err));
     return optimistic;
@@ -998,7 +1276,7 @@ class CloudStore {
       this.notify();
       api
         .updatePurchase(id, updates)
-        .then(() => this.syncWithServer(true))
+        .then(() => this.refreshAfter(PURCHASE_TOUCH))
         .catch((err) => console.error('[CloudStore] updatePurchase cloud error:', err));
     }
     return updated;
@@ -1041,7 +1319,7 @@ class CloudStore {
     this.notify();
     api
       .addPurchaseStage(id, stageInput)
-      .then(() => this.syncWithServer(true))
+      .then(() => this.refreshAfter(PURCHASE_TOUCH))
       .catch((err) => console.error('[CloudStore] addPurchaseStage cloud error:', err));
     return this.purchases.find((p) => p.id === id) || null;
   }
@@ -1053,10 +1331,10 @@ class CloudStore {
       this.notify();
       api
         .deletePurchase(id)
-        .then(() => this.syncWithServer(true))
+        .then(() => this.refreshAfter(PURCHASE_TOUCH))
         .catch((err) => {
           console.error('[CloudStore] deletePurchase cloud error:', err);
-          this.syncWithServer(true);
+          this.refreshAfter(PURCHASE_TOUCH);
         });
       return true;
     }
@@ -1094,7 +1372,7 @@ class CloudStore {
           this.productionBatches = this.productionBatches.map((b) => (b.id === newBatch.id ? { ...created } : b));
           this.notify();
         }
-        await this.syncWithServer(true);
+        await this.loadCollections(['productionBatches', 'items']);
       })
       .catch((err) => console.error('[CloudStore] addProductionBatch cloud error:', err));
     return newBatch;
@@ -1105,7 +1383,7 @@ class CloudStore {
     if (exists) {
       this.productionBatches = this.productionBatches.filter((b) => b.id !== id);
       this.notify();
-      api.deleteBatch(id).catch((err) => console.error('[CloudStore] deleteProductionBatch cloud error:', err));
+      api.deleteBatch(id).then(() => this.refreshAfter(['productionBatches', 'items'])).catch((err) => console.error('[CloudStore] deleteProductionBatch cloud error:', err));
       return true;
     }
     return false;
@@ -1136,6 +1414,7 @@ class CloudStore {
           this.notify();
         }
       })
+      .then(() => this.refreshAfter(['vehicles']))
       .catch((err) => console.error('[CloudStore] addVehicle cloud error:', err));
     return newVeh;
   }
@@ -1151,7 +1430,7 @@ class CloudStore {
     });
     if (updated) {
       this.notify();
-      api.updateVehicle(id, updates).catch((err) => console.error('[CloudStore] updateVehicle cloud error:', err));
+      api.updateVehicle(id, updates).then(() => this.refreshAfter(['vehicles'])).catch((err) => console.error('[CloudStore] updateVehicle cloud error:', err));
     }
     return updated;
   }
@@ -1161,7 +1440,7 @@ class CloudStore {
     if (exists) {
       this.vehicles = this.vehicles.filter((v) => v.id !== id);
       this.notify();
-      api.deleteVehicle(id).catch((err) => console.error('[CloudStore] deleteVehicle cloud error:', err));
+      api.deleteVehicle(id).then(() => this.refreshAfter(['vehicles'])).catch((err) => console.error('[CloudStore] deleteVehicle cloud error:', err));
       return true;
     }
     return false;
@@ -1190,6 +1469,7 @@ class CloudStore {
           this.notify();
         }
       })
+      .then(() => this.refreshAfter(['drivers']))
       .catch((err) => console.error('[CloudStore] addDriver cloud error:', err));
     return newDriver;
   }
@@ -1205,7 +1485,7 @@ class CloudStore {
     });
     if (updated) {
       this.notify();
-      api.updateDriver(id, updates).catch((err) => console.error('[CloudStore] updateDriver cloud error:', err));
+      api.updateDriver(id, updates).then(() => this.refreshAfter(['drivers'])).catch((err) => console.error('[CloudStore] updateDriver cloud error:', err));
     }
     return updated;
   }
@@ -1215,7 +1495,7 @@ class CloudStore {
     if (exists) {
       this.drivers = this.drivers.filter((d) => d.id !== id);
       this.notify();
-      api.deleteDriver(id).catch((err) => console.error('[CloudStore] deleteDriver cloud error:', err));
+      api.deleteDriver(id).then(() => this.refreshAfter(['drivers'])).catch((err) => console.error('[CloudStore] deleteDriver cloud error:', err));
       return true;
     }
     return false;
@@ -1255,7 +1535,7 @@ class CloudStore {
           this.tripSlips = this.tripSlips.map((ts) => (ts.id === newSlip.id ? { ...created } : ts));
           this.notify();
         }
-        await this.syncWithServer(true);
+        await this.loadCollections(['tripSlips']);
       })
       .catch((err) => console.error('[CloudStore] addTripSlip cloud error:', err));
     return newSlip;
@@ -1272,7 +1552,7 @@ class CloudStore {
     });
     if (updated) {
       this.notify();
-      api.updateTripSlip(id, updates).catch((err) => console.error('[CloudStore] updateTripSlip cloud error:', err));
+      api.updateTripSlip(id, updates).then(() => this.refreshAfter(['tripSlips'])).catch((err) => console.error('[CloudStore] updateTripSlip cloud error:', err));
     }
     return updated;
   }
@@ -1282,7 +1562,7 @@ class CloudStore {
     if (exists) {
       this.tripSlips = this.tripSlips.filter((s) => s.id !== id);
       this.notify();
-      api.deleteTripSlip(id).catch((err) => console.error('[CloudStore] deleteTripSlip cloud error:', err));
+      api.deleteTripSlip(id).then(() => this.refreshAfter(['tripSlips'])).catch((err) => console.error('[CloudStore] deleteTripSlip cloud error:', err));
       return true;
     }
     return false;
@@ -1315,6 +1595,7 @@ class CloudStore {
           this.notify();
         }
       })
+      .then(() => this.refreshAfter(['tyres']))
       .catch((err) => console.error('[CloudStore] addTyre cloud error:', err));
     return newTyre;
   }
@@ -1330,7 +1611,7 @@ class CloudStore {
     });
     if (updated) {
       this.notify();
-      api.updateTyre(id, updates).catch((err) => console.error('[CloudStore] updateTyre cloud error:', err));
+      api.updateTyre(id, updates).then(() => this.refreshAfter(['tyres'])).catch((err) => console.error('[CloudStore] updateTyre cloud error:', err));
     }
     return updated;
   }
@@ -1340,7 +1621,7 @@ class CloudStore {
     if (exists) {
       this.tyres = this.tyres.filter((t) => t.id !== id);
       this.notify();
-      api.deleteTyre(id).catch((err) => console.error('[CloudStore] deleteTyre cloud error:', err));
+      api.deleteTyre(id).then(() => this.refreshAfter(['tyres'])).catch((err) => console.error('[CloudStore] deleteTyre cloud error:', err));
       return true;
     }
     return false;
@@ -1360,6 +1641,10 @@ class CloudStore {
       createdAt: new Date().toISOString(),
       ...emp,
     };
+    // documentIds (staged Aadhaar/PAN uploads) ride the CREATE payload so the
+    // server links them once the authoritative id is minted — they must never
+    // persist on the client row itself (same contract as createParty).
+    delete (newEmp as any).documentIds;
     this.employees.unshift(newEmp);
     this.notify();
     // Adopt the SERVER-minted employee (authoritative id) — attendance,
@@ -1373,11 +1658,15 @@ class CloudStore {
           this.notify();
         }
       })
+      .then(() => this.refreshAfter(['employees']))
       .catch((err) => console.error('[CloudStore] addEmployee cloud error:', err));
     return newEmp;
   }
 
   public updateEmployee(id: string, updates: Partial<Employee>): Employee | null {
+    // Edit-mode uploads link immediately via the documents endpoint, so
+    // documentIds should never ride an update payload.
+    delete (updates as any).documentIds;
     let updated: Employee | null = null;
     this.employees = this.employees.map((e) => {
       if (e.id === id) {
@@ -1388,7 +1677,7 @@ class CloudStore {
     });
     if (updated) {
       this.notify();
-      api.updateEmployee(id, updates).catch((err) => console.error('[CloudStore] updateEmployee cloud error:', err));
+      api.updateEmployee(id, updates).then(() => this.refreshAfter(['employees'])).catch((err) => console.error('[CloudStore] updateEmployee cloud error:', err));
     }
     return updated;
   }
@@ -1398,7 +1687,7 @@ class CloudStore {
     if (exists) {
       this.employees = this.employees.filter((e) => e.id !== id);
       this.notify();
-      api.deleteEmployee(id).catch((err) => console.error('[CloudStore] deleteEmployee cloud error:', err));
+      api.deleteEmployee(id).then(() => this.refreshAfter(['employees'], true)).catch((err) => console.error('[CloudStore] deleteEmployee cloud error:', err));
       return true;
     }
     return false;
@@ -1422,12 +1711,12 @@ class CloudStore {
       }
     });
     this.notify();
-    // One post per record; the server re-mints every attendance id
-    // (recordAttendance ignores the posted one) — resync once all rows land
-    // so local ids are authoritative.
+    // One post per record; the merged local rows are what the open sheet
+    // renders — the sheet re-fetches its own date from the server after the
+    // posts settle (no whole-table reload: reads are date-scoped).
     Promise.all(
       recs.map((rec) => api.recordAttendance(rec).catch((err) => console.error('[CloudStore] recordAttendance cloud error:', err)))
-    ).then(() => this.syncWithServer(true));
+    );
   }
 
   public updateAttendance(id: string, updates: Partial<EmployeeAttendance>): void {
@@ -1503,16 +1792,16 @@ class CloudStore {
   }
 
   public addEmployeePayment(pay: Partial<EmployeePayment>): EmployeePayment {
-    const newPay: EmployeePayment = {
+    const newPay = this.hydrateEmployeePaymentNames({
       id: `pay-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
       employeeId: pay.employeeId || '',
-      employeeName: pay.employeeName || '',
       date: pay.date || new Date().toISOString().split('T')[0],
       type: pay.type || 'salary',
       amount: pay.amount || 0,
       paymentMode: pay.paymentMode || 'cash',
+      createdAt: new Date().toISOString(),
       ...pay,
-    };
+    } as EmployeePayment);
     this.employeePayments.unshift(newPay);
     this.notify();
     // Adopt the SERVER-minted payment (authoritative id) — voucher detail
@@ -1526,18 +1815,54 @@ class CloudStore {
           this.notify();
         }
       })
+      .then(() => this.refreshAfter(['employeePayments', 'accounts']))
       .catch((err) => console.error('[CloudStore] addEmployeePayment cloud error:', err));
     return newPay;
   }
 
+  /** Deletes a payroll payment; the server reverses it out of the account ledger. */
   public deleteEmployeePayment(id: string): boolean {
     const exists = this.employeePayments.some((p) => p.id === id);
     if (exists) {
       this.employeePayments = this.employeePayments.filter((p) => p.id !== id);
       this.notify();
+      api.deleteEmployeePayment(id).then(() => this.refreshAfter(['employeePayments', 'accounts'])).catch((err) => console.error('[CloudStore] deleteEmployeePayment cloud error:', err));
       return true;
     }
     return false;
+  }
+
+  /** Resolves the display names for a payroll row from the client-side masters */
+  private hydrateEmployeePaymentNames(pay: EmployeePayment): EmployeePayment {
+    return {
+      ...pay,
+      employeeName: this.employees.find((e) => e.id === pay.employeeId)?.name || pay.employeeName,
+      accountName: pay.accountId ? this.accounts.find((a) => a.id === pay.accountId)?.name : undefined,
+    };
+  }
+
+  /**
+   * Edits a recorded payroll payment (amount/date/type/mode/account/refs).
+   * employeeName/accountName are display-only (JOIN/read-time hydrated) and
+   * never ride the PUT; both ledgers reconcile server-side when the account
+   * or amount moves.
+   */
+  public updateEmployeePayment(id: string, updates: Partial<EmployeePayment>): EmployeePayment | null {
+    delete (updates as any).employeeName;
+    delete (updates as any).accountName;
+    let updated: EmployeePayment | null = null;
+    this.employeePayments = this.employeePayments.map((p) => {
+      if (p.id === id) {
+        updated = this.hydrateEmployeePaymentNames({ ...p, ...updates });
+        return updated;
+      }
+      return p;
+    });
+    if (updated) {
+      this.notify();
+      api.updateEmployeePayment(id, updates).then(() => this.refreshAfter(['employeePayments', 'accounts'])).catch((err) => console.error('[CloudStore] updateEmployeePayment cloud error:', err));
+    }
+    return updated;
   }
 
   // Evidence Files & Folders

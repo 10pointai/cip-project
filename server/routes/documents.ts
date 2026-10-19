@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { serverDb } from '../db';
 import { authenticateToken, requirePermission, requireEitherPermission, AuthenticatedRequest } from '../middleware/auth';
+import { fetchEvidenceFoldersDirect, fetchEvidenceFilesDirect } from '../mysql/personnelService';
 import { generatePresignedDownloadUrl } from '../services/storage';
 
 export const documentsRouter = Router();
@@ -44,6 +45,22 @@ documentsRouter.post('/', async (req: AuthenticatedRequest, res: Response) => {
       req.user?.id
     );
     res.status(201).json({ success: true, data: doc, message: `Document "${doc.documentName || doc.fileName}" registered.` });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET /api/documents/evidence — the Evidence vault's per-feature fetch (the
+// client no longer receives evidence collections via /api/sync). Reads the
+// evidence tables directly; in sandbox-only mode the evidence vault is
+// client-session data, so an empty pair is the correct result there.
+documentsRouter.get('/evidence', async (_req: AuthenticatedRequest, res: Response) => {
+  try {
+    const [evidenceFolders, evidenceFiles] = await Promise.all([
+      fetchEvidenceFoldersDirect(),
+      fetchEvidenceFilesDirect(),
+    ]);
+    res.json({ success: true, count: evidenceFiles.length, data: { evidenceFolders, evidenceFiles } });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -169,6 +186,38 @@ documentsRouter.post(
       const { documentIds } = req.body || {};
       const added = serverDb.linkPartyDocuments(req.params.partyId, Array.isArray(documentIds) ? documentIds : []);
       res.json({ success: true, added, message: `${added} document(s) linked to the party.` });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+);
+
+// GET /api/documents/employee/:employeeId — documents attached to an employee
+// (Aadhaar/PAN verification scans opened from the employee records)
+documentsRouter.get(
+  '/employee/:employeeId',
+  requireEitherPermission('manage_employees', 'process_payroll'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const docs = serverDb.getDocumentsForEmployee(req.params.employeeId);
+      res.json({ success: true, count: docs.length, data: docs });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+);
+
+// POST /api/documents/employee/:employeeId/link — map already-uploaded
+// documents to an employee (used by the employee form's staged Aadhaar/PAN
+// uploads on create; edit-mode uploads link immediately)
+documentsRouter.post(
+  '/employee/:employeeId/link',
+  requirePermission('manage_employees'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { documentIds } = req.body || {};
+      const added = serverDb.linkEmployeeDocuments(req.params.employeeId, Array.isArray(documentIds) ? documentIds : []);
+      res.json({ success: true, added, message: `${added} document(s) linked to the employee.` });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }

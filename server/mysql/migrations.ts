@@ -746,6 +746,18 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS employee_documents (
+          id VARCHAR(64) PRIMARY KEY,
+          employee_id VARCHAR(64) NOT NULL,
+          document_id VARCHAR(64) NOT NULL,
+          created_at VARCHAR(64) NOT NULL,
+          UNIQUE KEY uq_employee_doc (employee_id, document_id),
+          INDEX idx_ed_employee (employee_id),
+          INDEX idx_ed_document (document_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
       // 10b. Employees, Attendance, Leaves, Payments
       await conn.query(`
         CREATE TABLE IF NOT EXISTS employees (
@@ -773,18 +785,42 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
+      // Backward-compat: employees gained UPI payout + account-holder-name
+      // columns with the employee-verification-documents feature; older
+      // deployments predate them (SHOW COLUMNS guard = idempotent).
+      try {
+        const [empCols]: any = await conn.query('SHOW COLUMNS FROM employees');
+        const empNames = (empCols || []).map((c: any) => c.Field);
+        if (!empNames.includes('upi_address')) {
+          await conn.query('ALTER TABLE employees ADD COLUMN upi_address VARCHAR(64) NULL AFTER bank_details');
+          console.log('[MySQL Migration] Added upi_address column to employees table.');
+        }
+        if (!empNames.includes('name_on_account')) {
+          await conn.query('ALTER TABLE employees ADD COLUMN name_on_account VARCHAR(128) NULL AFTER upi_address');
+          console.log('[MySQL Migration] Added name_on_account column to employees table.');
+        }
+        if (!empNames.includes('default_in_time')) {
+          await conn.query('ALTER TABLE employees ADD COLUMN default_in_time VARCHAR(8) NULL AFTER name_on_account');
+          console.log('[MySQL Migration] Added default_in_time column to employees table.');
+        }
+        if (!empNames.includes('default_out_time')) {
+          await conn.query('ALTER TABLE employees ADD COLUMN default_out_time VARCHAR(8) NULL AFTER default_in_time');
+          console.log('[MySQL Migration] Added default_out_time column to employees table.');
+        }
+      } catch (empColErr: any) {
+        console.warn('[MySQL Migration] employees columns notice:', empColErr.message);
+      }
+
       await conn.query(`
         CREATE TABLE IF NOT EXISTS attendance (
           id VARCHAR(64) PRIMARY KEY,
           employee_id VARCHAR(64) NOT NULL,
-          employee_name VARCHAR(128) NOT NULL,
           date VARCHAR(32) NOT NULL,
           status VARCHAR(32) NOT NULL,
           in_time VARCHAR(32),
           out_time VARCHAR(32),
           work_hours DECIMAL(5,2) DEFAULT 0.00,
           overtime_hours DECIMAL(5,2) DEFAULT 0.00,
-          punch_logs JSON,
           notes TEXT,
           created_at VARCHAR(64),
           updated_at VARCHAR(64),
@@ -812,7 +848,6 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         CREATE TABLE IF NOT EXISTS employee_payments (
           id VARCHAR(64) PRIMARY KEY,
           employee_id VARCHAR(64) NOT NULL,
-          employee_name VARCHAR(128) NOT NULL,
           date VARCHAR(32) NOT NULL,
           type VARCHAR(32) NOT NULL,
           amount DECIMAL(12,2) NOT NULL,
@@ -823,6 +858,25 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           created_at VARCHAR(64)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
+
+      // Payroll payouts now leave a Cash/Bank account (payroll ⇄ cash-bank
+      // ledger linkage) — account_id added with the payroll-payments feature
+      try {
+        const [payCols]: any = await conn.query('SHOW COLUMNS FROM employee_payments');
+        const payNames = (payCols || []).map((c: any) => c.Field);
+        if (!payNames.includes('account_id')) {
+          await conn.query("ALTER TABLE employee_payments ADD COLUMN account_id VARCHAR(64) NULL AFTER payment_mode, ADD INDEX idx_ep_account (account_id)");
+          console.log('[MySQL Migration] Added account_id column to employee_payments table.');
+        }
+        // FK purity: employee_name now resolves from the employees master via
+        // JOIN — the stored copy column goes away (safe: display-only)
+        if (payNames.includes('employee_name')) {
+          await conn.query('ALTER TABLE employee_payments DROP COLUMN employee_name');
+          console.log('[MySQL Migration] Dropped employee_name column from employee_payments (JOIN-based display).');
+        }
+      } catch (payColErr: any) {
+        console.warn('[MySQL Migration] employee_payments columns notice:', payColErr.message);
+      }
 
       // 11. Evidence & Cloud Documents
       await conn.query(`
@@ -2061,11 +2115,20 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
         );
       }
 
+      // Seed employee document mappings — same FK join shape as the other
+      // features (Aadhaar/PAN verification scans linked to the employee)
+      for (const l of (snapshot.employeeDocuments || []) as any[]) {
+        await conn.query(
+          `REPLACE INTO employee_documents (id, employee_id, document_id, created_at) VALUES (?, ?, ?, ?)`,
+          [l.id, l.employeeId, l.documentId, l.createdAt]
+        );
+      }
+
       // Seed employees
       for (const emp of (snapshot.employees || []) as any[]) {
         await conn.query(
-          `REPLACE INTO employees (id, employee_code, name, designation, department, phone, email, date_of_joining, salary_type, base_salary, daily_wage_rate, bank_details, aadhar_number, pan_number, status, emergency_contact, notes, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `REPLACE INTO employees (id, employee_code, name, designation, department, phone, email, date_of_joining, salary_type, base_salary, daily_wage_rate, bank_details, upi_address, name_on_account, default_in_time, default_out_time, aadhar_number, pan_number, status, emergency_contact, notes, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             emp.id,
             emp.employeeCode || (emp as any).empCode || ('EMP-' + emp.id.toUpperCase()),
@@ -2082,6 +2145,10 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
               accountNumber: (emp as any).bankAccountNo || null,
               ifscCode: (emp as any).bankIFSC || null,
             }),
+            emp.upiAddress || (emp as any).upi_address || null,
+            emp.nameOnAccount || (emp as any).name_on_account || null,
+            emp.defaultInTime || (emp as any).default_in_time || null,
+            emp.defaultOutTime || (emp as any).default_out_time || null,
             emp.aadharNumber || null,
             emp.panNumber || null,
             emp.status || 'active',
@@ -2139,16 +2206,16 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
       // Seed employee payments
       for (const ep of (snapshot.employeePayments || []) as any[]) {
         await conn.query(
-          `REPLACE INTO employee_payments (id, employee_id, employee_name, date, type, amount, payment_mode, reference_no, notes, month_year, created_at)
+          `REPLACE INTO employee_payments (id, employee_id, date, type, amount, payment_mode, account_id, reference_no, notes, month_year, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             ep.id,
             ep.employeeId,
-            ep.employeeName,
             ep.date,
             ep.type,
             ep.amount,
             ep.paymentMode,
+            ep.accountId || null,
             ep.referenceNo || null,
             ep.notes || null,
             ep.monthYear || null,

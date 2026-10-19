@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { cloudStore } from '../services/cloudStore';
+import { cloudStore, SidebarCounts } from '../services/cloudStore';
 import {
   Party,
   Transaction,
@@ -58,6 +58,8 @@ export function useDatabase() {
   const [isOnline, setIsOnline] = useState<boolean>(() => cloudStore.isBackendOnline());
   const [lastSync, setLastSync] = useState<string>(() => cloudStore.getLastSyncTime());
   const [isSyncing, setIsSyncing] = useState<boolean>(() => cloudStore.isSyncing());
+  const [isFeatureLoading, setIsFeatureLoading] = useState<boolean>(() => cloudStore.isFeatureLoading());
+  const [counts, setCounts] = useState<SidebarCounts | null>(() => cloudStore.getCounts());
 
   const refresh = useCallback(() => {
     setParties(cloudStore.getParties());
@@ -88,6 +90,8 @@ export function useDatabase() {
     setIsOnline(cloudStore.isBackendOnline());
     setLastSync(cloudStore.getLastSyncTime());
     setIsSyncing(cloudStore.isSyncing());
+    setIsFeatureLoading(cloudStore.isFeatureLoading());
+    setCounts(cloudStore.getCounts());
   }, []);
 
   useEffect(() => {
@@ -104,6 +108,11 @@ export function useDatabase() {
     refresh();
     return result;
   }, [refresh]);
+
+  // Per-feature loading passthroughs (see cloudStore PER-FEATURE LOADING).
+  const loadFeature = useCallback((tab: string) => cloudStore.loadFeature(tab), []);
+  const loadBootLookups = useCallback(() => cloudStore.loadBootLookups(), []);
+  const refreshCounts = useCallback(() => cloudStore.refreshCounts(), []);
 
   return {
     parties,
@@ -134,8 +143,13 @@ export function useDatabase() {
     isOnline,
     lastSync,
     isSyncing,
+    isFeatureLoading,
+    counts,
     syncNow,
     refresh,
+    loadFeature,
+    loadBootLookups,
+    refreshCounts,
     db: cloudStore,
   };
 }

@@ -51,26 +51,66 @@ export async function fetchEmployeesDirect(): Promise<Employee[]> {
     licenseNo: emp.license_number || emp.licenseNo || undefined,
     bankAccountNo: (emp.bank_details ? (parseJsonField<any>(emp.bank_details, {})?.accountNumber) : undefined) || emp.bankAccountNo || undefined,
     bankIFSC: (emp.bank_details ? (parseJsonField<any>(emp.bank_details, {})?.ifscCode) : undefined) || emp.bankIFSC || undefined,
+    upiAddress: emp.upi_address || undefined,
+    nameOnAccount: emp.name_on_account || undefined,
+    defaultInTime: emp.default_in_time || undefined,
+    defaultOutTime: emp.default_out_time || undefined,
     createdAt: emp.created_at || new Date().toISOString(),
   }));
 }
 
-export async function fetchAttendanceDirect(): Promise<EmployeeAttendance[]> {
-  if (!isMysqlConfigured()) {
-    return serverDb.getAttendance();
+export async function fetchAttendanceDirect(filters?: {
+  /** single exact day (YYYY-MM-DD) — the daily sheet fetches only its date */
+  date?: string;
+  /** one employee's records (combined with from/to for the monthly register) */
+  employeeId?: string;
+  /** inclusive range lower bound (YYYY-MM-DD) */
+  from?: string;
+  /** inclusive range upper bound (YYYY-MM-DD) */
+  to?: string;
+}): Promise<EmployeeAttendance[]> {
+  const where: string[] = [];
+  const params: string[] = [];
+  if (filters?.date) {
+    where.push('date = ?');
+    params.push(filters.date);
   }
-  const rows = await executeMysqlQuery('SELECT * FROM attendance ORDER BY date DESC, created_at DESC');
+  if (filters?.employeeId) {
+    where.push('employee_id = ?');
+    params.push(filters.employeeId);
+  }
+  if (filters?.from) {
+    where.push('date >= ?');
+    params.push(filters.from);
+  }
+  if (filters?.to) {
+    where.push('date <= ?');
+    params.push(filters.to);
+  }
+
+  if (!isMysqlConfigured()) {
+    let rows = serverDb.getAttendance();
+    if (filters?.date) rows = rows.filter((a) => a.date === filters.date);
+    if (filters?.employeeId) rows = rows.filter((a) => a.employeeId === filters.employeeId);
+    if (filters?.from) rows = rows.filter((a) => a.date >= (filters.from as string));
+    if (filters?.to) rows = rows.filter((a) => a.date <= (filters.to as string));
+    return rows;
+  }
+  // employee_name is resolved live from the employees table (NOT stored on
+  // attendance rows — see the dropped-column note in migrations.ts)
+  const sql = `SELECT a.*, e.name AS employee_name FROM attendance a LEFT JOIN employees e ON e.id = a.employee_id${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY a.date DESC, a.created_at DESC`;
+  const rows = await executeMysqlQuery(sql, params);
   return rows.map((att: any) => ({
     id: att.id,
     employeeId: att.employee_id,
-    employeeName: att.employee_name,
+    employeeName: att.employee_name || '',
     date: att.date,
     status: att.status,
-    inTime: att.in_time || undefined,
-    outTime: att.out_time || undefined,
-    workHours: parseNum(att.work_hours),
+    // EmployeeAttendance field names — the sheet/timesheet read these
+    checkInTime: att.in_time || undefined,
+    checkOutTime: att.out_time || undefined,
+    totalHoursWorked: parseNum(att.work_hours),
     overtimeHours: parseNum(att.overtime_hours),
-    punchLogs: parseJsonField(att.punch_logs, []),
     notes: att.notes || undefined,
     createdAt: att.created_at,
     updatedAt: att.updated_at,
@@ -100,7 +140,13 @@ export async function fetchEmployeePaymentsDirect(): Promise<EmployeePayment[]> 
   if (!isMysqlConfigured()) {
     return serverDb.getEmployeePayments();
   }
-  const rows = await executeMysqlQuery('SELECT * FROM employee_payments ORDER BY date DESC, created_at DESC');
+  const rows = await executeMysqlQuery(
+    `SELECT ep.*, e.name AS employee_name, a.name AS account_name
+     FROM employee_payments ep
+     LEFT JOIN employees e ON e.id = ep.employee_id
+     LEFT JOIN cash_bank_accounts a ON a.id = ep.account_id
+     ORDER BY ep.created_at DESC, ep.date DESC`
+  );
   return rows.map((ep: any) => ({
     id: ep.id,
     employeeId: ep.employee_id,
@@ -109,6 +155,8 @@ export async function fetchEmployeePaymentsDirect(): Promise<EmployeePayment[]> 
     type: ep.type,
     amount: parseNum(ep.amount),
     paymentMode: ep.payment_mode,
+    accountId: ep.account_id || undefined,
+    accountName: ep.account_name || undefined,
     referenceNo: ep.reference_no || undefined,
     notes: ep.notes || undefined,
     monthYear: ep.month_year || undefined,
@@ -244,22 +292,22 @@ export async function createEmployeeDirect(empData: any): Promise<Employee> {
   const emp = serverDb.createEmployee(empData);
   if (!isMysqlConfigured()) return emp;
 
+  // Full REPLACE (mirrors liveSyncEmployee): employees.department and
+  // employees.employee_code are NOT NULL — the plain INSERT this used to be
+  // could never satisfy them once MySQL was on; REPLACE keeps id/code unique.
   await executeMysqlQuery(
-    `INSERT INTO employees (
-      id, name, designation, phone, email, aadhar_number, pan_number,
-      date_of_joining, base_salary, salary_type, status, license_number,
-      bank_details, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      name=VALUES(name), designation=VALUES(designation), phone=VALUES(phone),
-      email=VALUES(email), aadhar_number=VALUES(aadhar_number), pan_number=VALUES(pan_number),
-      date_of_joining=VALUES(date_of_joining), base_salary=VALUES(base_salary),
-      salary_type=VALUES(salary_type), status=VALUES(status), license_number=VALUES(license_number),
-      bank_details=VALUES(bank_details)`,
+    `REPLACE INTO employees (
+      id, employee_code, name, designation, department, phone, email,
+      aadhar_number, pan_number, date_of_joining, base_salary, salary_type,
+      status, license_number, bank_details, upi_address, name_on_account,
+      default_in_time, default_out_time, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
+      emp.id,
       emp.id,
       emp.name,
       emp.role,
+      emp.role === 'driver' ? 'Logistics' : 'Operations',
       emp.phone,
       emp.email || null,
       emp.aadhaarNo || null,
@@ -270,6 +318,10 @@ export async function createEmployeeDirect(empData: any): Promise<Employee> {
       emp.status || 'active',
       emp.licenseNo || null,
       JSON.stringify({ accountNumber: emp.bankAccountNo || '', ifscCode: emp.bankIFSC || '' }),
+      emp.upiAddress || null,
+      emp.nameOnAccount || null,
+      emp.defaultInTime || null,
+      emp.defaultOutTime || null,
       emp.createdAt || new Date().toISOString(),
     ]
   );
@@ -288,7 +340,11 @@ export async function updateEmployeeDirect(id: string, updates: any): Promise<Em
       email = COALESCE(?, email),
       status = COALESCE(?, status),
       base_salary = COALESCE(?, base_salary),
-      salary_type = COALESCE(?, salary_type)
+      salary_type = COALESCE(?, salary_type),
+      upi_address = COALESCE(?, upi_address),
+      name_on_account = COALESCE(?, name_on_account),
+      default_in_time = COALESCE(?, default_in_time),
+      default_out_time = COALESCE(?, default_out_time)
     WHERE id = ?`,
     [
       updates.name || null,
@@ -298,6 +354,10 @@ export async function updateEmployeeDirect(id: string, updates: any): Promise<Em
       updates.status || null,
       updates.salaryBase !== undefined ? updates.salaryBase : null,
       updates.salaryType || null,
+      updates.upiAddress || null,
+      updates.nameOnAccount || null,
+      updates.defaultInTime || null,
+      updates.defaultOutTime || null,
       id,
     ]
   );
@@ -315,29 +375,61 @@ export async function updateAttendanceDirect(attData: any): Promise<EmployeeAtte
   const att = serverDb.recordAttendance(attData);
   if (!isMysqlConfigured()) return att;
 
-  await executeMysqlQuery(
-    `INSERT INTO employee_attendance (
-      id, employee_id, employee_name, date, status, check_in_time,
-      check_out_time, working_hours, overtime_hours, punch_logs, notes
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      status=VALUES(status), check_in_time=VALUES(check_in_time),
-      check_out_time=VALUES(check_out_time), working_hours=VALUES(working_hours),
-      overtime_hours=VALUES(overtime_hours), punch_logs=VALUES(punch_logs), notes=VALUES(notes)`,
-    [
-      att.id,
-      att.employeeId,
-      att.employeeName,
-      att.date,
-      att.status,
-      att.checkInTime || null,
-      att.checkOutTime || null,
-      att.totalHoursWorked || 0,
-      0,
-      JSON.stringify(att.punchLogs || []),
-      att.notes || null,
-    ]
+  // Correct TABLE (`attendance` — the old code wrote `employee_attendance`,
+  // which does not exist, so every attendance POST failed with MySQL on) and
+  // CORRECT columns (`in_time/out_time/work_hours` per the schema). UPSERT per
+  // (employee_id, date): update the existing row when there is one.
+  const existing = await executeMysqlOne(
+    'SELECT id FROM attendance WHERE employee_id = ? AND date = ?',
+    [att.employeeId, att.date]
   );
+
+  if (existing) {
+    await executeMysqlQuery(
+      `UPDATE attendance SET
+        status = ?, in_time = ?, out_time = ?, work_hours = ?, overtime_hours = ?,
+        notes = ?, updated_at = ?
+      WHERE id = ?`,
+      [
+        att.status,
+        att.checkInTime || null,
+        att.checkOutTime || null,
+        att.totalHoursWorked || 0,
+        0,
+        att.notes || null,
+        new Date().toISOString(),
+        existing.id,
+      ]
+    );
+  } else {
+    // Idempotent insert: the fire-and-forget liveSyncAttendance runs the same
+    // row in parallel (same minted id) — ON DUPLICATE KEY makes whichever
+    // lands second merge (not collide on attendance.PRIMARY)
+    await executeMysqlQuery(
+      `INSERT INTO attendance (
+        id, employee_id, date, status, in_time, out_time,
+        work_hours, overtime_hours, notes, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        status=VALUES(status),
+        in_time=VALUES(in_time), out_time=VALUES(out_time),
+        work_hours=VALUES(work_hours), overtime_hours=VALUES(overtime_hours),
+        notes=VALUES(notes), updated_at=VALUES(updated_at)`,
+      [
+        att.id,
+        att.employeeId,
+        att.date,
+        att.status,
+        att.checkInTime || null,
+        att.checkOutTime || null,
+        att.totalHoursWorked || 0,
+        0,
+        att.notes || null,
+        att.createdAt || new Date().toISOString(),
+        new Date().toISOString(),
+      ]
+    );
+  }
   return att;
 }
 
@@ -370,28 +462,86 @@ export async function createLeaveDirect(leaveData: any): Promise<EmployeeLeave> 
 }
 
 export async function createEmployeePaymentDirect(payData: any): Promise<EmployeePayment> {
-  const payment = serverDb.createEmployeePayment(payData);
+  // Mode of payment is an explicit employer choice; the account type only
+  // supplies a fallback when none arrives. The account balance is
+  // reconciled inside serverDb.
+  const ALLOWED_MODES = ['bank_transfer', 'cash', 'upi', 'cheque'];
+  const account = payData.accountId ? serverDb.getAccountById(String(payData.accountId)) : undefined;
+  let mode = String(payData.paymentMode || '');
+  if (!ALLOWED_MODES.includes(mode)) {
+    mode = account ? (account.type === 'cash' ? 'cash' : 'bank_transfer') : 'bank_transfer';
+  }
+  const payment = serverDb.createEmployeePayment({
+    ...payData,
+    paymentMode: mode,
+  });
   if (!isMysqlConfigured()) return payment;
 
+  // Idempotent insert: liveSyncEmployeePayment writes the same minted id in
+  // parallel — ON DUPLICATE KEY merges instead of colliding on the PK.
+  // employee_name is never written (JOIN-based display, FK-only rows)
   await executeMysqlQuery(
     `INSERT INTO employee_payments (
-      id, employee_id, employee_name, date, type, amount, payment_mode,
-      reference_no, notes, month_year, created_at
+      id, employee_id, date, type, amount, payment_mode,
+      account_id, reference_no, notes, month_year, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
-      amount=VALUES(amount), payment_mode=VALUES(payment_mode), reference_no=VALUES(reference_no)`,
+      amount=VALUES(amount), payment_mode=VALUES(payment_mode),
+      account_id=VALUES(account_id), reference_no=VALUES(reference_no),
+      notes=VALUES(notes), month_year=VALUES(month_year)`,
     [
       payment.id,
       payment.employeeId,
-      payment.employeeName,
       payment.date,
       payment.type,
       payment.amount,
       payment.paymentMode,
+      payment.accountId || null,
       payment.referenceNo || null,
       payment.notes || null,
       payment.monthYear || null,
-      new Date().toISOString(),
+      payment.createdAt || new Date().toISOString(),
+    ]
+  );
+  return payment;
+}
+
+/** Removes a payroll payment row + the account ledger/balance reconciles in serverDb. */
+export async function deleteEmployeePaymentDirect(id: string): Promise<boolean> {
+  const deleted = serverDb.deleteEmployeePayment(id);
+  if (!isMysqlConfigured()) return deleted;
+  await executeMysqlQuery('DELETE FROM employee_payments WHERE id = ?', [id]);
+  return true;
+}
+
+/** Edits a recorded payroll payment; serverDb re-reconciles both ledgers. */
+export async function updateEmployeePaymentDirect(id: string, updates: any): Promise<EmployeePayment> {
+  const payment = serverDb.updateEmployeePayment(id, updates);
+  if (!isMysqlConfigured()) return payment;
+
+  await executeMysqlQuery(
+    `UPDATE employee_payments SET
+      employee_id = ?,
+      date = ?,
+      type = ?,
+      amount = ?,
+      payment_mode = ?,
+      account_id = COALESCE(?, account_id),
+      reference_no = ?,
+      notes = ?,
+      month_year = ?
+    WHERE id = ?`,
+    [
+      payment.employeeId,
+      payment.date,
+      payment.type,
+      payment.amount,
+      payment.paymentMode,
+      payment.accountId || null,
+      payment.referenceNo || null,
+      payment.notes || null,
+      payment.monthYear || null,
+      payment.id,
     ]
   );
   return payment;

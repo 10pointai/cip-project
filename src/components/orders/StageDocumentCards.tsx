@@ -49,7 +49,7 @@ export function SaleStageDocCard({ doc, order, currencyCode, onOpenDocument, onV
         </div>
         {(onOpenDocument || onViewProforma) && (
           <div className="flex items-center gap-2 shrink-0">
-            {onOpenDocument && (
+            {/* {onOpenDocument && (
               <button
                 type="button"
                 onClick={() => onOpenDocument(doc)}
@@ -57,10 +57,11 @@ export function SaleStageDocCard({ doc, order, currencyCode, onOpenDocument, onV
               >
                 <Printer className="w-3 h-3" /> Open document
               </button>
-            )}
+            )} */}
             {doc.stageType === 'sales_order' && onViewProforma && (
               <button
                 type="button"
+                disabled
                 onClick={onViewProforma}
                 className="flex items-center gap-1 px-3 py-1.5 border border-[var(--color-primary)]/40 text-[var(--color-primary)] rounded-full text-[10px] font-bold hover:bg-[var(--color-primary-container)]/30 transition-all"
               >
@@ -165,7 +166,7 @@ export function PurchaseStageDocCard({ doc, order, currencyCode, onOpenDocument 
             <p className="text-[10px] text-[var(--color-on-surface-variant)] font-medium">Issued {doc.date}</p>
           </div>
         </div>
-        {onOpenDocument && (
+        {/* {onOpenDocument && (
           <button
             type="button"
             onClick={() => onOpenDocument(doc)}
@@ -173,7 +174,7 @@ export function PurchaseStageDocCard({ doc, order, currencyCode, onOpenDocument 
           >
             <Printer className="w-3 h-3" /> Open document
           </button>
-        )}
+        )} */}
       </div>
 
       {/* Stage-specific document chips (only the fields that exist) */}

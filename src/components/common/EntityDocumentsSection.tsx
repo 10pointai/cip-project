@@ -9,7 +9,7 @@ import { UploadProgressBar, UploadRowState } from './UploadProgressBar';
 
 /**
  * Entity Documents — N-documents-per-owner S3 upload feature (sales,
- * purchases, parties, inventory items). One component, four feature kinds.
+ * purchases, parties, inventory items, employees). One component, five feature kinds.
  *
  * Two modes:
  *  - entityId given → uploads link to the record IMMEDIATELY (used in the
@@ -21,7 +21,7 @@ import { UploadProgressBar, UploadRowState } from './UploadProgressBar';
  *    and the server links them in the same create flow.
  *
  * S3 KEY STRUCTURE (user rule): existing record →
- * `<Sale|Purchase|Party|Inventory>/<entityId>/<uuid4>.<ext>`;
+ * `<Sale|Purchase|Party|Inventory|Employee>/<entityId>/<uuid4>.<ext>`;
  * staged upload while creating (owner id not minted yet) →
  * `Pending/<uuid4>.<ext>`, moved server-side under the final key on link.
  *
@@ -29,7 +29,7 @@ import { UploadProgressBar, UploadRowState } from './UploadProgressBar';
  * document rows keep a status flag for a future soft-delete policy).
  */
 
-export type DocumentsFeature = 'sale' | 'purchase' | 'party' | 'item';
+export type DocumentsFeature = 'sale' | 'purchase' | 'party' | 'item' | 'employee';
 
 export interface StagedDocument {
   id: string;
@@ -55,6 +55,7 @@ const FEATURE_CONFIG: Record<DocumentsFeature, FeatureConfig> = {
   purchase: { s3Feature: 'purchase_orders', root: 'Purchase', noun: 'order' },
   party: { s3Feature: 'party_documents', root: 'Party', noun: 'party' },
   item: { s3Feature: 'inventory_documents', root: 'Inventory', noun: 'item' },
+  employee: { s3Feature: 'employee_documents', root: 'Employee', noun: 'employee' },
 };
 
 /** What an upload row holds once the file reached AWS S3 but has no name yet */
@@ -127,6 +128,8 @@ export function EntityDocumentsSection({ feature, entityId, staged = [], onStage
         ? api.getPurchaseDocuments(entityId)
         : feature === 'party'
         ? api.getPartyDocuments(entityId)
+        : feature === 'employee'
+        ? api.getEmployeeDocuments(entityId)
         : api.getItemDocuments(entityId);
     loader
       .then((res) => {
@@ -275,6 +278,8 @@ export function EntityDocumentsSection({ feature, entityId, staged = [], onStage
             ? await api.linkPurchaseDocuments(entityId, [rec.data.id])
             : feature === 'party'
             ? await api.linkPartyDocuments(entityId, [rec.data.id])
+            : feature === 'employee'
+            ? await api.linkEmployeeDocuments(entityId, [rec.data.id])
             : await api.linkItemDocuments(entityId, [rec.data.id]);
         if (linkRes.success) {
           setDocs((prev) => [rec.data as AppDocument, ...prev]);

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Menu, Plus, ArrowDownLeft, ArrowUpRight, Calendar, MapPin, Layers, Scale, Clock, Coins, Sun, Moon, Sparkles, Server, Database, CreditCard, Shield, User, KeyRound, LogOut, RefreshCw } from 'lucide-react';
+import { Menu, Plus, ArrowDownLeft, ArrowUpRight, MapPin, Layers, Scale, Clock, Sun, Moon, Sparkles, Server, Database, CreditCard, Shield, User, KeyRound, LogOut, RefreshCw } from 'lucide-react';
 import { CompanySettings } from '../../types';
 import { formatDate } from '../../utils/formatters';
 import { NavigationTab } from './Sidebar';
@@ -60,7 +60,28 @@ export function Header({
   const renderActionButtons = () => {
     switch (activeTab) {
       case 'dashboard':
-        return  null;
+        return (
+          <div className="flex items-center gap-1.5 sm:gap-2">
+            {hasPermission('record_payments') && (
+              <button
+                onClick={() => onOpenRecordPayment('payment_out')}
+                className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-[var(--color-warning-container)] hover:opacity-90 text-[var(--color-on-warning-container)] border border-[var(--color-warning)]/30 font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-2xs"
+              >
+                <ArrowUpRight className="w-3.5 h-3.5 text-[var(--color-warning)]" />
+                <span>Record Payment</span>
+              </button>
+            )}
+            {hasPermission('manage_parties') && (
+              <button
+                onClick={onOpenAddParty}
+                className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-xs"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Add Party</span>
+              </button>
+            )}
+          </div>
+        );
       case 'parties':
         return null;
       case 'items':
@@ -113,39 +134,7 @@ export function Header({
           </div>
         );
       case 'employees':
-        return (
-          <div className="flex items-center gap-1.5 sm:gap-2">
-            {hasPermission('process_payroll') && (
-              <button
-                onClick={() => window.dispatchEvent(new CustomEvent('app-header-action', { detail: 'record-employee-payment' }))}
-                className="inline-flex items-center gap-1 px-2.5 sm:px-3.5 py-1.5 bg-[var(--color-warning-container)] hover:opacity-90 text-[var(--color-on-warning-container)] border border-[var(--color-warning)]/30 font-semibold text-[10px] sm:text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-2xs"
-              >
-                <Coins className="w-3.5 h-3.5 text-[var(--color-warning)]" />
-                <span className="hidden md:inline">Record Pay / Advance</span>
-                <span className="md:hidden">Pay</span>
-              </button>
-            )}
-            {hasPermission('manage_employees') && (
-              <>
-                <button
-                  onClick={() => window.dispatchEvent(new CustomEvent('app-header-action', { detail: 'apply-employee-leave' }))}
-                  className="inline-flex items-center gap-1 px-2 sm:px-3 py-1.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] font-semibold text-[10px] sm:text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-2xs"
-                >
-                  <Calendar className="w-3.5 h-3.5 text-[var(--color-on-surface-variant)]" />
-                  <span>Leave</span>
-                </button>
-                <button
-                  onClick={() => window.dispatchEvent(new CustomEvent('app-header-action', { detail: 'add-employee' }))}
-                  className="inline-flex items-center gap-1 px-2.5 sm:px-3.5 py-1.5 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-semibold text-[10px] sm:text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-xs"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Add Employee</span>
-                  <span className="sm:hidden">Employee</span>
-                </button>
-              </>
-            )}
-          </div>
-        );
+        return null;
       default:
         return null;
     }

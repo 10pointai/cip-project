@@ -44,6 +44,7 @@ import {
   PurchaseOrderDocumentLink,
   PartyDocumentLink,
   ItemDocumentLink,
+  EmployeeDocumentLink,
   UserPermissions,
   UserRole,
   UserStatus,
@@ -69,6 +70,7 @@ import {
   liveSyncPurchaseOrderDocLink,
   liveSyncPartyDocLink,
   liveSyncItemDocLink,
+  liveSyncEmployeeDocLink,
   liveSyncVehicle,
   liveSyncDriver,
   liveSyncTripSlip,
@@ -166,6 +168,8 @@ export interface DatabaseSchema {
   partyDocuments: PartyDocumentLink[];
   /** item ↔ document mapping rows (table inventory_documents) */
   itemDocuments: ItemDocumentLink[];
+  /** employee ↔ document mapping rows (table employee_documents) */
+  employeeDocuments: EmployeeDocumentLink[];
 }
 
 /**
@@ -232,6 +236,7 @@ class ServerLocalDatabase {
       purchaseOrderDocuments: [],
       partyDocuments: [],
       itemDocuments: [],
+      employeeDocuments: [],
       auditLogs: [
         {
           id: `aud-${Date.now()}`,
@@ -3116,16 +3121,26 @@ class ServerLocalDatabase {
   }
 
   public createEmployee(data: Omit<Employee, 'id' | 'createdAt'>): Employee {
+    // documentIds ride the create payload like createParty's flow — staged
+    // uploads (Pending/*) registered while the form was open; strip before
+    // the employee spread (never persisted on the row) and link below.
+    const createDocIds = this.extractDocumentIds(data);
+    delete (data as any).documentIds;
     const newEmp: Employee = { ...data, id: `emp-${Date.now()}`, createdAt: new Date().toISOString() };
     this.data.employees.unshift(newEmp);
+    this.logAudit('CREATE', 'EMPLOYEE', newEmp.id, `Created employee ${newEmp.name} (${newEmp.role})`);
     this.save();
     liveSyncEmployee(newEmp);
+    if (createDocIds.length > 0) this.linkEmployeeDocuments(newEmp.id, createDocIds);
     return newEmp;
   }
 
   public updateEmployee(id: string, updates: Partial<Employee>): Employee {
     const idx = this.data.employees.findIndex((e) => e.id === id);
     if (idx === -1) throw new Error(`Employee ${id} not found.`);
+    // Defensive strip: edit-mode uploads link immediately via the documents
+    // endpoint, so documentIds should never ride an update — never persist it.
+    delete (updates as any).documentIds;
     this.data.employees[idx] = { ...this.data.employees[idx], ...updates };
     this.save();
     liveSyncEmployee(this.data.employees[idx]);
@@ -3137,6 +3152,7 @@ class ServerLocalDatabase {
     if (idx === -1) return false;
     const emp = this.data.employees[idx];
     this.data.employees.splice(idx, 1);
+    this.detachEmployeeDocuments(id);
     this.save();
     liveSyncEmployee(emp, true);
     return true;
@@ -3147,7 +3163,26 @@ class ServerLocalDatabase {
   }
 
   public recordAttendance(data: Omit<EmployeeAttendance, 'id'>): EmployeeAttendance {
-    const newAtt = { ...data, id: `att-${Date.now()}` };
+    // UPSERT per (employee, date): the attendance sheet saves the whole day
+    // repeatedly — a re-save must merge into the existing row, not mint a
+    // duplicate that prefill/one-day reads would trip over. Only PROVIDED
+    // fields merge (a partial save must not null saved times) and the
+    // client's optimistic id never replaces the server's.
+    const { id: _postedId, ...payload } = (data as any) || {};
+    const idx = this.data.attendance.findIndex(
+      (a) => a.employeeId === payload.employeeId && a.date === payload.date
+    );
+    if (idx >= 0) {
+      const merged: EmployeeAttendance = { ...this.data.attendance[idx] };
+      Object.keys(payload).forEach((k) => {
+        if (payload[k] !== undefined) (merged as any)[k] = payload[k];
+      });
+      this.data.attendance[idx] = merged;
+      this.save();
+      liveSyncAttendance(merged);
+      return merged;
+    }
+    const newAtt = { ...payload, id: `att-${Date.now()}` };
     this.data.attendance.unshift(newAtt);
     this.save();
     liveSyncAttendance(newAtt);
@@ -3167,15 +3202,80 @@ class ServerLocalDatabase {
   }
 
   public getEmployeePayments(): EmployeePayment[] {
-    return this.data.employeePayments;
+    // Both names resolve from the masters at read time (FK-only rows,
+    // Golden Rule §2)
+    return (this.data.employeePayments || []).map((p) => this.hydrateEmployeePayment(p));
+  }
+
+  /**
+   * Payroll payments store employeeId + accountId as FKs ONLY (Golden Rule
+   * §2) — neither the employee's nor the account's name ever persists on the
+   * row; both resolve from the masters at read time (hydrateEmployeePayment),
+   * so renames propagate everywhere (payroll list, account ledger, detail).
+   */
+  private hydrateEmployeePayment(pay: EmployeePayment): EmployeePayment {
+    const name = this.data.employees?.find((e) => e.id === pay.employeeId)?.name;
+    return {
+      ...pay,
+      // Master name wins; a legacy stored name is only a fallback
+      employeeName: name || pay.employeeName,
+      accountName: pay.accountId ? this.getAccountById(pay.accountId)?.name : undefined,
+    };
   }
 
   public createEmployeePayment(data: Omit<EmployeePayment, 'id'>): EmployeePayment {
-    const newPay = { ...data, id: `pay-${Date.now()}` };
+    // FK-only persistence — strip display names a payload may carry
+    const { employeeName: _en, accountName: _an, ...persistData } = data as any;
+    const newPay: EmployeePayment = { ...persistData, id: `pay-${Date.now()}`, createdAt: new Date().toISOString() };
     this.data.employeePayments.unshift(newPay);
     this.save();
     liveSyncEmployeePayment(newPay);
-    return newPay;
+    // The payout leaves the chosen Cash/Bank account: reconcile its balance
+    // (ledger math = opening + vouchers ± transfers ± adjustments ± payroll).
+    if (newPay.accountId) this.recalculateAccountBalance(newPay.accountId);
+    this.logAudit('CREATE', 'PAYROLL', newPay.id, `Recorded ${newPay.type} payout ${newPay.amount} to employee ${newPay.employeeId}${newPay.accountId ? ' from account ' + newPay.accountId : ''}.`);
+    return this.hydrateEmployeePayment(newPay);
+  }
+
+  /** Removes a payroll payment and reverses it out of the account ledger. */
+  public deleteEmployeePayment(id: string): boolean {
+    const idx = this.data.employeePayments.findIndex((p) => p.id === id);
+    if (idx === -1) return false;
+    const pay = this.data.employeePayments[idx];
+    this.data.employeePayments.splice(idx, 1);
+    this.save();
+    liveSyncEmployeePayment(pay, true);
+    if (pay.accountId) this.recalculateAccountBalance(pay.accountId);
+    this.logAudit('DELETE', 'PAYROLL', pay.id, `Deleted ${pay.type} payout ${pay.amount} to employee ${pay.employeeId}.`);
+    return true;
+  }
+
+  /**
+   * Edits a recorded payroll payment (amount/date/type/mode/account/refs).
+   * Every account touched by the move reconciles: moving a payout to another
+   * account (or changing the amount) re-computes BOTH the old and new ledger.
+   */
+  public updateEmployeePayment(id: string, updates: Partial<EmployeePayment>): EmployeePayment {
+    const idx = this.data.employeePayments.findIndex((p) => p.id === id);
+    if (idx === -1) throw new Error(`Employee payment ${id} not found.`);
+    // Display-only hydration (employeeName/accountName) never persists
+    delete (updates as any).employeeName;
+    delete (updates as any).accountName;
+    const previous = this.data.employeePayments[idx];
+    const updated: EmployeePayment = {
+      ...previous,
+      ...updates,
+      id: previous.id,
+      createdAt: previous.createdAt,
+    };
+    this.data.employeePayments[idx] = updated;
+    this.save();
+    liveSyncEmployeePayment(updated);
+    new Set([previous.accountId, updated.accountId].filter(Boolean) as string[]).forEach((aid) =>
+      this.recalculateAccountBalance(aid)
+    );
+    this.logAudit('UPDATE', 'PAYROLL', id, `Edited ${updated.type} payout (${updated.amount}) for employee ${updated.employeeId}.`);
+    return this.hydrateEmployeePayment(updated);
   }
 
   // --- ANALYTICS SUMMARY ---
@@ -3268,10 +3368,14 @@ class ServerLocalDatabase {
     return this.documentsFor('item', itemId);
   }
 
-  private documentsFor(kind: 'sale' | 'purchase' | 'party' | 'item', ownerId: string): AppDocument[] {
+  public getDocumentsForEmployee(employeeId: string): AppDocument[] {
+    return this.documentsFor('employee', employeeId);
+  }
+
+  private documentsFor(kind: 'sale' | 'purchase' | 'party' | 'item' | 'employee', ownerId: string): AppDocument[] {
     const links = this.docLinksFor(kind);
     const ids = (links as any[])
-      .filter((l) => (kind === 'sale' ? l.saleId : kind === 'purchase' ? l.purchaseId : kind === 'party' ? l.partyId : l.itemId) === ownerId)
+      .filter((l) => (kind === 'sale' ? l.saleId : kind === 'purchase' ? l.purchaseId : kind === 'party' ? l.partyId : kind === 'employee' ? l.employeeId : l.itemId) === ownerId)
       .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
       .map((l) => l.documentId);
     return (this.data.documents || []).filter(
@@ -3280,7 +3384,7 @@ class ServerLocalDatabase {
   }
 
   /** The in-memory mapping rows for a documents feature kind (create-on-read). */
-  private docLinksFor(kind: 'sale' | 'purchase' | 'party' | 'item'): any[] {
+  private docLinksFor(kind: 'sale' | 'purchase' | 'party' | 'item' | 'employee'): any[] {
     switch (kind) {
       case 'sale':
         return (this.data.saleOrderDocuments = this.data.saleOrderDocuments || []);
@@ -3290,6 +3394,8 @@ class ServerLocalDatabase {
         return (this.data.partyDocuments = this.data.partyDocuments || []);
       case 'item':
         return (this.data.itemDocuments = this.data.itemDocuments || []);
+      case 'employee':
+        return (this.data.employeeDocuments = this.data.employeeDocuments || []);
     }
   }
 
@@ -3340,8 +3446,12 @@ class ServerLocalDatabase {
     return this.linkOrderDocuments('item', itemId, documentIds);
   }
 
+  public linkEmployeeDocuments(employeeId: string, documentIds: string[]): number {
+    return this.linkOrderDocuments('employee', employeeId, documentIds);
+  }
+
   /** Idempotent FK-link writer — mapping rows only (no document mutation). */
-  private linkOrderDocuments(kind: 'sale' | 'purchase' | 'party' | 'item', ownerId: string, documentIds: string[]): number {
+  private linkOrderDocuments(kind: 'sale' | 'purchase' | 'party' | 'item' | 'employee', ownerId: string, documentIds: string[]): number {
     if (!Array.isArray(documentIds)) return 0;
     const validIds = [...new Set(documentIds.map(String).filter(Boolean))].filter((id) =>
       (this.data.documents || []).some((d) => d.id === id && d.status === 'active')
@@ -3349,7 +3459,7 @@ class ServerLocalDatabase {
     const links = this.docLinksFor(kind);
     let added = 0;
     validIds.forEach((docId) => {
-      const ownerKey = kind === 'sale' ? 'saleId' : kind === 'purchase' ? 'purchaseId' : kind === 'party' ? 'partyId' : 'itemId';
+      const ownerKey = kind === 'sale' ? 'saleId' : kind === 'purchase' ? 'purchaseId' : kind === 'party' ? 'partyId' : kind === 'employee' ? 'employeeId' : 'itemId';
       const exists = links.some((l: any) => l.documentId === docId && l[ownerKey] === ownerId);
       if (exists) return;
       const link = {
@@ -3369,10 +3479,11 @@ class ServerLocalDatabase {
   }
 
   /** Live-write one mapping row to its MySQL table (fire-and-forget). */
-  private liveSyncDocLink(kind: 'sale' | 'purchase' | 'party' | 'item', link: any, isDelete = false): void {
+  private liveSyncDocLink(kind: 'sale' | 'purchase' | 'party' | 'item' | 'employee', link: any, isDelete = false): void {
     if (kind === 'sale') liveSyncSaleOrderDocLink(link as SaleOrderDocumentLink, isDelete);
     else if (kind === 'purchase') liveSyncPurchaseOrderDocLink(link as PurchaseOrderDocumentLink, isDelete);
     else if (kind === 'party') liveSyncPartyDocLink(link as PartyDocumentLink, isDelete);
+    else if (kind === 'employee') liveSyncEmployeeDocLink(link as EmployeeDocumentLink, isDelete);
     else liveSyncItemDocLink(link as ItemDocumentLink, isDelete);
   }
 
@@ -3385,7 +3496,7 @@ class ServerLocalDatabase {
    * row's s3_key and url then point at the final location. Fire-and-forget
    * like the other cloud syncs; idempotent (only Pending/* keys participate).
    */
-  private settlePendingDocumentMoves(kind: 'sale' | 'purchase' | 'party' | 'item', ownerId: string, documentIds: string[]): void {
+  private settlePendingDocumentMoves(kind: 'sale' | 'purchase' | 'party' | 'item' | 'employee', ownerId: string, documentIds: string[]): void {
     const pendingIds = documentIds.filter((docId) => {
       const doc = (this.data.documents || []).find((d) => d.id === docId);
       return !!doc && doc.s3Key.startsWith('Pending/');
@@ -3430,6 +3541,10 @@ class ServerLocalDatabase {
     this.detachOrderDocuments('purchase', purchaseId);
   }
 
+  public detachEmployeeDocuments(employeeId: string): void {
+    this.detachOrderDocuments('employee', employeeId);
+  }
+
   public detachPartyDocuments(partyId: string): void {
     this.detachOrderDocuments('party', partyId);
   }
@@ -3439,10 +3554,10 @@ class ServerLocalDatabase {
   }
 
   /** Cascade for owner deletion: drop mappings, soft-delete orphaned documents. */
-  private detachOrderDocuments(kind: 'sale' | 'purchase' | 'party' | 'item', ownerId: string): void {
-    const ownerKey = kind === 'sale' ? 'saleId' : kind === 'purchase' ? 'purchaseId' : kind === 'party' ? 'partyId' : 'itemId';
+  private detachOrderDocuments(kind: 'sale' | 'purchase' | 'party' | 'item' | 'employee', ownerId: string): void {
+    const ownerKey = kind === 'sale' ? 'saleId' : kind === 'purchase' ? 'purchaseId' : kind === 'party' ? 'partyId' : kind === 'employee' ? 'employeeId' : 'itemId';
     const removed = this.docLinksFor(kind).filter((l: any) => l[ownerKey] === ownerId);
-    const kinds: Array<'sale' | 'purchase' | 'party' | 'item'> = ['sale', 'purchase', 'party', 'item'];
+    const kinds: Array<'sale' | 'purchase' | 'party' | 'item' | 'employee'> = ['sale', 'purchase', 'party', 'item', 'employee'];
     // Drop this kind's mapping rows for the deleted owner
     const keptForKind = this.docLinksFor(kind).filter((l: any) => l[ownerKey] !== ownerId);
     switch (kind) {
@@ -3457,6 +3572,9 @@ class ServerLocalDatabase {
         break;
       case 'item':
         this.data.itemDocuments = keptForKind as ItemDocumentLink[];
+        break;
+      case 'employee':
+        this.data.employeeDocuments = keptForKind as EmployeeDocumentLink[];
         break;
     }
     removed.forEach((l: any) => this.liveSyncDocLink(kind, l, true));
@@ -3478,7 +3596,7 @@ class ServerLocalDatabase {
   }
 
   /** Read-only view of the mapping rows for a kind (post-mutation safe). */
-  private docLinkRows(kind: 'sale' | 'purchase' | 'party' | 'item'): any[] {
+  private docLinkRows(kind: 'sale' | 'purchase' | 'party' | 'item' | 'employee'): any[] {
     switch (kind) {
       case 'sale':
         return this.data.saleOrderDocuments || [];
@@ -3488,6 +3606,8 @@ class ServerLocalDatabase {
         return this.data.partyDocuments || [];
       case 'item':
         return this.data.itemDocuments || [];
+      case 'employee':
+        return this.data.employeeDocuments || [];
     }
   }
 
@@ -3834,6 +3954,13 @@ class ServerLocalDatabase {
       } else if (adj.type === 'decrease') {
         balance -= amt;
       }
+    }
+
+    // 4. Payroll payouts — every recorded salary/advance/bonus/reimbursement
+    // leaves its selected account (Payroll & Payments tab)
+    const payouts = (this.data.employeePayments || []).filter((p) => p.accountId === accountId);
+    for (const pay of payouts) {
+      balance -= Number(pay.amount) || 0;
     }
 
     this.updateAccount(accountId, { currentBalance: balance });

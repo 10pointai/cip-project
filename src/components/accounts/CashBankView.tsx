@@ -42,6 +42,7 @@ import {
   Transaction,
   CompanySettings,
   Order,
+  EmployeePayment,
 } from '../../types';
 import { formatCurrency, formatDate, formatDateTime } from '../../utils/formatters';
 import { formatLedgerBalance } from '../parties/partyStatement';
@@ -60,6 +61,8 @@ interface CashBankViewProps {
   adjustments: AccountAdjustment[];
   transactions: Transaction[];
   orders?: Order[];
+  /** payroll payouts — every payment carries its accountId and shows as money-out */
+  employeePayments?: EmployeePayment[];
   settings: CompanySettings;
   onAddAccount: (acc: Omit<CashBankAccount, 'id' | 'createdAt' | 'updatedAt' | 'currentBalance' | 'isActive'>) => void;
   onUpdateAccount: (id: string, updates: Partial<CashBankAccount>) => void;
@@ -77,6 +80,7 @@ export function CashBankView({
   adjustments,
   transactions,
   orders,
+  employeePayments,
   settings,
   onAddAccount,
   onUpdateAccount,
@@ -312,6 +316,25 @@ export function CashBankView({
           moneyIn: isInc ? Number(adj.amount) : 0,
           moneyOut: !isInc ? Number(adj.amount) : 0,
           createdAt: adj.createdAt,
+        });
+      });
+
+    // 3.b Payroll payouts out of this account (salary/advance/bonus/
+    // reimbursement — recorded in the Payroll & Payments tab; deleting one
+    // reverses it here, which is why the balance math re-computes after)
+    (employeePayments || [])
+      .filter((ep) => ep.accountId === selectedAccountId)
+      .forEach((ep) => {
+        list.push({
+          id: ep.id,
+          date: ep.date,
+          type: 'payment_out',
+          title: `Payroll — ${ep.employeeName} (${(ep.type || 'salary').replace('_', ' ')})`,
+          description: ep.notes || `${(ep.type || 'salary').replace('_', ' ').toUpperCase()} payout${ep.monthYear ? ` for ${ep.monthYear}` : ''}`,
+          referenceNumber: ep.referenceNo,
+          moneyIn: 0,
+          moneyOut: Number(ep.amount) || 0,
+          createdAt: (ep as any).createdAt || ep.date,
         });
       });
 
@@ -662,47 +685,9 @@ export function CashBankView({
           {/* Controls: Sort & View toggle & Actions */}
           <div className="flex items-center gap-2 flex-wrap">
             {/* Sort Select */}
-            <div className="flex items-center gap-1 bg-[var(--color-surface-container)] px-3 py-1.5 rounded-full border border-[var(--color-outline-variant)]">
-              <ArrowUpDown className="w-3 h-3 text-[var(--color-outline)]" />
-              <select
-                value={sortBy}
-                onChange={(e: any) => setSortBy(e.target.value)}
-                className="bg-transparent text-xs font-semibold text-[var(--color-on-surface)] focus:outline-none"
-              >
-                <option value="name">Name (A-Z)</option>
-                <option value="balance_desc">Balance: High to Low</option>
-                <option value="balance_asc">Balance: Low to High</option>
-                <option value="recent">Recently Added</option>
-              </select>
-            </div>
+           
 
-            {/* View Mode Toggle */}
-            <div className="flex items-center bg-[var(--color-surface-container)] p-0.5 rounded-full border border-[var(--color-outline-variant)]">
-              <button
-                type="button"
-                onClick={() => setViewMode('table')}
-                className={`p-1.5 rounded-full transition-colors ${
-                  viewMode === 'table'
-                    ? 'bg-[var(--color-surface-container-lowest)] text-[var(--color-primary)] shadow-xs'
-                    : 'text-[var(--color-outline)] hover:text-[var(--color-on-surface)]'
-                }`}
-                title="List / Table View"
-              >
-                <ListIcon className="w-4 h-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setViewMode('cards')}
-                className={`p-1.5 rounded-full transition-colors ${
-                  viewMode === 'cards'
-                    ? 'bg-[var(--color-surface-container-lowest)] text-[var(--color-primary)] shadow-xs'
-                    : 'text-[var(--color-outline)] hover:text-[var(--color-on-surface)]'
-                }`}
-                title="Cards View"
-              >
-                <LayoutGrid className="w-4 h-4" />
-              </button>
-            </div>
+            
 
             {/* Export & Print */}
             <div className="flex items-center gap-1">
@@ -770,82 +755,30 @@ export function CashBankView({
           </div>
         </div>
 
-        {/* Quick Filter Pill Tabs */}
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab('all');
-              setSelectedAccountId(null);
-            }}
-            className={`px-3 py-1 rounded-full font-bold whitespace-nowrap transition-colors ${
-              activeTab === 'all' && !selectedAccountId
-                ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)]'
-                : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)]'
-            }`}
-          >
-            All Accounts ({accounts.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab('bank');
-              setSelectedAccountId(null);
-            }}
-            className={`px-3 py-1 rounded-full font-bold whitespace-nowrap flex items-center gap-1 transition-colors ${
-              activeTab === 'bank' && !selectedAccountId
-                ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)]'
-                : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)]'
-            }`}
-          >
-            <Landmark className="w-3.5 h-3.5" />
-            Bank Accounts ({bankAccounts.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab('cash');
-              setSelectedAccountId(null);
-            }}
-            className={`px-3 py-1 rounded-full font-bold whitespace-nowrap flex items-center gap-1 transition-colors ${
-              activeTab === 'cash' && !selectedAccountId
-                ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)]'
-                : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)]'
-            }`}
-          >
-            <Wallet className="w-3.5 h-3.5" />
-            Cash Drawers ({cashAccounts.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab('transfers');
-              setSelectedAccountId(null);
-            }}
-            className={`px-3 py-1 rounded-full font-bold whitespace-nowrap flex items-center gap-1 transition-colors ${
-              activeTab === 'transfers'
-                ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)]'
-                : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)]'
-            }`}
-          >
-            <ArrowLeftRight className="w-3.5 h-3.5" />
-            Transfers ({transfers.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab('adjustments');
-              setSelectedAccountId(null);
-            }}
-            className={`px-3 py-1 rounded-full font-bold whitespace-nowrap flex items-center gap-1 transition-colors ${
-              activeTab === 'adjustments'
-                ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)]'
-                : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)]'
-            }`}
-          >
-            <SlidersHorizontal className="w-3.5 h-3.5" />
-            Adjustments ({adjustments.length})
-          </button>
+        {/* Quick Filter — tabs */}
+        <div className="border-b border-[var(--color-outline-variant)] flex flex-wrap gap-2">
+          {([
+            { key: 'all', label: `All Accounts (${accounts.length})` },
+          
+            { key: 'transfers', label: `Transfers (${transfers.length})` },
+            { key: 'adjustments', label: `Adjustments (${adjustments.length})` },
+          ] as const).map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => {
+                setActiveTab(t.key as typeof activeTab);
+                setSelectedAccountId(null);
+              }}
+              className={`px-4 py-2.5 font-bold text-xs transition-all relative border-b-2 ${
+                activeTab === t.key
+                  ? 'border-[var(--color-primary)] text-[var(--color-primary)]'
+                  : 'border-transparent text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
         </div>
       </div>
 

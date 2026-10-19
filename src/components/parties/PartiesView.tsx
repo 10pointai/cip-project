@@ -356,26 +356,6 @@ export function PartiesView({
               </>
             )}
 
-            <div className="flex bg-[var(--color-surface-container)] p-1 rounded-full border border-[var(--color-outline-variant)]">
-              <button
-                onClick={() => setViewMode('grid')}
-                className={`p-1.5 rounded-full transition-colors ${
-                  viewMode === 'grid' ? 'bg-[var(--color-surface-container-lowest)] text-[var(--color-primary)] shadow-2xs' : 'text-[var(--color-outline)] hover:text-[var(--color-on-surface)]'
-                }`}
-                title="Card Grid View"
-              >
-                <LayoutGrid className="w-4 h-4" />
-              </button>
-              <button
-                onClick={() => setViewMode('table')}
-                className={`p-1.5 rounded-full transition-colors ${
-                  viewMode === 'table' ? 'bg-[var(--color-surface-container-lowest)] text-[var(--color-primary)] shadow-2xs' : 'text-[var(--color-outline)] hover:text-[var(--color-on-surface)]'
-                }`}
-                title="Data Table View"
-              >
-                <List className="w-4 h-4" />
-              </button>
-            </div>
           </div>
         </div>
 

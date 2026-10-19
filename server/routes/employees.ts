@@ -12,6 +12,8 @@ import {
   createLeaveDirect,
   fetchEmployeePaymentsDirect,
   createEmployeePaymentDirect,
+  deleteEmployeePaymentDirect,
+  updateEmployeePaymentDirect,
 } from '../mysql/personnelService';
 
 export const employeesRouter = Router();
@@ -53,9 +55,16 @@ employeesRouter.delete('/staff/:id', requirePermission('manage_employees'), asyn
 });
 
 // --- ATTENDANCE ---
+// Date-scoped reads: the daily sheet requests only its selected date, the
+// monthly register one employee's month — never the whole table at once.
 employeesRouter.get('/attendance', async (req, res) => {
   try {
-    const data = await fetchAttendanceDirect();
+    const data = await fetchAttendanceDirect({
+      date: typeof req.query.date === 'string' ? req.query.date : undefined,
+      employeeId: typeof req.query.employeeId === 'string' ? req.query.employeeId : undefined,
+      from: typeof req.query.from === 'string' ? req.query.from : undefined,
+      to: typeof req.query.to === 'string' ? req.query.to : undefined,
+    });
     res.json({ success: true, data });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -101,6 +110,24 @@ employeesRouter.post('/payments', requireEitherPermission('process_payroll', 'ma
   try {
     const data = await createEmployeePaymentDirect(req.body);
     res.status(201).json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+// Deleting a recorded payout reverses it out of the linked account's ledger
+employeesRouter.delete('/payments/:id', requireEitherPermission('process_payroll', 'manage_employees'), async (req, res) => {
+  try {
+    const success = await deleteEmployeePaymentDirect(req.params.id);
+    res.json({ success });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+// Editing a recorded payout (amount/account moves re-reconcile both ledgers)
+employeesRouter.put('/payments/:id', requireEitherPermission('process_payroll', 'manage_employees'), async (req, res) => {
+  try {
+    const data = await updateEmployeePaymentDirect(req.params.id, req.body);
+    res.json({ success: true, data });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }

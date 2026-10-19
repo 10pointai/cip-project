@@ -168,13 +168,13 @@ export function Sidebar({
       badge: employeesCount > 0 ? employeesCount : null,
       permissionCheck: (has) => has('manage_employees'),
     },
-    {
-      id: 'evidence',
-      label: 'Document Vault',
-      icon: FolderOpen,
-      badge: null,
-      permissionCheck: (has) => has('manage_evidence'),
-    },
+    // {
+    //   id: 'evidence',
+    //   label: 'Document Vault',
+    //   icon: FolderOpen,
+    //   badge: null,
+    //   permissionCheck: (has) => has('manage_evidence'),
+    // },
     {
       id: 'users',
       label: 'User Management',
@@ -189,13 +189,13 @@ export function Sidebar({
       badge: null,
       permissionCheck: (has) => has('manage_settings'),
     },
-    {
-      id: 'design-system',
-      label: 'Design Systems',
-      icon: Sparkles,
-      badge: 'M3',
-      permissionCheck: (has) => has('manage_settings'),
-    },
+    // {
+    //   id: 'design-system',
+    //   label: 'Design Systems',
+    //   icon: Sparkles,
+    //   badge: 'M3',
+    //   permissionCheck: (has) => has('manage_settings'),
+    // },
   ];
 
   const primaryNavItems = allNavItems.filter((item) => {

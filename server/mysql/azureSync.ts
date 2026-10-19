@@ -24,6 +24,7 @@ import {
   PurchaseOrderDocumentLink,
   PartyDocumentLink,
   ItemDocumentLink,
+  EmployeeDocumentLink,
   DocumentStatus,
   CashBankAccount,
   InternalTransfer,
@@ -755,20 +756,26 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         status: (e.status as any) || 'active',
         bankAccountNo: (parseJsonField(e.bank_details, {}) as any).accountNumber || undefined,
         bankIFSC: (parseJsonField(e.bank_details, {}) as any).ifscCode || undefined,
+        upiAddress: e.upi_address || undefined,
+        nameOnAccount: e.name_on_account || undefined,
+        defaultInTime: e.default_in_time || undefined,
+        defaultOutTime: e.default_out_time || undefined,
         createdAt: e.created_at,
       }));
 
       const [attRows]: [any[], any] = await conn.query('SELECT * FROM attendance ORDER BY date DESC');
+      // employee_name resolved from the just-fetched employees list (the
+      // attendance table no longer stores it)
+      const empNameById = new Map(employees.map((e) => [e.id, e.name]));
       const attendance: EmployeeAttendance[] = attRows.map((a) => ({
         id: a.id,
         employeeId: a.employee_id,
-        employeeName: a.employee_name,
+        employeeName: empNameById.get(a.employee_id) || '',
         date: a.date,
         status: (a.status as any) || 'present',
         checkInTime: a.in_time || undefined,
         checkOutTime: a.out_time || undefined,
         totalHoursWorked: parseNum(a.work_hours),
-        punchLogs: parseJsonField(a.punch_logs, []),
         notes: a.notes || undefined,
         createdAt: a.created_at,
         updatedAt: a.updated_at,
@@ -788,15 +795,23 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         createdAt: l.created_at || new Date().toISOString(),
       }));
 
-      const [payRows]: [any[], any] = await conn.query('SELECT * FROM employee_payments ORDER BY date DESC');
+      const [payRows]: [any[], any] = await conn.query(
+        `SELECT ep.*, e.name AS employee_name, a.name AS account_name
+         FROM employee_payments ep
+         LEFT JOIN employees e ON e.id = ep.employee_id
+         LEFT JOIN cash_bank_accounts a ON a.id = ep.account_id
+         ORDER BY ep.created_at DESC`
+      );
       const employeePayments: EmployeePayment[] = payRows.map((p) => ({
         id: p.id,
         employeeId: p.employee_id,
-        employeeName: p.employee_name,
+        employeeName: p.employee_name || undefined,
         date: p.date,
         type: (p.type as any) || 'salary',
         amount: parseNum(p.amount),
         paymentMode: (p.payment_mode as any) || 'bank_transfer',
+        accountId: p.account_id || undefined,
+        accountName: p.account_name || undefined,
         referenceNo: p.reference_no || undefined,
         notes: p.notes || undefined,
         monthYear: p.month_year || undefined,
@@ -986,6 +1001,15 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         documentId: l.document_id,
         createdAt: l.created_at,
       }));
+      const [employeeDocRows]: any[] = await conn.query(
+        'SELECT * FROM employee_documents ORDER BY created_at ASC'
+      );
+      const employeeDocuments: EmployeeDocumentLink[] = (employeeDocRows || []).map((l: any) => ({
+        id: l.id,
+        employeeId: l.employee_id,
+        documentId: l.document_id,
+        createdAt: l.created_at,
+      }));
 
       if (!settings) {
         return null;
@@ -1026,6 +1050,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         purchaseOrderDocuments,
         partyDocuments,
         itemDocuments,
+        employeeDocuments,
         auditLogs,
       };
     } finally {
@@ -1716,8 +1741,8 @@ export async function liveSyncEmployee(emp: Employee, isDelete = false) {
       await pool.query('DELETE FROM employees WHERE id = ?', [emp.id]);
     } else {
       await pool.query(
-        `REPLACE INTO employees (id, employee_code, name, designation, department, phone, email, date_of_joining, salary_type, base_salary, daily_wage_rate, bank_details, aadhar_number, pan_number, status, emergency_contact, notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `REPLACE INTO employees (id, employee_code, name, designation, department, phone, email, date_of_joining, salary_type, base_salary, daily_wage_rate, bank_details, upi_address, name_on_account, default_in_time, default_out_time, aadhar_number, pan_number, status, emergency_contact, notes, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           emp.id,
           emp.id,
@@ -1730,7 +1755,11 @@ export async function liveSyncEmployee(emp: Employee, isDelete = false) {
           emp.salaryType,
           emp.salaryType === 'monthly' ? emp.salaryBase : 0,
           emp.salaryType === 'daily' ? emp.salaryBase : 0,
-          JSON.stringify({ accountNumber: emp.bankAccountNo, ifsc: emp.bankIFSC }),
+          JSON.stringify({ accountNumber: emp.bankAccountNo, ifscCode: emp.bankIFSC }),
+          emp.upiAddress || null,
+          emp.nameOnAccount || null,
+          emp.defaultInTime || null,
+          emp.defaultOutTime || null,
           emp.aadhaarNo || null,
           emp.panNo || null,
           emp.status || 'active',
@@ -1754,19 +1783,17 @@ export async function liveSyncAttendance(att: EmployeeAttendance, isDelete = fal
       await pool.query('DELETE FROM attendance WHERE id = ?', [att.id]);
     } else {
       await pool.query(
-        `REPLACE INTO attendance (id, employee_id, employee_name, date, status, in_time, out_time, work_hours, overtime_hours, punch_logs, notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `REPLACE INTO attendance (id, employee_id, date, status, in_time, out_time, work_hours, overtime_hours, notes, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           att.id,
           att.employeeId,
-          att.employeeName,
           att.date,
           att.status,
           att.checkInTime || null,
           att.checkOutTime || null,
           att.totalHoursWorked || 0,
           0,
-          JSON.stringify(att.punchLogs || []),
           att.notes || null,
           att.createdAt || new Date().toISOString(),
           att.updatedAt || new Date().toISOString(),
@@ -1814,21 +1841,23 @@ export async function liveSyncEmployeePayment(ep: EmployeePayment, isDelete = fa
     if (isDelete) {
       await pool.query('DELETE FROM employee_payments WHERE id = ?', [ep.id]);
     } else {
+      // employee_name is NOT persisted — the display name JOINs from the
+      // employees master at read time (FK-only, Golden Rule §2)
       await pool.query(
-        `REPLACE INTO employee_payments (id, employee_id, employee_name, date, type, amount, payment_mode, reference_no, notes, month_year, created_at)
+        `REPLACE INTO employee_payments (id, employee_id, date, type, amount, payment_mode, account_id, reference_no, notes, month_year, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           ep.id,
           ep.employeeId,
-          ep.employeeName,
           ep.date,
           ep.type,
           ep.amount,
           ep.paymentMode,
+          ep.accountId || null,
           ep.referenceNo || null,
           ep.notes || null,
           ep.monthYear || null,
-          new Date().toISOString(),
+          ep.createdAt || new Date().toISOString(),
         ]
       );
     }
@@ -2004,6 +2033,23 @@ export async function liveSyncItemDocLink(link: ItemDocumentLink, isDelete = fal
     }
   } catch (e: any) {
     console.error('[Azure MySQL LiveSync] Failed to sync item document link:', e.message);
+  }
+}
+
+export async function liveSyncEmployeeDocLink(link: EmployeeDocumentLink, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM employee_documents WHERE id = ?', [link.id]);
+    } else {
+      await pool.query(
+        `REPLACE INTO employee_documents (id, employee_id, document_id, created_at) VALUES (?, ?, ?, ?)`,
+        [link.id, link.employeeId, link.documentId, link.createdAt]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync employee document link:', e.message);
   }
 }
 

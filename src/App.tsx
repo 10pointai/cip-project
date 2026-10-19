@@ -44,11 +44,15 @@ function AppContent() {
     sales,
     purchases,
     employees,
+    employeePayments,
     accounts,
     transfers,
     adjustments,
     stockAdjustments,
     isOnline,
+    counts,
+    loadFeature,
+    loadBootLookups,
     syncNow,
     db,
   } = useDatabase();
@@ -62,15 +66,37 @@ function AppContent() {
   const [isSignOutModalOpen, setIsSignOutModalOpen] = useState(false);
   const [isFeatureRefreshing, setIsFeatureRefreshing] = useState(false);
 
-  // Refresh feature data every time the user visits or switches between features
+  // PER-FEATURE DATA LOADING
+  // Boot tier — once per sign-in, the small lookup tables that global modals,
+  // dropdowns and name-resolution rely on from any tab (see cloudStore
+  // BOOT_LOOKUPS), plus live sidebar counts.
+  const bootDoneRef = React.useRef(false);
   React.useEffect(() => {
+    if (!isAuthenticated) {
+      bootDoneRef.current = false;
+      return;
+    }
+    if (bootDoneRef.current) return;
+    bootDoneRef.current = true;
+    loadBootLookups().catch((err) => {
+      bootDoneRef.current = false;
+      console.warn('[App] Boot-lookup hydration failed:', err);
+    });
+  }, [isAuthenticated, loadBootLookups]);
+
+  // Feature tier — on every tab visit, fetch only the collections that tab
+  // consumes (identical refetch-every-visit semantics as the old per-tab
+  // full snapshot, minus the full snapshot). isAuthenticated is kept so the
+  // first tab visit after sign-in refreshes, as before.
+  React.useEffect(() => {
+    if (!isAuthenticated) return;
     let isMounted = true;
-    const refreshFeatureData = async () => {
+    const loadTabData = async () => {
       setIsFeatureRefreshing(true);
       try {
-        await syncNow(true);
+        await loadFeature(activeTab);
       } catch (err) {
-        console.warn('[App] Error syncing data on feature visit:', err);
+        console.warn('[App] Error loading feature data on tab visit:', err);
       } finally {
         if (isMounted) {
           setIsFeatureRefreshing(false);
@@ -78,16 +104,12 @@ function AppContent() {
       }
     };
 
-    refreshFeatureData();
+    loadTabData();
 
     return () => {
       isMounted = false;
     };
-    // isAuthenticated in deps: the pre-login constructor sync now returns a
-    // settings-only tier (GET /api/sync is data-gated), so sign-in MUST trigger
-    // one full authenticated snapshot hydration — without this dep, landing on
-    // the same tab you left the app with left the store hydrated settings-only.
-  }, [activeTab, isAuthenticated, syncNow]);
+  }, [activeTab, isAuthenticated, loadFeature]);
 
   const checkTabPermission = (tab: NavigationTab): boolean => {
     if (!currentUser) return false;
@@ -380,7 +402,7 @@ function AppContent() {
       case 'employees':
         return {
           title: 'Employee & HR Management',
-          subtitle: 'Manage staff, driver profiles, attendance logs, leave requests, overtimes & payroll accounts',
+          subtitle: '',
         };
       case 'evidence':
         return {
@@ -431,12 +453,12 @@ function AppContent() {
         onSelectTab={setActiveTab}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
-        partiesCount={parties.length}
-        itemsCount={items.length}
-        salesCount={sales.length + orders.filter(o => o.type === 'sales').length}
-        purchasesCount={purchases.length + orders.filter(o => o.type === 'purchase').length}
-        accountsCount={accounts.length}
-        employeesCount={employees?.length || 0}
+        partiesCount={counts?.parties ?? parties.length}
+        itemsCount={counts?.items ?? items.length}
+        salesCount={(counts?.sales ?? sales.length) + (counts?.orders ?? orders.filter(o => o.type === 'sales').length)}
+        purchasesCount={(counts?.purchases ?? purchases.length) + (counts?.orders ?? orders.filter(o => o.type === 'purchase').length)}
+        accountsCount={counts?.accounts ?? accounts.length}
+        employeesCount={counts?.employees ?? (employees?.length || 0)}
         settings={settings}
         isOpenMobile={isMobileMenuOpen}
         onCloseMobile={() => setIsMobileMenuOpen(false)}
@@ -465,7 +487,7 @@ function AppContent() {
           onOpenAuthModal={() => setIsAuthModalOpen(true)}
           onRequestSignOut={() => setIsSignOutModalOpen(true)}
           isFeatureRefreshing={isFeatureRefreshing}
-          onRefreshFeature={() => syncNow(true)}
+          onRefreshFeature={() => loadFeature(activeTab)}
         />
 
         {/* Dynamic Page Views */}
@@ -516,6 +538,7 @@ function AppContent() {
               adjustments={adjustments}
               transactions={transactions}
               orders={orders}
+              employeePayments={employeePayments}
               settings={settings}
               onAddAccount={handleAddAccount}
               onUpdateAccount={handleUpdateAccount}

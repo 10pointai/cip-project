@@ -10,13 +10,14 @@ export const usersRouter = Router();
 usersRouter.use(authenticateToken);
 usersRouter.use(requirePermission('manage_users'));
 
-// GET /api/users - List all users
+// GET /api/users - List all users (status 'deleted' rows are tombstones on
+// disk only — they never surface in the management list)
 usersRouter.get('/', async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (req.query.fresh === 'true' || req.query.refresh === 'true') {
       await serverDb.initFromMysql();
     }
-    const users = serverDb.getUsers(false);
+    const users = serverDb.getUsers(false).filter((u) => u.status !== 'deleted');
     res.json({
       success: true,
       count: users.length,

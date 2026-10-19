@@ -1,0 +1,537 @@
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>CIP Phase-1 Audit</title>
+<!--
+  Design plan
+  Subject: 2026-10-19 full-codebase audit of an operations management system
+  (road-construction ERP). Treatment: working audit sheet — severity ramp,
+  monospace file refs, filterable checklist with priority selection.
+  Tokens: paper/slate neutral with slight warm-grey bias; safety-amber accent;
+  IBM Plex Sans for text, IBM Plex Mono for code paths (fits the ERP tool world).
+  Layout: audit header with counts → fixed-since-audit strip → filter bar →
+  two checklist sections (features / optimizations) → open questions → sticky selection bar.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --bg: #f7f6f3;
+  --surface: #ffffff;
+  --surface-2: #f1efeb;
+  --fg: #211f1c;
+  --muted: #6f6a62;
+  --line: #e3e0d9;
+  --accent: #a4550f;
+  --accent-soft: #f3e4d3;
+  --crit: #a03026;
+  --high: #9a5410;
+  --med: #7d6a0e;
+  --low: #4a6878;
+  --ok: #2e6b45;
+  --ok-soft: #e2efe6;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #14161a;
+  --surface: #1d2026;
+  --surface-2: #23262d;
+  --fg: #e9e7e2;
+  --muted: #9b978f;
+  --line: #2e323a;
+  --accent: #eda248;
+  --accent-soft: #3a2f1e;
+  --crit: #e5736a;
+  --high: #e09752;
+  --med: #cbb15a;
+  --low: #7fa3b8;
+  --ok: #6fbf8b;
+  --ok-soft: #1e3328;
+  color-scheme: dark;
+} }
+:root[data-theme="dark"] {
+  --bg: #14161a;
+  --surface: #1d2026;
+  --surface-2: #23262d;
+  --fg: #e9e7e2;
+  --muted: #9b978f;
+  --line: #2e323a;
+  --accent: #eda248;
+  --accent-soft: #3a2f1e;
+  --crit: #e5736a;
+  --high: #e09752;
+  --med: #cbb15a;
+  --low: #7fa3b8;
+  --ok: #6fbf8b;
+  --ok-soft: #1e3328;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: max(20px, env(safe-area-inset-top, 0px)) 96px;
+}
+.wrap { max-width: 980px; margin: 0 auto; }
+h1, h2, h3 { text-wrap: balance; margin: 0; }
+.mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px; letter-spacing: 0; }
+a { color: var(--accent); }
+
+/* header */
+.masthead { border-bottom: 2px solid var(--fg); padding-bottom: 18px; }
+.eyebrow {
+  font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 10px;
+}
+.eyebrow b { color: var(--fg); font-weight: 500; }
+h1 { font-size: clamp(26px, 5vw, 38px); font-weight: 700; letter-spacing: -0.01em; }
+.lede { color: var(--muted); max-width: 62ch; margin-top: 10px; }
+.counts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.count-chip {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
+  font-size: 12px; color: var(--muted); background: var(--surface);
+}
+.count-chip b { font-size: 16px; font-variant-numeric: tabular-nums; color: var(--fg); }
+.count-chip.crit b { color: var(--crit); } .count-chip.high b { color: var(--high); }
+.count-chip.med b { color: var(--med); } .count-chip.low b { color: var(--low); }
+
+/* fixed strip */
+.fixed-strip {
+  margin-top: 20px; border: 1px solid var(--ok); border-radius: 8px;
+  background: var(--ok-soft); padding: 12px 14px;
+}
+.fixed-strip h3 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--ok); margin-bottom: 6px; }
+.fixed-strip p { margin: 0; color: var(--fg); font-size: 13px; }
+
+/* filter bar */
+.filterbar {
+  position: sticky; top: 0; z-index: 5;
+  background: var(--bg);
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  padding: 12px 0 10px; border-bottom: 1px solid var(--line);
+}
+.fchip {
+  border: 1.5px solid var(--line); background: var(--surface); color: var(--muted);
+  font: inherit; font-size: 12px; font-weight: 500; border-radius: 999px;
+  padding: 5px 12px; cursor: pointer;
+}
+.fchip[aria-pressed="true"] { border-color: var(--accent); color: var(--fg); background: var(--accent-soft); }
+.fchip .n { font-variant-numeric: tabular-nums; color: inherit; opacity: .75; margin-left: 3px; }
+.search {
+  flex: 1 1 180px; min-width: 0;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
+  color: var(--fg); font: inherit; font-size: 13px; padding: 6px 12px;
+}
+.search:focus, .fchip:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* sections */
+h2 { font-size: 20px; font-weight: 700; margin: 30px 0 4px; }
+.sec-note { color: var(--muted); font-size: 13px; margin: 0 0 14px; max-width: 70ch; }
+
+.item {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 8px;
+}
+.item.hidden { display: none; }
+.pick {
+  width: 18px; height: 18px; margin-top: 2px; accent-color: var(--accent); cursor: pointer;
+}
+.meta-stack { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.pill {
+  font-family: "IBM Plex Mono", monospace; font-size: 10.5px; font-weight: 500;
+  letter-spacing: .06em; text-transform: uppercase;
+  border-radius: 4px; padding: 2px 7px; white-space: nowrap;
+}
+.pill.p-p0 { background: var(--crit); color: #fff; }
+.pill.p-p1 { background: var(--high); color: #fff; }
+.pill.p-p2 { background: var(--med); color: #fff; }
+.pill.p-p3 { background: var(--low); color: #fff; }
+.pill.p-fix { background: var(--ok); color: #fff; }
+.eff {
+  font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 4px; padding: 1px 7px; white-space: nowrap;
+}
+.body { min-width: 0; }
+.item h3 { font-size: 14.5px; font-weight: 600; line-height: 1.35; }
+.item h3 .area { font-weight: 400; color: var(--muted); font-size: 12.5px; margin-left: 6px; }
+.impact { margin: 4px 0 6px; color: var(--muted); font-size: 13px; }
+.refs { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.refs span { color: var(--muted); }
+.refs code {
+  font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--accent);
+  background: var(--surface-2); border-radius: 4px; padding: 1px 5px; white-space: nowrap;
+}
+
+/* open questions */
+.oq { counter-reset: oq; }
+.oq li {
+  list-style: none; counter-increment: oq; position: relative;
+  padding: 10px 0 10px 40px; border-bottom: 1px solid var(--line);
+}
+.oq li::before {
+  content: "Q" counter(oq);
+  position: absolute; left: 0; top: 10px;
+  font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 4px; padding: 1px 6px;
+}
+.oq { padding-left: 0; max-width: 80ch; }
+
+/* footer + selection bar */
+.foot { color: var(--muted); font-size: 12px; margin-top: 28px; border-top: 1px solid var(--line); padding-top: 12px; }
+.selbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 9;
+  background: var(--surface); border-top: 1px solid var(--line);
+  padding: 10px max(16px, env(safe-area-inset-left, 0px)) 10px max(16px, env(safe-area-inset-right, 0px));
+  box-shadow: 0 -4px 14px rgba(0,0,0,.08);
+}
+.selbar-inner { max-width: 980px; margin: 0 auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.selbar .label { font-size: 13px; color: var(--muted); }
+.selbar .label b { color: var(--fg); font-variant-numeric: tabular-nums; }
+.btn-copy {
+  border: none; border-radius: 8px; background: var(--accent); color: #fff;
+  font: inherit; font-size: 13px; font-weight: 600; padding: 8px 16px; cursor: pointer;
+}
+.btn-copy:disabled { opacity: .45; cursor: default; }
+@media (max-width: 560px) {
+  .item { grid-template-columns: auto 1fr; }
+  .meta-stack { grid-column: 1 / -1; flex-direction: row; }
+}
+</style>
+<div class="wrap">
+  <header class="masthead">
+    <div class="eyebrow">Operations Management System · full-codebase audit · <b>2026-10-19</b> · HEAD 620eea2</div>
+    <h1>CIP Phase-1 Audit</h1>
+    <p class="lede">Refresh of the 2026-10-17 audit, re-verified line-by-line after the user-management, S3-upload and server-PK-adoption commits, plus a new performance pass. Nothing has been changed yet — pick priorities below and we'll work through them one at a time.</p>
+    <div class="counts" id="counts"></div>
+  </header>
+
+  <section class="fixed-strip">
+    <h3>Fixed since the last audit</h3>
+    <p>/api/sync is now auth-tiered and strips password hashes · /api/health is authenticated · S3 upload works end-to-end for evidence, sale/purchase, party and item documents · stock-adjustment numbering is server-minted · production batches persist to MySQL · Stock Valuation card follows the no-FIFO-in-UI directive.</p>
+  </section>
+
+  <nav class="filterbar" id="filters" aria-label="Filters"></nav>
+
+  <h2>Incomplete features</h2>
+  <p class="sec-note">Ordered by severity. P0 = active data corruption; P1 = data lost or a feature broken on a MySQL deployment; P2 = missing capability or misleading UX; P3 = hardening.</p>
+  <div id="features"></div>
+
+  <h2>Optimizations</h2>
+  <p class="sec-note">Ordered by impact as data grows (transactions, stock_movements, attendance compound fastest). Effort: S &lt;1h · M hours · L a day+.</p>
+  <div id="perf"></div>
+
+  <h2>Open questions</h2>
+  <p class="sec-note">Flagged rather than assumed — these shape how a fix should be built.</p>
+  <ul class="oq" id="oqs"></ul>
+
+  <div class="foot">
+    Compiled from three verified passes: server completeness (schema drift, routes, security), client completeness (wiring, lifecycle, dead UI), and performance (queries, payload, render). Every severity call was re-checked in source; the two P0-class claims were hand-verified.
+  </div>
+</div>
+
+<div class="selbar">
+  <div class="selbar-inner" style="padding-left:0;padding-right:0">
+    <span class="label"><b id="selcount">0</b> selected — <span id="selhint">tick items to build the priority list</span></span>
+    <button class="btn-copy" id="copybtn" disabled>Copy priorities</button>
+  </div>
+</div>
+
+<script>
+const ALL = [
+// ============ INCOMPLETE FEATURES ============
+{id:'F1', sec:'features', sev:'P0', eff:'S', area:'Vouchers · server',
+ title:'Voucher edit pushes MySQL balances stale',
+ impact:'updateTransaction recalculates party/account balances in memory only — it never calls liveSyncParty/liveSyncAccount, so after any restart or re-hydration MySQL balances revert to pre-edit values and disagree with the ledger.',
+ refs:['server/db.ts:658-680','server/db.ts:1525-1537 (correct pattern: syncLedgerBalances)'],
+ detail:null},
+{id:'F2', sec:'features', sev:'P0', eff:'M', area:'Logistics · server',
+ title:'Trip slips persist nowhere',
+ impact:'Route INSERT uses columns that don\'t exist (500s), and the live-sync fallback also targets a nonexistent column while writing orderId into party_id. Trip slips exist only in memory and vanish on restart; edits/deletes silently fail too.',
+ refs:['server/mysql/operationsService.ts:802-807','server/mysql/azureSync.ts:1635-1648','server/mysql/migrations.ts:597-633'],
+ detail:null},
+{id:'F3', sec:'features', sev:'P1', eff:'M', area:'Schema drift · server',
+ title:'Five more CREATE/POST routes break on MySQL vs migrations.ts',
+ impact:'vehicles POST inserts nonexistent `ownership` (500, row survives via liveSync) · tyres POST inserts nonexistent `type` (+fetchTyresDirect drops model/axle/tread on read) · employees POST inserts nonexistent `license_number` (500) and edit silently drops aadhaar/pan/bank edits · attendance POST writes the wrong table (employee_attendance vs attendance) and mints a fresh id per save → duplicate rows · leaves POST uses employee_leaves/from_date-to_date vs leaves/start_date-end_date (500).',
+ refs:['server/mysql/operationsService.ts:746-747, 843-846, 496-509','server/mysql/personnelService.ts:248-252, 283-303, 319-326, 349-354','server/db.ts:3150 (dup attendance ids)'],
+ detail:null},
+{id:'F4', sec:'features', sev:'P1', eff:'S', area:'Inventory · server',
+ title:'liveSyncItem column/placeholder mismatch — item writes silently fail',
+ impact:'REPLACE INTO items lists 23 columns but binds 22 values; mysql2 throws on every db.ts-path item create/update. The catch swallows it to a console.error. Route-level saves survive only because the Direct services have their own correct column lists.',
+ refs:['server/mysql/azureSync.ts:1119-1124, 1189-1193'],
+ detail:'Verified by hand: 23 columns, 22 ?. Fallback paths (location-delete cleanup, movement-write fallback) call this same broken function.'},
+{id:'F5', sec:'features', sev:'P1', eff:'M', area:'HR · client+server',
+ title:'Punch, attendance edit, leave status, payment delete are client-only',
+ impact:'cloudStore mutators have zero API calls, so everything disappears on refresh: updateAttendance, updateLeave/deleteLeave (server stays pending forever), deleteEmployeePayment (no DELETE endpoint exists at all). Worse, recordPunch mis-parses its 6 arguments — it stores the DATE as the time and drops time/source/note, hardcodes "today" so back-dated punches land on the wrong day, and silently drops a first punch when no row exists yet.',
+ refs:['src/services/cloudStore.ts:1433-1447, 1480-1503, 1533-1541','src/components/employees/EmployeesView.tsx:272-277, 312, 683-686'],
+ detail:null},
+{id:'F6', sec:'features', sev:'P1', eff:'M', area:'Evidence · full-stack',
+ title:'Evidence vault catalog is never persisted',
+ impact:'S3 upload is real now, but folders/files live only in session memory: cloudStore folder/file mutators call no API, /api/sync carries no evidence arrays, and fetchEvidenceFoldersDirect/fetchEvidenceFilesDirect are imported by no route. Every reload loses the catalog and permanently orphans uploaded S3 objects; the evidence MySQL tables are written by nothing.',
+ refs:['src/services/cloudStore.ts:1544-1612, 169-170','server/mysql/personnelService.ts:193, 213','server/mysql/migrations.ts:829'],
+ detail:null},
+{id:'F7', sec:'features', sev:'P1', eff:'M', area:'Logistics · server',
+ title:'Vehicle edits (and EMI) are lost on MySQL deployments',
+ impact:'POST /logistics/vehicles writes MySQL; PUT /logistics/vehicles/:id writes only the in-memory sandbox while GET re-reads MySQL — every vehicle edit, including EMI mark-paid, is discarded after resync. emiDetails has no columns at all.',
+ refs:['server/routes/logistics.ts:36, 50','server/mysql/operationsService.ts:741-777','src/components/logistics/LogisticsView.tsx:413-483'],
+ detail:null},
+{id:'F8', sec:'features', sev:'P1', eff:'S', area:'Ops data · server',
+ title:'seed-from-local aborts entirely when the snapshot contains trip slips',
+ impact:'The seed statement references the nonexistent trip_slip column; one bad statement in a shared transaction rolls back ALL seeding, so importing any snapshot with trip slips fails wholesale. (Fixes itself once F2 lands.)',
+ refs:['server/mysql/migrations.ts:1957, 1677+'],
+ detail:null},
+{id:'F9', sec:'features', sev:'P1', eff:'M', area:'Ops data · server',
+ title:'Backup restore / reset / purge-demo never touch MySQL',
+ impact:'They mutate only the in-memory snapshot, so on a cloud deployment the "Database restored" toast is false — next hydration resurrects everything from MySQL. purge-demo is a byte-for-byte duplicate of reset.',
+ refs:['server/routes/backup.ts:22-57','server/db.ts:4003, 4015'],
+ detail:null},
+{id:'F10', sec:'features', sev:'P1', eff:'S', area:'Ops data · server',
+ title:'Concurrency stress test reports fabricated success to admins',
+ impact:'runConcurrencyStressTest returns hardcoded metrics (deadlocksDetected: 0, averageLatencyMs: 3.8) and a success banner via POST /api/cloud/test-transactions. Admins see a green result that tests nothing.',
+ refs:['server/mysql/azureTransactions.ts:174-185','server/routes/cloud.ts:124-132'],
+ detail:null},
+{id:'F11', sec:'features', sev:'P1', eff:'M', area:'Vouchers · server',
+ title:'Voucher delete leaves dangling settlement FKs and un-reversed stock',
+ impact:'DELETE /api/transactions/:id reverses balances correctly but never clears sales_orders.settlement_voucher_id / invoice_voucher_id / purchase equivalents — deleting an invoice voucher leaves the order pointing at a ghost — and never reverses stock or production effects tied to the voucher.',
+ refs:['server/mysql/financeService.ts:148-200'],
+ detail:null},
+{id:'F12', sec:'features', sev:'P2', eff:'M', area:'Vouchers · client',
+ title:'Voucher edit/delete UI missing',
+ impact:'PaymentVoucherDetailModal is read-only. api.updateTransaction and api.deleteTransaction exist but are called by nothing, so the PUT-works server fix (F1) has no UI to reach it.',
+ refs:['src/components/parties/PaymentVoucherDetailModal.tsx:76-165','src/services/api.ts:373, 380'],
+ detail:null},
+{id:'F13', sec:'features', sev:'P2', eff:'M', area:'Error handling · client',
+ title:'Silent failures: toasts lie, 500s go only to console',
+ impact:'Every fire-and-forget cloudStore mutation ends in console.error; App.tsx shows success toasts the moment an optimistic mutation starts ("Sale deleted and ledger compensated.", "Account details updated!") even when the request fails. Only deleteStockAdjustment and deleteSale roll back — every other failed delete leaves the row alive server-side while the UI shows it gone.',
+ refs:['src/services/cloudStore.ts:276, 320, 356, 641 (pattern)','src/App.tsx:194-253','src/services/cloudStore.ts:652-658, 923-926 (the two rollback sites)'],
+ detail:null},
+{id:'F14', sec:'features', sev:'P2', eff:'M', area:'Documents · full-stack',
+ title:'Document lifecycle orphans: no delete/unlink, no cleanup of abandoned uploads',
+ impact:'No DELETE endpoint exists and no producer ever sets status \'deleted\'. "Remove" on a staged row filters local state only, after the row and the S3 object already exist; cancelling a form mid-upload registers rows and objects against an owner the user abandoned; Pending/ is reconciled only by moving-to-live on link, never purged. No unmount abort in EntityDocumentsSection despite a comment claiming one.',
+ refs:['server/routes/documents.ts (no DELETE)','src/components/common/EntityDocumentsSection.tsx:106-108, 255, 408-414','server/db.ts:3387-3410'],
+ detail:null},
+{id:'F15', sec:'features', sev:'P2', eff:'M', area:'Numbering · full-stack',
+ title:'Document numbering remains client-side and Math.random',
+ impact:'Payment receipts and transaction voucher numbers are `prefix + Math.floor(1000+random)*9000)` on the client (duplicates across concurrent clients possible); SO/PO/RFQ/GRN/INV stage numbers are client-suggested and required by the server. The server\'s own journal-voucher mint is also random 4-digit. Stock adjustments are the only server-minted numbering.',
+ refs:['src/components/parties/PartiesView.tsx:161','src/components/parties/TransactionFormModal.tsx:52, 114','src/components/orders/OrdersView.tsx:401-427','server/db.ts:1514-1521'],
+ detail:null},
+{id:'F16', sec:'features', sev:'P2', eff:'M', area:'Sales',
+ title:'Per-line partial delivery on sales is never produced',
+ impact:'The `partially_delivered` status is counted in stats but nothing ever assigns it (no producer client- or server-side). Sales lines have no delivered-quantity field — unlike purchase lines, which have receivedQuantity and a wired GRN reconciliation.',
+ refs:['src/components/orders/OrdersView.tsx:368','src/services/api.ts / src/types/index.ts (SalesOrderItem vs PurchaseOrderItem:817+)'],
+ detail:null},
+{id:'F17', sec:'features', sev:'P2', eff:'M', area:'Legacy data',
+ title:'Retired `orders` blob still feeds live views',
+ impact:'CashBankView folds legacy orders into account counts and ledger rows, the Logistics trip-slip PO dropdown lists only legacy rows (and filters on the impossible status \'partially_completed\'), and App KPIs include them. Trip slips also can\'t link to current sale/purchase rows, and the dropdown write path is memory-only.',
+ refs:['src/components/accounts/CashBankView.tsx:170-181, 318-346','src/components/logistics/LogisticsView.tsx:2271-2283, 293-300','src/App.tsx:436-437'],
+ detail:null},
+{id:'F18', sec:'features', sev:'P2', eff:'L', area:'Cash & Bank',
+ title:'Bank reconciliation not implemented',
+ impact:'Adjustments only. No statement import, matching, or reconciliation module anywhere — server has exactly one cosmetic string hit. Phase-1 label says "Cash & Bank" complete.',
+ refs:['src/components/accounts/CashBankView.tsx:934, 1820-1929','server/db.ts:1334'],
+ detail:null},
+{id:'F19', sec:'features', sev:'P2', eff:'M', area:'Production',
+ title:'Production: no edit path, and delete warns stock isn\'t reversed',
+ impact:'A mis-typed batch can only be deleted (with a warning that its stock effects stay). api.updateBatch exists but nothing calls it.',
+ refs:['src/components/production/ProductionView.tsx:200-206','src/services/api.ts:575'],
+ detail:null},
+{id:'F20', sec:'features', sev:'P2', eff:'S', area:'Dead UI',
+ title:'Dead code and unreachable controls',
+ impact:'ModulePlaceholderView is unreachable (App renders a real view for all 13 tabs). User deletion is fully built but unreachable — nothing ever sets userToDelete. SettingsView\'s onOpenBackendStatus and ProductionView\'s onRefresh props are passed but never consumed. api.createPartiesBulk / recalculateAccount / resetDatabase / exportBackup have zero call sites; bulk party entry posts N sequential requests instead of the bulk endpoint.',
+ refs:['src/components/common/ModulePlaceholderView.tsx','src/components/users/UserManagementView.tsx:328-340, 797-841','src/services/api.ts:326, 772, 820, 832','src/services/cloudStore.ts:280-307'],
+ detail:null},
+{id:'F21', sec:'features', sev:'P2', eff:'S', area:'Logistics',
+ title:'Transit-simulator tab is a mock',
+ impact:'Hardcoded positions by index, fake GPS/signal, fixed 48 km/h — presented as a live map alongside real vehicles.',
+ refs:['src/components/logistics/LogisticsView.tsx:2032-2115'],
+ detail:null},
+{id:'F22', sec:'features', sev:'P2', eff:'S', area:'Settings',
+ title:'Settings: plant-site management missing, no prefix editor',
+ impact:'The tab is labelled Company & Operations Settings but holds only legal entity + address; plant selection in Production is a hardcoded 4-item <select>. Stage-number prefixes (QUO/SO/RFQ/PO/GRN) are hardcoded constants disconnected from settings — even though client numbering (F15) needs prefix slots to exist first.',
+ refs:['src/components/settings/SettingsView.tsx:1-334','src/components/production/ProductionView.tsx:410-414','src/components/orders/OrdersView.tsx:403-412'],
+ detail:null},
+{id:'F23', sec:'features', sev:'P3', eff:'S', area:'Security · server',
+ title:'Hardening residuals',
+ impact:'JWT secret falls back to a hardcoded string (warned now, still present); unauthenticated GET /api/sync?fresh=true triggers a full MySQL re-hydration before the auth check; no login rate limiting, and hash-less super_admin accounts auto-heal to a known password on next login attempt; GET /api/documents/:id/download is open to any authenticated operator regardless of permissions, and POST /api/documents trusts client-supplied s3Key/url.',
+ refs:['server/middleware/auth.ts:6-9','server/server.ts→ server.ts:106-108','server/routes/auth.ts:9-108, 26-38','server/routes/documents.ts:21-50, 184-197'],
+ detail:null},
+
+// ============ OPTIMIZATIONS ============
+{id:'P1', sec:'perf', sev:'P0', eff:'L', area:'Sync architecture',
+ title:'Every mutation triggers a full-database refetch',
+ impact:'After each save the client fires syncWithServer(true) → GET /api/sync?fresh=true → the server re-runs ~40 full-table SELECTs, re-hydrates (incl. per-item FIFO over the whole ledger) and re-ships every table to every client. Latency of saving one voucher scales with total DB size, not the edit; with concurrent operators this serializes into a thundering herd against the MySQL pool.',
+ refs:['src/services/cloudStore.ts:356, 641, 744, 851-1056, 1258, 1429 (pattern)','server/db.ts:350-372','server/mysql/azureSync.ts:85-983'],
+ detail:null},
+{id:'P2', sec:'perf', sev:'P1', eff:'S', area:'Sync architecture',
+ title:'Full DB reload on every tab navigation',
+ impact:'App.tsx runs syncNow(true) on every tab switch for every user — the same full-server-reload cost — on top of a constructor-fired sync on app start (double reload per fresh page load, deduped to two fetches).',
+ refs:['src/App.tsx:67-91','src/services/cloudStore.ts:104-108'],
+ detail:null},
+{id:'P3', sec:'perf', sev:'P1', eff:'S', area:'Payload',
+ title:'Snapshot ships tables the client never reads, with no compression',
+ impact:'The sync payload includes the full stockMovements ledger (fastest-growing table, unused by the client snapshot assign), the retired legacy orders array, auditLogs and legacy JSON columns on items — uncompressed (no gzip/brotli, 50mb body limit already set).',
+ refs:['server/db.ts:380-399','src/services/cloudStore.ts:144-175','server/mysql/azureSync.ts:169-175, 1118-1133'],
+ detail:null},
+{id:'P4', sec:'perf', sev:'P1', eff:'S', area:'Correctness + CPU',
+ title:'FIFO valuation scans items × whole ledger — and truncates it',
+ impact:'getFullSnapshot replays per-item valuation by linearly filtering the last 5,000 ledger rows GLOBALLY: O(items × 5000) per sync, and once the ledger tops 5,000 rows, older items\' FIFO lots are silently dropped — the same item gets a different value from the MySQL-side replay, which uses the full ledger.',
+ refs:['server/db.ts:704-713','server/mysql/azureSync.ts:305-316','server/mysql/operationsService.ts:113-163 (batched, correct pattern)'],
+ detail:'Also a data-correctness bug, not just speed.'},
+{id:'P5', sec:'perf', sev:'P1', eff:'M', area:'React render',
+ title:'Every store notification re-renders everything, twice per action',
+ impact:'useDatabase converts each notify into 27 fresh array identities (getTransactions rebuilds a Set + filter over ALL transactions on every call); big views\' useMemo invalidates on every notify even when nothing relevant changed. React.memo count across src: zero. Two notifies per user action (optimistic + post-sync) × the double sync of P2.',
+ refs:['src/hooks/useDatabase.ts:65-93','src/services/cloudStore.ts:196-199, 127-135'],
+ detail:null},
+{id:'P6', sec:'perf', sev:'P2', eff:'M', area:'Queries',
+ title:'No LIMIT/pagination anywhere; attendance compounds unbounded',
+ impact:'All list fetchers return whole tables — attendance (employees × days) is read in full on every hydrate with no date-window option, same for trip slips, tyres, documents, and transactions has filters but no limit.',
+ refs:['server/mysql/personnelService.ts:62','server/mysql/azureSync.ts:262-270, 761, 939','server/mysql/financeService.ts:99-125'],
+ detail:null},
+{id:'P7', sec:'perf', sev:'P2', eff:'S', area:'Queries',
+ title:'Missing indexes vs the hydration sort orders',
+ impact:'Full filesorts on every hydrate: stock_movements orders by movement_date with no standalone index; orders load by date with no date index on either orders table; documents/evidence_files order by created_at unindexed; attendance has no UNIQUE(employee_id, date) to backstop the duplicate-punch problem (F3).',
+ refs:['server/mysql/migrations.ts:1086-1090, 660-672, 846-866, 777-792','server/mysql/azureSync.ts:262-270, 217, 939'],
+ detail:null},
+{id:'P8', sec:'perf', sev:'P2', eff:'M', area:'Writes',
+ title:'Write fan-out is one sequential round-trip per child row',
+ impact:'Sale with 30 lines = 30+ sequential network calls to Azure inside the request (items, stages, location mapping, movements all loop-INSERT), with no transaction wrapper around master+children.',
+ refs:['server/mysql/azureSync.ts:1337-1360, 1366-1390, 1445-1500, 1164-1189, 2237-2260'],
+ detail:null},
+{id:'P9', sec:'perf', sev:'P2', eff:'M', area:'Duplication',
+ title:'Ledger/balance replay implemented four times',
+ impact:'The opening-balance-seeded running-balance replay exists independently in partyStatement.ts, PrintStatementModal, CashBankView, and the server write path. A rounding or cancellation-rule fix in one leaves the other three wrong.',
+ refs:['src/components/parties/partyStatement.ts:110-295','src/components/common/PrintStatementModal.tsx:32-55','src/components/accounts/CashBankView.tsx:245-380','server/db.ts:1526-1650'],
+ detail:null},
+{id:'P10', sec:'perf', sev:'P3', eff:'S', area:'Render',
+ title:'Per-row .find lookups and rebuilt formatters in hot maps',
+ impact:'Orders rows .find the party twice per row per render; attendance rows .find over the full array per register row; six Intl.NumberFormat constructions sit inside component bodies — rebuilt per number per render. One keyed Map / one module-level formatter each.',
+ refs:['src/components/orders/OrdersView.tsx:1263-1267, 302, 575, 1683, 1699, 319-330','src/components/employees/AttendanceInOutView.tsx:99-115, 374+, 690, 1210'],
+ detail:null},
+{id:'P11', sec:'perf', sev:'P3', eff:'S', area:'Render',
+ title:'Stale-data useMemos keyed on the modal toggle',
+ impact:'OrdersView reads accounts/vehicles/drivers/locations via useMemo([isFormOpen]) — form dropdowns show stale data until the form is reopened.',
+ refs:['src/components/orders/OrdersView.tsx:178-181'],
+ detail:null},
+{id:'P12', sec:'perf', sev:'P3', eff:'M', area:'Caching',
+ title:'No snapshot caching between syncs',
+ impact:'Each hydrate re-derives the entire hydrated snapshot per request (GC churn scales with operators × DB size); no ETag or version counter. Startup integrity audit (Σ buckets vs currentStock) re-runs inside every hydration rather than once at boot.',
+ refs:['server/db.ts:380-399','server/mysql/azureSync.ts:244-254'],
+ detail:null},
+];
+
+const FIXED = null;
+const OQS = [
+['Punch flow', 'recordPunch silently drops an employee\'s first punch of the day when no attendance row exists yet — should the punch create the row (and should the 6-arg signature bug be fixed by routing punches through a real endpoint at the same time)?'],
+['Employee license', 'employees table has no license_number column. Want the ALTER SQL to run on Azure MySQL, and should license/aadhaar/pan/bank edits persist once the edit path is extended?'],
+['Vehicle EMI', 'EMI schedules are fully built in the UI but have no columns — add a vehicle_emis child table (Golden-Rule style), or drop EMI from Phase-1 scope?'],
+['Numbering', 'Move SO/PO/RFQ/GRN/INV + payment receipt numbering to server minting (like STK-ADJ)? That also requires the prefix slots (F22) to exist first.'],
+['partial delivery', 'Build sales per-line delivered-quantity tracking (mirroring purchase GRN), or delete the unreachable partially_delivered status?'],
+['Evidence', 'Wire the evidence catalog into /api/sync + CRUD routes (tables and fetchers already exist), or keep the vault local-only and warn that uploads orphan on reload?'],
+['Transit simulator', 'Implement with real vehicle data, or remove the tab for Phase 1?'],
+['Backup', 'Should restore/reset target MySQL directly (real op on cloud), or be removed for Phase 1?'],
+];
+
+const SEVS = { P0: 'Critical — active data loss', P1: 'High — broken on MySQL / lost on refresh', P2: 'Medium — missing capability or misleading UX', P3: 'Low — hardening & polish' };
+const state = { sev: null, q: '', picked: new Set() };
+try { // localStorage is per-viewer convenience only
+  const saved = localStorage.getItem('cip-audit-pick');
+  if (saved) { const arr = JSON.parse(saved) || []; state.picked = new Set(arr.filter(k => ALL.some(x => x.id===k))); }
+} catch (e) {}
+
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function fmtRefs(refs){ return refs.map(r => { const c = r.split(':')[0]; return `<span><code>${esc(r)}</code></span>`; }).join(''); }
+function itemHTML(it){
+  const checked = state.picked.has(it.id) ? ' checked' : '';
+  return `<article class="item${matches(it)?'':' hidden'}" data-id="${it.id}">
+    <input type="checkbox" class="pick" aria-label="Select ${esc(it.title)}"${checked}>
+    <div class="meta-stack">
+      <span class="pill p-${it.sev.toLowerCase()}">${it.sev}</span>
+      <span class="eff">~${it.eff}</span>
+    </div>
+    <div class="body">
+      <h3>${esc(it.title)}<span class="area">· ${esc(it.area)}</span></h3>
+      <p class="impact">${esc(it.impact)}</p>
+      ${it.detail ? `<p class="impact" style="color:var(--fg)">${esc(it.detail)}</p>` : ''}
+      <div class="refs">${fmtRefs(it.refs)}</div>
+    </div>
+  </article>`;
+}
+function matches(it){
+  if (state.sev && it.sev !== state.sev) return false;
+  if (state.q) { const hay = (it.title + ' ' + it.impact + ' ' + it.refs.join(' ')).toLowerCase(); if (!hay.includes(state.q)) return false; }
+  return true;
+}
+function render(){
+  const f = document.getElementById('features'), p = document.getElementById('perf');
+  f.innerHTML = ALL.filter(x=>x.sec==='features').map(itemHTML).join('');
+  p.innerHTML = ALL.filter(x=>x.sec==='perf').map(itemHTML).join('');
+  document.getElementById('oqs').innerHTML = OQS.map(([t,b]) => `<li><strong>${esc(t)}</strong> — ${esc(b)}</li>`).join('');
+  // counts (whole dataset, unaffected by filters)
+  const c = {P0:0,P1:0,P2:0,P3:0};
+  ALL.forEach(x => c[x.sev]++);
+  document.getElementById('counts').innerHTML =
+    `<span class="count-chip crit"><b>${c.P0}</b> critical</span>
+     <span class="count-chip high"><b>${c.P1}</b> high</span>
+     <span class="count-chip med"><b>${c.P2}</b> medium</span>
+     <span class="count-chip low"><b>${c.P3}</b> low</span>
+     <span class="count-chip"><b>${ALL.length}</b> findings</span>`;
+  // filter chips
+  renderFilters();
+  updSel();
+}
+function renderFilters(){
+  document.getElementById('filters').innerHTML =
+    Object.entries(SEVS).map(([s,name]) => `<button class="fchip" aria-pressed="${state.sev===s}" data-sev="${s}" title="${esc(name)}">${s}<span class="n">·${ALL.filter(x=>x.sev===s).length}</span></button>`).join('')
+    + `<button class="fchip" aria-pressed="${state.sev===null}" data-sev="__all">All<span class="n">·${ALL.length}</span></button>`
+    + `<input type="search" class="search" id="searchbox" placeholder="Search titles, impact, file paths…" value="${esc(state.q)}" aria-label="Search findings">`;
+  document.getElementById('filters').addEventListener('click', e => {
+    const b = e.target.closest('.fchip'); if (!b) return;
+    state.sev = b.dataset.sev === '__all' ? null : b.dataset.sev;
+    renderFilters(); applyFilter();
+  });
+  document.getElementById('searchbox').addEventListener('input', e => {
+    state.q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll('.item').forEach(el => {
+      const it = ALL.find(x => x.id === el.dataset.id);
+      el.classList.toggle('hidden', !matches(it));
+    });
+  });
+}
+function applyFilter(){ document.querySelectorAll('.item').forEach(el => { const it = ALL.find(x => x.id === el.dataset.id); el.classList.toggle('hidden', !matches(it)); }); }
+function updSel(){
+  document.getElementById('selcount').textContent = state.picked.size;
+  document.getElementById('copybtn').disabled = state.picked.size === 0;
+  document.getElementById('selhint').textContent = state.picked.size ? 'check them off in priority order, then copy' : 'tick items to build the priority list';
+  try { localStorage.setItem('cip-audit-pick', JSON.stringify([...state.picked])); } catch (e) {}
+}
+document.addEventListener('change', e => {
+  if (!e.target.classList.contains('pick')) return;
+  const id = e.target.closest('.item').dataset.id;
+  if (e.target.checked) state.picked.add(id); else state.picked.delete(id);
+  updSel();
+});
+document.getElementById('copybtn').addEventListener('click', async () => {
+  const txt = [...state.picked].map(id => { const it = ALL.find(x => x.id === id);
+    return `${it.id} [${it.sev}, ~${it.eff}] ${it.title} — ${it.refs[0]}`; }).join('\n');
+  try { await navigator.clipboard.writeText(txt); }
+  catch (e) {
+    const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (e2) {}
+    ta.remove();
+  }
+  const btn = document.getElementById('copybtn'); btn.textContent = 'Copied ✓';
+  setTimeout(() => { btn.textContent = 'Copy priorities'; }, 1500);
+});
+render();
+</script>

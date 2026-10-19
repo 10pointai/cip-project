@@ -5,9 +5,10 @@ import { fetchSettingsDirect, updateSettingsDirect } from '../mysql/personnelSer
 
 export const settingsRouter = Router();
 
-settingsRouter.use(authenticateToken);
-
-// GET /api/settings
+// GET /api/settings — PUBLIC. The sign-in screen reads company branding
+// pre-auth (the app constructor fetches settings before login under
+// per-feature loading). This is the same exposure GET /api/sync's
+// unauthenticated tier already has (settings-only) — no new surface.
 settingsRouter.get('/', async (req: Request, res: Response) => {
   try {
     const settings = await fetchSettingsDirect();
@@ -16,6 +17,9 @@ settingsRouter.get('/', async (req: Request, res: Response) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
+// Everything below on this router is authenticated.
+settingsRouter.use(authenticateToken);
 
 // PUT /api/settings
 settingsRouter.put('/', requirePermission('manage_settings'), async (req: Request, res: Response) => {

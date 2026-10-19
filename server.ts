@@ -19,6 +19,7 @@ import { usersRouter } from './server/routes/users';
 import { documentsRouter } from './server/routes/documents';
 import { cloudRouter } from './server/routes/cloud';
 import { accountsRouter, transfersRouter, adjustmentsRouter } from './server/routes/accounts';
+import { countsRouter, legacyOrdersRouter } from './server/routes/overview';
 import { getConnectionStatus, isMysqlConfigured, testMysqlConnection } from './server/mysql/connection';
 import { runMysqlMigrations } from './server/mysql/migrations';
 import { getStorageStatus } from './server/services/storage';
@@ -103,10 +104,6 @@ app.get('/api/health', (req, res) => {
 //    only surface that exposes activation codes, since admins must share them.
 app.get('/api/sync', async (req, res) => {
   try {
-    if (req.query.fresh === 'true' || req.query.refresh === 'true') {
-      await serverDb.initFromMysql();
-    }
-    const fullSnapshot = serverDb.getFullSnapshot();
     const authHeader = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
     const bearer = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : null;
     const tokenUser = resolveTokenUser(bearer);
@@ -116,18 +113,29 @@ app.get('/api/sync', async (req, res) => {
         success: true,
         timestamp: new Date().toISOString(),
         data: {
-          settings: fullSnapshot.settings,
+          settings: serverDb.getSettings(),
           users: [] as unknown[],
         },
       });
     }
 
+    // ?fresh=true forces a full MySQL re-hydration — an authenticated-only
+    // affordance. A previous revision ran initFromMysql() BEFORE resolving the
+    // token, letting any unauthenticated caller trigger a full cloud-DB
+    // re-read on demand; it now happens only after the caller proves they hold
+    // a valid token.
+
+    if (req.query.fresh === 'true' || req.query.refresh === 'true') {
+      await serverDb.initFromMysql();
+    }
+
+    const refreshedSnapshot = serverDb.getFullSnapshot();
     res.json({
       success: true,
       timestamp: new Date().toISOString(),
       data: {
-        ...fullSnapshot,
-        users: fullSnapshot.users.map(({ passwordHash: _ph, activationCode: _ac, ...safeUser }) => safeUser),
+        ...refreshedSnapshot,
+        users: refreshedSnapshot.users.map(({ passwordHash: _ph, activationCode: _ac, ...safeUser }) => safeUser),
       },
     });
   } catch (error: any) {
@@ -156,6 +164,8 @@ app.use('/api/logistics', logisticsRouter);
 app.use('/api/employees', employeesRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/analytics', analyticsRouter);
+app.use('/api/counts', countsRouter);
+app.use('/api/orders', legacyOrdersRouter);
 app.use('/api/backup', backupRouter);
 app.use('/api/cloud', cloudRouter);
 

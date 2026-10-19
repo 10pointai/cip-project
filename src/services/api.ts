@@ -27,6 +27,8 @@ import {
   UserPermissions,
   UserStatus,
   AppDocument,
+  EvidenceFolder,
+  EvidenceFile,
 } from '../types';
 
 export interface HealthResponse {
@@ -288,6 +290,30 @@ class ApiClient {
 
   public async syncAll(fresh = false): Promise<{ success: boolean; data: SyncPayload }> {
     return this.request<{ success: boolean; data: SyncPayload }>(fresh ? '/sync?fresh=true' : '/sync');
+  }
+
+  // Sidebar-badge counts — one lightweight call instead of any collection fetch.
+  public async getCounts(): Promise<{ success: boolean; data: Record<string, number> }> {
+    return this.request<{ success: boolean; data: Record<string, number> }>('/counts');
+  }
+
+  // Retired legacy `orders` rows (read-only) — badges + Cash & Bank ledger
+  // augmentation under per-feature loading.
+  public async getOrders(): Promise<{ success: boolean; count: number; data: Order[] }> {
+    return this.request<{ success: boolean; count: number; data: Order[] }>('/orders');
+  }
+
+  // Evidence vault per-feature fetch (replaces the snapshot's evidence arrays).
+  public async getEvidence(): Promise<{
+    success: boolean;
+    count: number;
+    data: { evidenceFolders: EvidenceFolder[]; evidenceFiles: EvidenceFile[] };
+  }> {
+    return this.request<{
+      success: boolean;
+      count: number;
+      data: { evidenceFolders: EvidenceFolder[]; evidenceFiles: EvidenceFile[] };
+    }>('/documents/evidence');
   }
 
   // Settings
@@ -707,8 +733,13 @@ class ApiClient {
     });
   }
 
-  public async getAttendance(): Promise<{ success: boolean; data: EmployeeAttendance[] }> {
-    return this.request<{ success: boolean; data: EmployeeAttendance[] }>('/employees/attendance');
+  public async getAttendance(
+    params?: { date?: string; employeeId?: string; from?: string; to?: string }
+  ): Promise<{ success: boolean; data: EmployeeAttendance[] }> {
+    const qs = params
+      ? Object.entries(params).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`).join('&')
+      : '';
+    return this.request<{ success: boolean; data: EmployeeAttendance[] }>(`/employees/attendance${qs ? `?${qs}` : ''}`);
   }
 
   public async recordAttendance(attendance: Partial<EmployeeAttendance>): Promise<{ success: boolean; data: EmployeeAttendance }> {
@@ -932,6 +963,30 @@ class ApiClient {
     return this.request(`/documents/item/${itemId}/link`, {
       method: 'POST',
       body: JSON.stringify({ documentIds }),
+    });
+  }
+
+  public async getEmployeeDocuments(employeeId: string): Promise<{ success: boolean; count: number; data: AppDocument[] }> {
+    return this.request(`/documents/employee/${employeeId}`);
+  }
+
+  public async linkEmployeeDocuments(employeeId: string, documentIds: string[]): Promise<{ success: boolean; added: number }> {
+    return this.request(`/documents/employee/${employeeId}/link`, {
+      method: 'POST',
+      body: JSON.stringify({ documentIds }),
+    });
+  }
+
+  public async updateEmployeePayment(id: string, updates: Partial<EmployeePayment>): Promise<{ success: boolean; data: EmployeePayment }> {
+    return this.request<{ success: boolean; data: EmployeePayment }>(`/employees/payments/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  }
+
+  public async deleteEmployeePayment(id: string): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(`/employees/payments/${id}`, {
+      method: 'DELETE',
     });
   }
 

@@ -398,8 +398,9 @@ export function UserManagementView() {
     setIsEditModalOpen(true);
   };
 
-  // Filter users
-  const filteredUsers = users.filter((u) => {
+  // Filter users — 'deleted' status rows never display in the list at all
+  const visibleUsers = users.filter((u) => u.status !== 'deleted');
+  const filteredUsers = visibleUsers.filter((u) => {
     const matchesSearch =
       u.fullName.toLowerCase().includes(searchQuery.toLowerCase()) ||
       u.username.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -457,7 +458,7 @@ export function UserManagementView() {
             Active Accounts
           </p>
           <p className="text-2xl font-black text-[var(--color-on-surface)]">
-            {users.filter((u) => u.status === 'active').length}
+            {visibleUsers.filter((u) => u.status === 'active').length}
           </p>
           <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
             Can authenticate & sign in
@@ -469,7 +470,7 @@ export function UserManagementView() {
             Pending Setup
           </p>
           <p className="text-2xl font-black text-[var(--color-warning)]">
-            {users.filter((u) => u.status === 'pending_setup').length}
+            {visibleUsers.filter((u) => u.status === 'pending_setup').length}
           </p>
           <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
             Awaiting first-time password
@@ -481,7 +482,7 @@ export function UserManagementView() {
             Super Admins
           </p>
           <p className="text-2xl font-black text-[var(--color-primary)]">
-            {users.filter((u) => u.role === 'super_admin').length}
+            {visibleUsers.filter((u) => u.role === 'super_admin').length}
           </p>
           <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
             Unrestricted root privileges

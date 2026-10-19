@@ -226,6 +226,16 @@ export interface ItemDocumentLink {
   createdAt: string;
 }
 
+/** employees ↔ documents join row (FK-only) — table employee_documents */
+export interface EmployeeDocumentLink {
+  id: string;
+  /** FK employees.id */
+  employeeId: string;
+  /** FK documents.id */
+  documentId: string;
+  createdAt: string;
+}
+
 export interface ItemStockAdjustment {
   id: string;
   adjustmentNumber: string; // e.g. "STK-ADJ-26/001"
@@ -587,6 +597,14 @@ export interface Employee {
   licenseNo?: string; // primarily for drivers
   bankAccountNo?: string;
   bankIFSC?: string;
+  /** UPI VPA for instant payouts, e.g. name@upi */
+  upiAddress?: string;
+  /** Account holder name as printed on the bank/passbook — required by the bank for NEFT */
+  nameOnAccount?: string;
+  /** Employee's standard shift in-time (HH:mm) — the reference for late detection in attendance */
+  defaultInTime?: string;
+  /** Employee's standard shift out-time (HH:mm) */
+  defaultOutTime?: string;
   createdAt: string;
 }
 
@@ -603,7 +621,7 @@ export interface EmployeeAttendance {
   employeeId: string;
   employeeName: string;
   date: string; // YYYY-MM-DD
-  status: 'present' | 'absent' | 'half_day' | 'leave' | 'late' | 'holiday';
+  status: 'present' | 'absent' | 'half_day' | 'leave' | 'late' | 'early_exit' | 'holiday';
   checkInTime?: string; // HH:mm
   checkOutTime?: string; // HH:mm
   totalHoursWorked?: number; // e.g. 9.25
@@ -630,14 +648,21 @@ export interface EmployeeLeave {
 export interface EmployeePayment {
   id: string;
   employeeId: string;
-  employeeName: string;
+  /** FK employees.id only (Golden Rule §2) — the name is resolved from the
+   *  employees master via JOIN/read-time hydration, never stored on the row */
+  employeeName?: string;
   date: string; // YYYY-MM-DD
   type: 'salary' | 'advance' | 'bonus' | 'reimbursement';
   amount: number;
   paymentMode: 'bank_transfer' | 'cash' | 'upi' | 'cheque';
+  /** FK cash_bank_accounts.id — the account the payout leaves (decides the mode: bank → transfer, cash → cash) */
+  accountId?: string;
   referenceNo?: string;
   notes?: string;
   monthYear?: string; // e.g. "August 2026"
+  /** Hydrated read-time display field (never persisted on the row) */
+  accountName?: string;
+  createdAt?: string;
 }
 
 export type EvidenceEntityType = 'party' | 'vehicle' | 'employee' | 'production' | 'general';
@@ -682,7 +707,9 @@ export interface EvidenceFile {
 
 export type UserRole = 'super_admin' | 'admin' | 'manager' | 'operator';
 
-export type UserStatus = 'pending_setup' | 'active' | 'suspended';
+/** 'deleted' = legacy tombstone rows on disk (never shown in lists, never
+ *  sign-in-able — legacy delete flows wrote the status instead of removing) */
+export type UserStatus = 'pending_setup' | 'active' | 'suspended' | 'deleted';
 
 export interface UserPermissions {
   view_dashboard: boolean;

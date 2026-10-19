@@ -3,6 +3,7 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   TrendingUp,
+  TrendingDown,
   Users,
   PlusCircle,
   FileText,
@@ -128,114 +129,71 @@ export function DashboardView({
   return (
     <div className="space-y-6">
       {/* Top Welcome & Operations Overview Banner */}
-      <div className="bg-[var(--color-primary)] rounded-[28px] p-6 sm:p-8 text-[var(--color-on-primary)] shadow-sm relative overflow-hidden border border-[var(--color-outline-variant)]">
-        {/* Subtle decorative glow */}
-        <div className="absolute right-0 top-0 w-96 h-96 bg-[var(--color-on-primary)]/10 rounded-full blur-3xl pointer-events-none"></div>
-
-        <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-          <div className="space-y-2">
-            <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--color-on-primary)]">
-              {settings.companyName}
-            </h1>
-          </div>
-
-          {/* Quick Action FABs */}
-          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-            {canManageParties && (
-              <button
-                onClick={onOpenAddParty}
-                className="flex items-center gap-2 px-4 py-2.5 bg-[var(--color-surface-container-lowest)] text-[var(--color-primary)] hover:bg-[var(--color-surface-container)] font-semibold text-xs rounded-full shadow-md transition-all hover:scale-[1.02] active:scale-[0.98]"
-              >
-                <PlusCircle className="w-4 h-4" />
-                Add Party
-              </button>
-            )}
-            {canRecordPayments && (
-              <>
-                <button
-                  onClick={() => onOpenPaymentModal('payment_in')}
-                  className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--color-success)] hover:opacity-90 text-[var(--color-on-success)] font-semibold text-xs rounded-full shadow-md transition-all hover:scale-[1.02] active:scale-[0.98]"
-                >
-                  <ArrowDownLeft className="w-4 h-4" />
-                  Record Receipt (In)
-                </button>
-                <button
-                  onClick={() => onOpenPaymentModal('payment_out')}
-                  className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--color-error)] hover:opacity-90 text-[var(--color-on-error)] font-semibold text-xs rounded-full shadow-md transition-all hover:scale-[1.02] active:scale-[0.98]"
-                >
-                  <ArrowUpRight className="w-4 h-4" />
-                  Record Payment (Out)
-                </button>
-              </>
-            )}
-            {canManageParties && (
-              <button
-                onClick={onOpenVoucherModal}
-                className="flex items-center gap-1.5 px-4 py-2.5 bg-white/15 hover:bg-white/25 text-white font-semibold text-xs rounded-full backdrop-blur-sm transition-colors border border-white/20"
-              >
-                <FileText className="w-4 h-4" />
-                New Voucher
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
+      
 
       {/* Material 3 Color-Blocked Metric Cards */}
       {canViewFinancials ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Receivables - Soft Blue Container */}
-          <div className="p-5 bg-[var(--color-primary-container)] rounded-[24px] border border-[var(--color-primary)]/20 text-[var(--color-on-primary-container)] shadow-2xs hover:shadow-md transition-all space-y-2 overflow-hidden">
+          {/* Receivables - Success (green) Container */}
+          <div className="p-5 bg-[var(--color-success-container)] rounded-[24px] border border-[var(--color-success)]/20 text-[var(--color-on-success-container)] shadow-2xs hover:shadow-md transition-all space-y-2 overflow-hidden">
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold uppercase tracking-wider opacity-85">
                 Total Client Receivables
               </span>
-              <div className="w-9 h-9 rounded-2xl bg-[var(--color-primary)] text-[var(--color-on-primary)] flex items-center justify-center shadow-xs">
+              <div className="w-9 h-9 rounded-2xl bg-[var(--color-success)] text-[var(--color-on-success)] flex items-center justify-center shadow-xs">
                 <ArrowDownLeft className="w-4 h-4" />
               </div>
             </div>
             <p className="text-2xl sm:text-3xl font-extrabold tracking-tight">
               {formatCurrency(receivables, settings.currency.symbol)}
             </p>
-            <div className="flex items-center justify-between text-xs opacity-90 pt-1.5 border-t border-[var(--color-primary)]/15">
-              <span>{totalCustomers} Customer Accounts</span>
+            <div className="flex items-center justify-between text-xs opacity-90 pt-1.5 border-t border-[var(--color-success)]/15">
               <span className="font-bold">Dues to Collect</span>
             </div>
           </div>
 
-          {/* Payables - Soft Secondary Container */}
-          <div className="p-5 bg-[var(--color-secondary-container)] rounded-[24px] border border-[var(--color-secondary)]/20 text-[var(--color-on-secondary-container)] shadow-2xs hover:shadow-md transition-all space-y-2 overflow-hidden">
+          {/* Payables - Error (red) Container */}
+          <div className="p-5 bg-[var(--color-error-container)] rounded-[24px] border border-[var(--color-error)]/20 text-[var(--color-on-error-container)] shadow-2xs hover:shadow-md transition-all space-y-2 overflow-hidden">
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold uppercase tracking-wider opacity-85">
                 Total Supplier Payables
               </span>
-              <div className="w-9 h-9 rounded-2xl bg-[var(--color-secondary)] text-[var(--color-on-secondary)] flex items-center justify-center shadow-xs">
+              <div className="w-9 h-9 rounded-2xl bg-[var(--color-error)] text-[var(--color-on-error)] flex items-center justify-center shadow-xs">
                 <ArrowUpRight className="w-4 h-4" />
               </div>
             </div>
             <p className="text-2xl sm:text-3xl font-extrabold tracking-tight">
               {formatCurrency(payables, settings.currency.symbol)}
             </p>
-            <div className="flex items-center justify-between text-xs opacity-90 pt-1.5 border-t border-[var(--color-secondary)]/15">
-              <span>{totalVendors} Supplier Accounts</span>
+            <div className="flex items-center justify-between text-xs opacity-90 pt-1.5 border-t border-[var(--color-error)]/15">
               <span className="font-bold">Dues to Pay</span>
             </div>
           </div>
 
-          {/* Net Working Position - Soft Success Container */}
-          <div className="p-5 bg-[var(--color-success-container)] rounded-[24px] border border-[var(--color-success)]/20 text-[var(--color-on-success-container)] shadow-2xs hover:shadow-md transition-all space-y-2 overflow-hidden">
+          {/* Net Working Position — tone follows the value: green surplus, red deficit */}
+          <div className={`p-5 rounded-[24px] border shadow-2xs hover:shadow-md transition-all space-y-2 overflow-hidden ${
+            netPosition >= 0
+              ? 'bg-[var(--color-success-container)] border-[var(--color-success)]/20 text-[var(--color-on-success-container)]'
+              : 'bg-[var(--color-error-container)] border-[var(--color-error)]/20 text-[var(--color-on-error-container)]'
+          }`}>
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold uppercase tracking-wider opacity-85">
                 Net Working Position
               </span>
-              <div className="w-9 h-9 rounded-2xl bg-[var(--color-success)] text-[var(--color-on-success)] flex items-center justify-center shadow-xs">
-                <TrendingUp className="w-4 h-4" />
+              <div className={`w-9 h-9 rounded-2xl flex items-center justify-center shadow-xs ${
+                netPosition >= 0
+                  ? 'bg-[var(--color-success)] text-[var(--color-on-success)]'
+                  : 'bg-[var(--color-error)] text-[var(--color-on-error)]'
+              }`}>
+                {netPosition >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
               </div>
             </div>
             <p className="text-2xl sm:text-3xl font-extrabold tracking-tight">
               {formatCurrency(netPosition, settings.currency.symbol)}
             </p>
-            <div className="flex items-center justify-between text-xs opacity-90 pt-1.5 border-t border-[var(--color-success)]/15">
+            <div className={`flex items-center justify-between text-xs opacity-90 pt-1.5 border-t ${
+              netPosition >= 0 ? 'border-[var(--color-success)]/15' : 'border-[var(--color-error)]/15'
+            }`}>
               <span>Receivables vs Payables</span>
               <span className="font-bold">{netPosition >= 0 ? '+ Surplus' : '- Deficit'}</span>
             </div>
@@ -253,8 +211,7 @@ export function DashboardView({
             </div>
             <p className="text-2xl sm:text-3xl font-extrabold tracking-tight">{parties.length} Parties</p>
             <div className="flex items-center justify-between text-xs text-[var(--color-on-surface-variant)] pt-1.5 border-t border-[var(--color-outline-variant)]">
-              <span>{totalCustomers} Clients</span>
-              <span>{totalVendors} Suppliers • {totalTransporters} Haulers</span>
+              
             </div>
           </div>
         </div>
@@ -271,133 +228,13 @@ export function DashboardView({
             </div>
             <p className="text-2xl sm:text-3xl font-extrabold tracking-tight">{parties.length} Parties</p>
             <div className="flex items-center justify-between text-xs text-[var(--color-on-surface-variant)] pt-1.5 border-t border-[var(--color-outline-variant)]">
-              <span>{totalCustomers} Clients</span>
-              <span>{totalVendors} Suppliers • {totalTransporters} Haulers</span>
+             
             </div>
           </div>
         </div>
       )}
 
-      {/* Visual Analytics Charts Section */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Cash Flow / Sales vs Procurement Bar Chart (2 columns) */}
-        <div className="lg:col-span-2 bg-[var(--color-surface-container-lowest)] p-6 rounded-[28px] border border-[var(--color-outline-variant)] shadow-2xs space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div>
-              <h2 className="text-base font-bold text-[var(--color-on-surface)]">Commercial Billing & Procurement Trend</h2>
-              <p className="text-xs text-[var(--color-on-surface-variant)]">Monthly asphalt mix dispatches vs raw material intake (INR ₹)</p>
-            </div>
-            <div className="flex items-center gap-4 text-xs font-semibold">
-              <span className="flex items-center gap-1.5 text-[var(--color-primary)]">
-                <span className="w-3 h-3 rounded-full bg-[var(--color-primary)] inline-block"></span> Material Sales
-              </span>
-              <span className="flex items-center gap-1.5 text-[var(--color-secondary)]">
-                <span className="w-3 h-3 rounded-full bg-[var(--color-secondary)] inline-block"></span> Raw Materials (Procurement)
-              </span>
-            </div>
-          </div>
-
-          {monthlyData.length === 0 ? (
-            <div className="h-72 w-full flex flex-col items-center justify-center space-y-2 border border-dashed border-[var(--color-outline-variant)] rounded-2xl p-6 text-center">
-              <TrendingUp className="w-8 h-8 text-[var(--color-outline)]" />
-              <p className="text-xs font-bold text-[var(--color-on-surface)]">No Commercial Transactions Logged</p>
-              <p className="text-[11px] text-[var(--color-on-surface-variant)] max-w-sm">
-                As you create sales invoices and purchase bills in the cloud database, monthly billing and procurement trends will render here in real time.
-              </p>
-            </div>
-          ) : (
-            <div className="h-72 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={monthlyData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--color-outline-variant)" opacity={0.5} />
-                  <XAxis dataKey="month" stroke="var(--color-outline)" fontSize={11} tickLine={false} />
-                  <YAxis
-                    stroke="var(--color-outline)"
-                    fontSize={11}
-                    tickLine={false}
-                    tickFormatter={(val) => formatCompactCurrency(val, '₹')}
-                  />
-                  <Tooltip
-                    formatter={(val: any) => [formatCurrency(val, '₹'), '']}
-                    contentStyle={{
-                      backgroundColor: 'var(--color-inverse-surface)',
-                      borderRadius: '16px',
-                      color: 'var(--color-inverse-on-surface)',
-                      border: '1px solid var(--color-outline-variant)',
-                      fontSize: '12px',
-                      boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)',
-                    }}
-                  />
-                  <Bar dataKey="sales" fill="var(--color-primary)" radius={[6, 6, 0, 0]} name="Material Sales" />
-                  <Bar dataKey="procurement" fill="var(--color-secondary)" radius={[6, 6, 0, 0]} name="Raw Material Procurement" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </div>
-
-        {/* Material Category Distribution Donut Chart (1 column) */}
-        <div className="bg-[var(--color-surface-container-lowest)] p-6 rounded-[28px] border border-[var(--color-outline-variant)] shadow-2xs space-y-4 flex flex-col justify-between">
-          <div>
-            <h2 className="text-base font-bold text-[var(--color-on-surface)]">Procurement by Material</h2>
-            <p className="text-xs text-[var(--color-on-surface-variant)]">Distribution of bitumen, aggregates, fuel & logistics</p>
-          </div>
-
-          {categoryData.length === 0 ? (
-            <div className="h-52 w-full flex flex-col items-center justify-center space-y-2 border border-dashed border-[var(--color-outline-variant)] rounded-2xl p-4 text-center">
-              <Package className="w-8 h-8 text-[var(--color-outline)]" />
-              <p className="text-xs font-bold text-[var(--color-on-surface)]">No Procurement Logged</p>
-              <p className="text-[11px] text-[var(--color-on-surface-variant)] max-w-xs">
-                Material expense distribution will appear as supplier purchase vouchers are entered.
-              </p>
-            </div>
-          ) : (
-            <>
-              <div className="h-52 w-full flex items-center justify-center">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={categoryData}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={50}
-                      outerRadius={78}
-                      paddingAngle={3}
-                      dataKey="value"
-                    >
-                      {categoryData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={entry.color} />
-                      ))}
-                    </Pie>
-                    <Tooltip
-                      formatter={(val: any) => [formatCurrency(val, '₹'), '']}
-                      contentStyle={{
-                        backgroundColor: 'var(--color-inverse-surface)',
-                        borderRadius: '16px',
-                        color: 'var(--color-inverse-on-surface)',
-                        border: '1px solid var(--color-outline-variant)',
-                        fontSize: '12px',
-                      }}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-
-              <div className="space-y-1.5 pt-2 border-t border-[var(--color-outline-variant)] text-xs">
-                {categoryData.map((item) => (
-                  <div key={item.name} className="flex items-center justify-between">
-                    <span className="flex items-center gap-1.5 text-[var(--color-on-surface-variant)] truncate max-w-[170px]">
-                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: item.color }}></span>
-                      {item.name}
-                    </span>
-                    <span className="font-bold text-[var(--color-on-surface)]">{formatCompactCurrency(item.value, '₹')}</span>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      </div>
+      
 
       {/* Actionable Tables: Top Receivables & Payables */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

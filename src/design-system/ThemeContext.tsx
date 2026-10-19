@@ -26,9 +26,8 @@ export const M3ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ child
     try {
       const stored = localStorage.getItem(THEME_MODE_STORAGE_KEY);
       if (stored === 'light' || stored === 'dark') return stored;
-      if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-        return 'dark';
-      }
+      // DEFAULT THEME: light — an explicit system-dark preference no longer
+      // auto-switches to dark; the user opts into dark via the toggle.
     } catch {
       // fallback
     }

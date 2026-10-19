@@ -66,48 +66,32 @@ export function calculateWorkingHours(
 }
 
 /**
- * Derives attendance status automatically based on in/out times and shift configuration
+ * Derives the daily status from the employer-marked In/Out times against the
+ * EMPLOYEE'S OWN saved shift times (exact comparison, no grace minutes):
+ *   after his In Time            → 'late'
+ *   before his Out Time          → 'early_exit'
+ *   in on time (+ out on/after)  → 'present'
+ *   no In Time marked at all     → caller decides (UI defaults to 'present'
+ *                                  until the employer marks otherwise)
  */
-export function deriveAttendanceStatus(
+export function deriveInOutStatus(
   checkInTime?: string,
   checkOutTime?: string,
-  standardShiftStart: string = '09:00',
-  graceMinutes: number = 15,
-  standardShiftHours: number = 8
-): 'present' | 'absent' | 'half_day' | 'late' {
-  if (!checkInTime && !checkOutTime) {
-    return 'absent';
-  }
-
-  if (checkInTime && !checkOutTime) {
-    // Currently clocked in
-    const inMin = timeStringToMinutes(checkInTime);
-    const shiftStartMin = timeStringToMinutes(standardShiftStart);
-    if (inMin !== null && shiftStartMin !== null && inMin > shiftStartMin + graceMinutes) {
-      return 'late';
-    }
-    return 'present';
-  }
-
-  const { totalDecimalHours } = calculateWorkingHours(checkInTime, checkOutTime);
-
-  // If worked less than half a shift (e.g. < 4.0 hours)
-  if (totalDecimalHours < 4.0) {
-    return 'half_day';
-  }
-
-  // If worked between 4.0 and 6.5 hours
-  if (totalDecimalHours < 6.5) {
-    return 'half_day';
-  }
-
-  // Check if late on arrival
+  defaultInTime?: string,
+  defaultOutTime?: string
+): 'present' | 'late' | 'early_exit' {
   const inMin = timeStringToMinutes(checkInTime);
-  const shiftStartMin = timeStringToMinutes(standardShiftStart);
-  if (inMin !== null && shiftStartMin !== null && inMin > shiftStartMin + graceMinutes) {
+  const outMin = timeStringToMinutes(checkOutTime);
+  const shiftInMin = timeStringToMinutes(defaultInTime);
+  const shiftOutMin = timeStringToMinutes(defaultOutTime);
+
+  if (inMin !== null && shiftInMin !== null && inMin > shiftInMin) {
     return 'late';
   }
-
+  if (outMin !== null && shiftOutMin !== null && outMin < shiftOutMin) {
+    return 'early_exit';
+  }
+  // No reference shift time on the employee record — nothing is a violation
   return 'present';
 }
 

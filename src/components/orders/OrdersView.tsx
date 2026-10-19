@@ -1483,6 +1483,7 @@ export function OrdersView({
                       setPreviewStage('proforma_invoice');
                       setIsPreviewOpen(true);
                     }}
+                    disabled
                     className="w-full flex items-center gap-2 px-3 py-2 text-left text-[11px] font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50"
                   >
                     <Receipt className="w-3.5 h-3.5 text-[var(--color-primary)]" />
