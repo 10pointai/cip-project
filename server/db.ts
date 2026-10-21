@@ -22,6 +22,7 @@ import {
   EmployeeAttendance,
   EmployeeLeave,
   EmployeePayment,
+  EmployeeLedgerTransaction,
   ItemStockAdjustment,
   StockMovementLog,
   OrderStatus,
@@ -79,6 +80,7 @@ import {
   liveSyncAttendance,
   liveSyncLeave,
   liveSyncEmployeePayment,
+  liveSyncEmployeeLedgerTransaction,
   liveSyncSettings,
   liveSyncUser,
   liveSyncCategory,
@@ -155,6 +157,8 @@ export interface DatabaseSchema {
   attendance: EmployeeAttendance[];
   leaves: EmployeeLeave[];
   employeePayments: EmployeePayment[];
+  /** employee ledger rows (virtual accounts with a running balance) */
+  employeeLedgerTransactions: EmployeeLedgerTransaction[];
   accounts: CashBankAccount[];
   transfers: InternalTransfer[];
   adjustments: AccountAdjustment[];
@@ -227,6 +231,7 @@ class ServerLocalDatabase {
       attendance: JSON.parse(JSON.stringify(SEED_ATTENDANCE)),
       leaves: JSON.parse(JSON.stringify(SEED_LEAVES)),
       employeePayments: JSON.parse(JSON.stringify(SEED_PAYMENTS)),
+      employeeLedgerTransactions: [],
       accounts: JSON.parse(JSON.stringify(SEED_ACCOUNTS)),
       transfers: JSON.parse(JSON.stringify(SEED_TRANSFERS)),
       adjustments: JSON.parse(JSON.stringify(SEED_ADJUSTMENTS)),
@@ -396,6 +401,8 @@ class ServerLocalDatabase {
       // Transfer/adjustment display names are live views from the account master
       transfers: (this.data.transfers || []).map((t) => this.hydrateTransfer(t)),
       adjustments: (this.data.adjustments || []).map((a) => this.hydrateAdjustment(a)),
+      // Employee ledger names are live views from the employees master
+      employeeLedgerTransactions: (this.data.employeeLedgerTransactions || []).map((t) => this.hydrateEmployeeLedgerTransaction(t)),
       transactions: (this.data.transactions || []).map((t) => this.hydrateTransactionParty(t)),
     };
     return snapshot;
@@ -427,6 +434,7 @@ class ServerLocalDatabase {
         attendance: this.data.attendance.length,
         leaves: this.data.leaves.length,
         employeePayments: this.data.employeePayments.length,
+        employeeLedgerTransactions: (this.data.employeeLedgerTransactions || []).length,
         auditLogs: this.data.auditLogs.length,
       },
     };
@@ -3278,6 +3286,253 @@ class ServerLocalDatabase {
     return this.hydrateEmployeePayment(updated);
   }
 
+  // --- EMPLOYEE LEDGER (virtual accounts with a running balance) ---
+
+  public getEmployeeLedgerTransactions(): EmployeeLedgerTransaction[] {
+    return (this.data.employeeLedgerTransactions || []).map((t) => this.hydrateEmployeeLedgerTransaction(t));
+  }
+
+  /** FK-only persistence: employeeName/accountName resolve from the masters at read time. */
+  private hydrateEmployeeLedgerTransaction(t: EmployeeLedgerTransaction): EmployeeLedgerTransaction {
+    return {
+      ...t,
+      employeeName: this.data.employees?.find((e) => e.id === t.employeeId)?.name,
+      accountName: t.accountId ? this.getAccountById(t.accountId)?.name : undefined,
+    };
+  }
+
+  private getEmployeeLedgerRow(id: string): EmployeeLedgerTransaction | undefined {
+    return (this.data.employeeLedgerTransactions || []).find((t) => t.id === id);
+  }
+
+  public createEmployeeLedgerTransaction(data: Partial<EmployeeLedgerTransaction>): EmployeeLedgerTransaction {
+    if (!this.data.employeeLedgerTransactions) this.data.employeeLedgerTransactions = [];
+    // A bank account on the row is meaningful for received (add_balance pays
+    // INTO the account), reduce (pays OUT) and direct (either direction) —
+    // plain "Add Balance" rows from the adjust modal stay credit-only.
+    const accountId =
+      data.type === 'add_balance' || data.type === 'reduce_balance' || data.type === 'direct_transaction'
+        ? data.accountId
+        : undefined;
+    const txn: EmployeeLedgerTransaction = {
+      id: data.id || `elt-${this.nextLedgerMs()}`,
+      employeeId: String(data.employeeId || ''),
+      date: String(data.date || new Date().toISOString().split('T')[0]),
+      type: data.type as EmployeeLedgerTransaction['type'],
+      amount: Number(data.amount) || 0,
+      reason: String(data.reason || '').trim(),
+      accountId,
+      // The record surface (adjust/paid/received) drives the ledger tag UI
+      intent: data.intent || undefined,
+      // 'received' rows book money into the account (direction = money_in)
+      direction: data.direction === 'money_in' || data.direction === 'money_out' ? data.direction : undefined,
+      source: data.source || 'manual',
+      createdAt: data.createdAt || new Date(this.nextLedgerMs()).toISOString(),
+    };
+    if (!txn.employeeId || !txn.reason) {
+      throw new Error('Employee ledger transaction needs an employee and a reason.');
+    }
+    if (txn.amount <= 0) {
+      throw new Error('Employee ledger transaction amount must be positive.');
+    }
+    this.data.employeeLedgerTransactions.unshift(txn);
+    this.save();
+    liveSyncEmployeeLedgerTransaction(txn);
+    // Only bank-linked rows move money on the Cash/Bank side (reduce pays OUT;
+    // a direct transaction moves whichever direction the employer recorded)
+    if (txn.accountId) this.recalculateAccountBalance(txn.accountId);
+    this.logAudit('CREATE', 'EMPLOYEE_LEDGER', txn.id, `${txn.type} ${txn.amount} for employee ${txn.employeeId}: ${txn.reason}`);
+    return this.hydrateEmployeeLedgerTransaction(txn);
+  }
+
+  /**
+   * Edits a MANUAL ledger row. Wage accruals are engine-owned (locked) — the
+   * employer re-states reality through attendance/status edits instead.
+   */
+  public updateEmployeeLedgerTransaction(id: string, updates: Partial<EmployeeLedgerTransaction>): EmployeeLedgerTransaction {
+    const txn = this.getEmployeeLedgerRow(id);
+    if (!txn) throw new Error(`Employee ledger transaction ${id} not found.`);
+    if (txn.source === 'accrual_engine') throw new Error('Auto wage accruals are locked; attendance controls their amount.');
+    const previous = txn;
+    const updated: EmployeeLedgerTransaction = {
+      ...txn,
+      ...updates,
+      id: txn.id,
+      createdAt: txn.createdAt,
+      source: 'manual',
+    };
+    this.data.employeeLedgerTransactions = this.data.employeeLedgerTransactions.map((t) => (t.id === id ? updated : t));
+    this.save();
+    liveSyncEmployeeLedgerTransaction(updated);
+    new Set([previous.accountId, updated.accountId].filter(Boolean) as string[]).forEach((aid) =>
+      this.recalculateAccountBalance(aid)
+    );
+    this.logAudit('UPDATE', 'EMPLOYEE_LEDGER', id, `Edited ${updated.type} (${updated.amount}) for employee ${updated.employeeId}.`);
+    return this.hydrateEmployeeLedgerTransaction(updated);
+  }
+
+  /** Deletes a MANUAL ledger row and reverses its bank movement (if any). */
+  public deleteEmployeeLedgerTransaction(id: string): boolean {
+    const txn = this.getEmployeeLedgerRow(id);
+    if (!txn) return false;
+    if (txn.source === 'accrual_engine') throw new Error('Auto wage accruals are locked; attendance controls their amount.');
+    this.data.employeeLedgerTransactions = (this.data.employeeLedgerTransactions || []).filter((t) => t.id !== id);
+    this.save();
+    liveSyncEmployeeLedgerTransaction(txn, true);
+    if (txn.accountId) this.recalculateAccountBalance(txn.accountId);
+    this.logAudit('DELETE', 'EMPLOYEE_LEDGER', txn.id, `Deleted ${txn.type} ${txn.amount} for employee ${txn.employeeId}.`);
+    return true;
+  }
+
+  /**
+   * Wage accrual engine — idempotent (deterministic row ids, re-run safe):
+   *   DAILY wagers:  for every day with a marked attendance record,
+   *     present / late / early_exit → full salaryBase; half_day → half;
+   *     absent → no row (no pay).
+   *   MONTHLY wagers: on/after the 1st, one row per employee per PREVIOUS
+   *     month: full salaryBase MINUS per-day deductions for absent (full
+   *     day) and half_day (half day); every other day — incl. holiday — pays.
+   * Attendance edits flow through: re-running updates the locked rows' amounts.
+   * Reads where ledger balance matters (GET /employees/ledger) call this first.
+   */
+  public async ensureWageAccruals(): Promise<void> {
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+    const employees = this.data.employees || [];
+    const attendance = this.data.attendance || [];
+
+    for (const emp of employees) {
+      const rate = Number(emp.salaryBase) || 0;
+      if (rate <= 0) continue;
+
+      if (emp.salaryType === 'daily') {
+        const dailyRate = rate;
+        for (const att of attendance) {
+          if (att.employeeId !== emp.id) continue;
+          if (att.date > todayStr) continue;
+          const fullDay = att.status === 'present' || att.status === 'late' || att.status === 'early_exit' || att.status === 'holiday';
+          const halfDay = att.status === 'half_day';
+          const amount = fullDay ? dailyRate : halfDay ? Number((dailyRate / 2).toFixed(2)) : 0;
+          const exist = (this.data.employeeLedgerTransactions || []).find(
+            (t) => t.type === 'wage_accrual' && t.employeeId === emp.id && t.date === att.date
+          );
+          if (amount <= 0) {
+            if (exist) {
+              // Status changed to no-pay — drop the stale full/half row
+              await this.removeAccrualRow(exist.id);
+            }
+            continue;
+          }
+          const accrual: EmployeeLedgerTransaction = {
+            id: `wag-${emp.id}-${att.date}`,
+            employeeId: emp.id,
+            date: att.date,
+            type: 'wage_accrual',
+            amount,
+            reason: `Daily wage — ${att.status.replace('_', ' ')}`,
+            source: 'accrual_engine',
+            createdAt: exist?.createdAt || new Date(this.nextLedgerMs()).toISOString(),
+          };
+          await this.upsertAccrualRow(accrual);
+        }
+      } else {
+        // Monthly — CRON-STYLE, strictly on the 1st of the month only: the
+        // engine does NOT post on any other day, even if the ledger is read.
+        // The row (dated this month's 1st) accrues the PREVIOUS month's
+        // salary: full salaryBase minus per-day deductions for absents and
+        // half-days; months before the employee's joining never accrue, and
+        // a mid-month joiner is prorated from his joining date.
+        const firstOfThisMonth = `${todayStr.substring(0, 7)}-01`;
+
+        // CLEANUP (safe on any day): withdraw any monthly accrual dated the
+        // 1st of a month BEFORE the employee joined — salary for a month he
+        // was not yet employed cannot exist (e.g. an employee added on the
+        // 20th must never carry the 1st's accrual for the previous month).
+        const preJoiningRows = (this.data.employeeLedgerTransactions || []).filter(
+          (t) => t.type === 'wage_accrual' && t.employeeId === emp.id && emp.joiningDate > t.date
+        );
+        for (const bad of preJoiningRows) {
+          await this.removeAccrualRow(bad.id);
+        }
+
+        // Strict gate: today must BE the 1st
+        if (todayStr !== firstOfThisMonth) continue;
+
+        const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        // local-time month key — toISOString would shift the month back under
+        // the IST offset (constructors are local, serialization is UTC)
+        const prevMonth = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`;
+        const daysInPrevMonth = new Date(prev.getFullYear(), prev.getMonth() + 1, 0).getDate();
+        const prevMonthEnd = `${prevMonth}-${String(daysInPrevMonth).padStart(2, '0')}`;
+        // Not employed for ANY of the previous month — nothing to accrue
+        if (emp.joiningDate > prevMonthEnd) continue;
+        const accrualDate = firstOfThisMonth;
+        const atts = attendance.filter((a) => a.employeeId === emp.id && a.date.startsWith(prevMonth));
+        const absents = atts.filter((a) => a.status === 'absent').length;
+        const halves = atts.filter((a) => a.status === 'half_day').length;
+        const perDay = rate / daysInPrevMonth;
+        // A mid-month joiner earns only from his joining date (unmarked days
+        // before joining neither exist in attendance nor count as paid)
+        const joinedThisMonth = emp.joiningDate >= `${prevMonth}-01`;
+        const joinedDay = joinedThisMonth ? parseInt(emp.joiningDate.substring(8), 10) : 1;
+        const earnedDays = daysInPrevMonth - joinedDay + 1;
+        let amount = joinedThisMonth ? perDay * earnedDays : rate;
+        amount -= absents * perDay + halves * (perDay / 2);
+        amount = Math.max(0, Number(amount.toFixed(2)));
+        const exist = (this.data.employeeLedgerTransactions || []).find(
+          (t) => t.type === 'wage_accrual' && t.employeeId === emp.id && t.date === accrualDate
+        );
+        if (exist && amount <= 0) {
+          await this.removeAccrualRow(exist.id);
+          continue;
+        }
+        if (amount <= 0) continue;
+        const monthName = prev.toLocaleString('en-IN', { month: 'long' });
+        const deductionNote = absents || halves ? ` (${absents} absent, ${halves} half-day deducted)` : '';
+        const prorateNote = joinedThisMonth ? `, prorated from ${emp.joiningDate}` : '';
+        const accrual: EmployeeLedgerTransaction = {
+          id: `wag-${emp.id}-${prevMonth}`,
+          employeeId: emp.id,
+          date: accrualDate,
+          type: 'wage_accrual',
+          amount,
+          reason: `Monthly salary accrual — ${monthName} ${prev.getFullYear()}${deductionNote}${prorateNote}`,
+          source: 'accrual_engine',
+          createdAt: exist?.createdAt || new Date(this.nextLedgerMs()).toISOString(),
+        };
+        await this.upsertAccrualRow(accrual);
+      }
+    }
+  }
+
+  /** Inserts/refreshes a locked accrual row (amount corrections from attendance edits). */
+  private async upsertAccrualRow(accrual: EmployeeLedgerTransaction) {
+    const exist = (this.data.employeeLedgerTransactions || []).find((t) => t.id === accrual.id);
+    if (exist) {
+      if (Math.abs(exist.amount - accrual.amount) >= 0.01 || exist.reason !== accrual.reason) {
+        exist.amount = accrual.amount;
+        exist.reason = accrual.reason;
+        this.save();
+        liveSyncEmployeeLedgerTransaction(exist);
+        this.logAudit('UPDATE', 'EMPLOYEE_LEDGER', exist.id, `Wage accrual re-synced to ${exist.amount} for employee ${exist.employeeId}.`);
+      }
+      return;
+    }
+    this.data.employeeLedgerTransactions.unshift(accrual);
+    this.save();
+    liveSyncEmployeeLedgerTransaction(accrual);
+    this.logAudit('CREATE', 'EMPLOYEE_LEDGER', accrual.id, `Auto wage accrual ${accrual.amount} for employee ${accrual.employeeId}: ${accrual.reason}`);
+  }
+
+  private async removeAccrualRow(id: string) {
+    const row = this.getEmployeeLedgerRow(id);
+    if (!row) return;
+    this.data.employeeLedgerTransactions = (this.data.employeeLedgerTransactions || []).filter((t) => t.id !== id);
+    this.save();
+    liveSyncEmployeeLedgerTransaction(row, true);
+    this.logAudit('DELETE', 'EMPLOYEE_LEDGER', id, `Wage accrual withdrawn (attendance now no-pay) for employee ${row.employeeId}.`);
+  }
+
   // --- ANALYTICS SUMMARY ---
   public getAnalytics() {
     const totalReceivables = this.data.parties
@@ -3961,6 +4216,22 @@ class ServerLocalDatabase {
     const payouts = (this.data.employeePayments || []).filter((p) => p.accountId === accountId);
     for (const pay of payouts) {
       balance -= Number(pay.amount) || 0;
+    }
+
+    // 5. Employee ledger rows — reduce_balance pays OUT; add_balance linked
+    // to an account is a RECEIPT from the employee (money IN); a bank-linked
+    // direct transaction moves whichever direction was recorded. Plain
+    // adjust-modal add_balance rows carry no account and move nothing here.
+    const ledgerRows = (this.data.employeeLedgerTransactions || []).filter((t) => t.accountId === accountId);
+    for (const t of ledgerRows) {
+      const amt = Number(t.amount) || 0;
+      if (t.type === 'add_balance') {
+        balance += amt;
+      } else if (t.type === 'reduce_balance') {
+        balance -= amt;
+      } else if (t.type === 'direct_transaction') {
+        balance += t.direction === 'money_in' ? amt : -amt;
+      }
     }
 
     this.updateAccount(accountId, { currentBalance: balance });

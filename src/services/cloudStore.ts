@@ -16,6 +16,7 @@ import {
   EmployeeAttendance,
   EmployeeLeave,
   EmployeePayment,
+  EmployeeLedgerTransaction,
   CashBankAccount,
   InternalTransfer,
   AccountAdjustment,
@@ -36,7 +37,8 @@ export type CollectionName =
   | 'parties' | 'transactions' | 'settings' | 'items' | 'categories' | 'units'
   | 'locations' | 'productionBatches' | 'orders' | 'sales' | 'purchases'
   | 'vehicles' | 'drivers' | 'tripSlips' | 'tyres' | 'employees' | 'attendance'
-  | 'leaves' | 'employeePayments' | 'accounts' | 'transfers' | 'adjustments'
+  | 'leaves' | 'employeePayments' | 'employeeLedgerTransactions' | 'accounts'
+  | 'transfers' | 'adjustments'
   | 'stockAdjustments' | 'evidenceFolders' | 'evidenceFiles';
 
 export interface SidebarCounts {
@@ -78,8 +80,9 @@ const FEATURE_COLLECTIONS: Record<string, CollectionName[]> = {
   production: ['productionBatches', 'items'],
   logistics: ['vehicles', 'drivers', 'tripSlips', 'tyres'],
   // attendance reads are date-scoped (daily sheet / register fetch their own
-  // window); accounts ride along — recording a payroll payout needs them.
-  employees: ['employees', 'leaves', 'employeePayments', 'accounts'],
+  // window); the ledger rows carry each employee's virtual account balance,
+  // and accounts ride along — recording a bank-linked payout needs them.
+  employees: ['employees', 'leaves', 'employeePayments', 'employeeLedgerTransactions', 'accounts'],
   evidence: ['evidenceFolders', 'evidenceFiles', 'parties'],
 };
 
@@ -104,6 +107,7 @@ const COLLECTION_FETCHERS: Partial<Record<CollectionName, () => Promise<{ succes
   attendance: () => api.getAttendance(),
   leaves: () => api.getLeaves(),
   employeePayments: () => api.getEmployeePayments(),
+  employeeLedgerTransactions: () => api.getEmployeeLedgerTransactions(),
   accounts: () => api.getAccounts(),
   transfers: () => api.getTransfers(),
   adjustments: () => api.getAdjustments(),
@@ -171,6 +175,7 @@ class CloudStore {
   private attendance: EmployeeAttendance[] = [];
   private leaves: EmployeeLeave[] = [];
   private employeePayments: EmployeePayment[] = [];
+  private employeeLedgerTransactions: EmployeeLedgerTransaction[] = [];
   private accounts: CashBankAccount[] = [];
   private transfers: InternalTransfer[] = [];
   private adjustments: AccountAdjustment[] = [];
@@ -245,6 +250,7 @@ class CloudStore {
         if (d.attendance) this.attendance = d.attendance;
         if (d.leaves) this.leaves = d.leaves;
         if (d.employeePayments) this.employeePayments = d.employeePayments;
+        if (d.employeeLedgerTransactions) this.employeeLedgerTransactions = d.employeeLedgerTransactions;
         if (d.accounts) this.accounts = d.accounts;
         if (d.transfers) this.transfers = d.transfers;
         if (d.adjustments) this.adjustments = d.adjustments;
@@ -357,6 +363,7 @@ class CloudStore {
       if (loaded.attendance) this.attendance = loaded.attendance as EmployeeAttendance[];
       if (loaded.leaves) this.leaves = loaded.leaves as EmployeeLeave[];
       if (loaded.employeePayments) this.employeePayments = loaded.employeePayments as EmployeePayment[];
+      if (loaded.employeeLedgerTransactions) this.employeeLedgerTransactions = loaded.employeeLedgerTransactions as EmployeeLedgerTransaction[];
       if (loaded.accounts) this.accounts = loaded.accounts as CashBankAccount[];
       if (loaded.transfers) this.transfers = loaded.transfers as InternalTransfer[];
       if (loaded.adjustments) this.adjustments = loaded.adjustments as AccountAdjustment[];
@@ -495,6 +502,7 @@ class CloudStore {
   public getAttendance(): EmployeeAttendance[] { return [...this.attendance]; }
   public getLeaves(): EmployeeLeave[] { return [...this.leaves]; }
   public getEmployeePayments(): EmployeePayment[] { return [...this.employeePayments]; }
+  public getEmployeeLedgerTransactions(): EmployeeLedgerTransaction[] { return [...this.employeeLedgerTransactions]; }
   public getAccounts(): CashBankAccount[] { return [...this.accounts]; }
   public getTransfers(): InternalTransfer[] { return [...this.transfers]; }
   public getAdjustments(): AccountAdjustment[] { return [...this.adjustments]; }
@@ -1693,7 +1701,7 @@ class CloudStore {
     return false;
   }
 
-  public bulkAddAttendance(records: any[]): void {
+  public async bulkAddAttendance(records: any[]): Promise<void> {
     const recs: EmployeeAttendance[] = records.map((r, idx) => ({
       id: r.id || `att-${Date.now()}-${idx}`,
       employeeId: r.employeeId || '',
@@ -1712,11 +1720,31 @@ class CloudStore {
     });
     this.notify();
     // One post per record; the merged local rows are what the open sheet
-    // renders — the sheet re-fetches its own date from the server after the
-    // posts settle (no whole-table reload: reads are date-scoped).
-    Promise.all(
-      recs.map((rec) => api.recordAttendance(rec).catch((err) => console.error('[CloudStore] recordAttendance cloud error:', err)))
+    // renders — the sheet re-fetches its own date only AFTER these settle
+    // (no whole-table reload: reads are date-scoped).
+    const results = await Promise.allSettled(
+      recs.map((rec) => api.recordAttendance(rec))
     );
+    // Adopt the SERVER's rows (authoritative id/content) wherever a post
+    // succeeded — surface any FAILED post loudly (a failing save must never
+    // disappear into the sheet's next fetch)
+    results.forEach((r) => {
+      if (r.status === 'rejected') {
+        console.error('[CloudStore] recordAttendance FAILED:', (r as PromiseRejectedResult).reason?.message || r.reason);
+      }
+      const created = r.status === 'fulfilled' ? r.value?.data : undefined;
+      if (created?.id && created.employeeId && created.date) {
+        const idx = this.attendance.findIndex(
+          (a) => a.employeeId === created.employeeId && a.date === created.date
+        );
+        if (idx >= 0) {
+          this.attendance[idx] = created;
+        }
+      }
+    });
+    if (recs.length > 0) {
+      this.notify();
+    }
   }
 
   public updateAttendance(id: string, updates: Partial<EmployeeAttendance>): void {
@@ -1865,6 +1893,76 @@ class CloudStore {
     return updated;
   }
 
+  // --- EMPLOYEE LEDGER (virtual accounts) ---
+
+  /** Resolves display names on an optimistic ledger row from the client masters */
+  private hydrateEmployeeLedgerNames(t: EmployeeLedgerTransaction): EmployeeLedgerTransaction {
+    return {
+      ...t,
+      employeeName: this.employees.find((e) => e.id === t.employeeId)?.name || t.employeeName,
+      accountName: t.accountId ? this.accounts.find((a) => a.id === t.accountId)?.name : undefined,
+    };
+  }
+
+  public addEmployeeLedgerTransaction(txn: Partial<EmployeeLedgerTransaction>): EmployeeLedgerTransaction {
+    const newTxn = this.hydrateEmployeeLedgerNames({
+      id: `elt-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      employeeId: txn.employeeId || '',
+      date: txn.date || new Date().toISOString().split('T')[0],
+      type: txn.type as EmployeeLedgerTransaction['type'],
+      amount: Number(txn.amount) || 0,
+      reason: txn.reason || '',
+      createdAt: new Date().toISOString(),
+      source: 'manual',
+      ...txn,
+    } as EmployeeLedgerTransaction);
+    this.employeeLedgerTransactions.unshift(newTxn);
+    this.notify();
+    // Adopt the SERVER-minted row (authoritative id) and refresh the accounts:
+    // a bank-linked row moves real money on the Cash/Bank side.
+    api
+      .addEmployeeLedgerTransaction(txn)
+      .then((res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.employeeLedgerTransactions = this.employeeLedgerTransactions.map((t) =>
+            t.id === newTxn.id ? { ...created } : t
+          );
+          this.notify();
+        }
+      })
+      .then(() => this.refreshAfter(['employeeLedgerTransactions', 'accounts']))
+      .catch((err) => console.error('[CloudStore] addEmployeeLedgerTransaction cloud error:', err));
+    return newTxn;
+  }
+
+  /** Locked auto rows (wage accruals) are rejected with a thrown error server-side. */
+  public updateEmployeeLedgerTransaction(id: string, updates: Partial<EmployeeLedgerTransaction>): EmployeeLedgerTransaction | null {
+    let updated: EmployeeLedgerTransaction | null = null;
+    this.employeeLedgerTransactions = this.employeeLedgerTransactions.map((t) => {
+      if (t.id === id) {
+        if (t.source === 'accrual_engine') return t;
+        updated = this.hydrateEmployeeLedgerNames({ ...t, ...updates, id: t.id, createdAt: t.createdAt });
+        return updated;
+      }
+      return t;
+    });
+    if (updated) {
+      this.notify();
+      api.updateEmployeeLedgerTransaction(id, updates).then(() => this.refreshAfter(['employeeLedgerTransactions', 'accounts'])).catch((err) => console.error('[CloudStore] updateEmployeeLedgerTransaction cloud error:', err));
+    }
+    return updated;
+  }
+
+  public deleteEmployeeLedgerTransaction(id: string): boolean {
+    const row = this.employeeLedgerTransactions.find((t) => t.id === id);
+    if (!row || row.source === 'accrual_engine') return false;
+    this.employeeLedgerTransactions = this.employeeLedgerTransactions.filter((t) => t.id !== id);
+    this.notify();
+    api.deleteEmployeeLedgerTransaction(id).then(() => this.refreshAfter(['employeeLedgerTransactions', 'accounts'])).catch((err) => console.error('[CloudStore] deleteEmployeeLedgerTransaction cloud error:', err));
+    return true;
+  }
+
   // Evidence Files & Folders
   public addFolder(folderData: Partial<EvidenceFolder>): EvidenceFolder {
     const newFolder: EvidenceFolder = {
@@ -1960,6 +2058,7 @@ class CloudStore {
       attendance: this.attendance,
       leaves: this.leaves,
       employeePayments: this.employeePayments,
+      employeeLedgerTransactions: this.employeeLedgerTransactions,
       accounts: this.accounts,
       transfers: this.transfers,
       adjustments: this.adjustments,

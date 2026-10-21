@@ -43,6 +43,7 @@ import {
   CompanySettings,
   Order,
   EmployeePayment,
+  EmployeeLedgerTransaction,
 } from '../../types';
 import { formatCurrency, formatDate, formatDateTime } from '../../utils/formatters';
 import { formatLedgerBalance } from '../parties/partyStatement';
@@ -63,6 +64,7 @@ interface CashBankViewProps {
   orders?: Order[];
   /** payroll payouts — every payment carries its accountId and shows as money-out */
   employeePayments?: EmployeePayment[];
+  employeeLedgerTransactions?: EmployeeLedgerTransaction[];
   settings: CompanySettings;
   onAddAccount: (acc: Omit<CashBankAccount, 'id' | 'createdAt' | 'updatedAt' | 'currentBalance' | 'isActive'>) => void;
   onUpdateAccount: (id: string, updates: Partial<CashBankAccount>) => void;
@@ -81,6 +83,7 @@ export function CashBankView({
   transactions,
   orders,
   employeePayments,
+  employeeLedgerTransactions,
   settings,
   onAddAccount,
   onUpdateAccount,
@@ -338,6 +341,28 @@ export function CashBankView({
         });
       });
 
+    // 3.c Employee ledger rows on this account (Ledger & Salary tab): a
+    // reduce_balance pays OUT; a bank-linked direct transaction moves
+    // whichever direction was recorded (add_balance/accruals never touch bank)
+    (employeeLedgerTransactions || [])
+      .filter((t) => t.accountId === selectedAccountId)
+      .forEach((t) => {
+        const isOut = t.type === 'reduce_balance' ? true : (t.direction || 'money_out') === 'money_out';
+        list.push({
+          id: t.id,
+          date: t.date,
+          type: isOut ? 'payment_out' : 'payment_in',
+          title: `Employee Ledger — ${t.employeeName || ''} (${t.type.replace('_', ' ')})`,
+          description: t.reason,
+          referenceNumber: undefined,
+          moneyIn: isOut ? 0 : Number(t.amount) || 0,
+          moneyOut: isOut ? Number(t.amount) || 0 : 0,
+          createdAt: t.createdAt,
+          // assigned by the registration-order sequencer below
+          runningBalance: 0,
+        });
+      });
+
     // 4. Sales & Purchase Orders linked to this Account
     const ordersList = (orders || localDb.getOrders()).filter(
       (o) => o.accountId === selectedAccountId && o.status !== 'cancelled'
@@ -387,7 +412,7 @@ export function CashBankView({
     }
 
     return sorted;
-  }, [selectedAccountId, selectedAccount, transactions, transfers, adjustments, orders]);
+  }, [selectedAccountId, selectedAccount, transactions, transfers, adjustments, orders, employeeLedgerTransactions]);
 
   // Handle CSV Export
   const handleExportCSV = () => {

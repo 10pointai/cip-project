@@ -14,6 +14,10 @@ import {
   createEmployeePaymentDirect,
   deleteEmployeePaymentDirect,
   updateEmployeePaymentDirect,
+  fetchEmployeeLedgerTransactionsDirect,
+  createEmployeeLedgerTransactionDirect,
+  updateEmployeeLedgerTransactionDirect,
+  deleteEmployeeLedgerTransactionDirect,
 } from '../mysql/personnelService';
 
 export const employeesRouter = Router();
@@ -130,5 +134,44 @@ employeesRouter.put('/payments/:id', requireEitherPermission('process_payroll', 
     res.json({ success: true, data });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- EMPLOYEE LEDGER (virtual account per employee) ---
+// Every read first runs the wage-accrual engine so the running balance and
+// the rows always reflect attendance up to now (idempotent, deterministic ids).
+employeesRouter.get('/ledger', async (req, res) => {
+  try {
+    await serverDb.ensureWageAccruals();
+    const data = await fetchEmployeeLedgerTransactionsDirect({
+      employeeId: typeof req.query.employeeId === 'string' ? req.query.employeeId : undefined,
+    });
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+employeesRouter.post('/ledger', requireEitherPermission('process_payroll', 'manage_employees'), async (req, res) => {
+  try {
+    const data = await createEmployeeLedgerTransactionDirect(req.body);
+    res.status(201).json({ success: true, data });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+employeesRouter.put('/ledger/:id', requireEitherPermission('process_payroll', 'manage_employees'), async (req, res) => {
+  try {
+    const data = await updateEmployeeLedgerTransactionDirect(req.params.id, req.body);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+employeesRouter.delete('/ledger/:id', requireEitherPermission('process_payroll', 'manage_employees'), async (req, res) => {
+  try {
+    const success = await deleteEmployeeLedgerTransactionDirect(req.params.id);
+    res.json({ success });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
   }
 });

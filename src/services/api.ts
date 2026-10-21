@@ -18,6 +18,7 @@ import {
   EmployeeAttendance,
   EmployeeLeave,
   EmployeePayment,
+  EmployeeLedgerTransaction,
   ItemStockAdjustment,
   CashBankAccount,
   InternalTransfer,
@@ -94,6 +95,7 @@ export interface SyncPayload {
   attendance: EmployeeAttendance[];
   leaves: EmployeeLeave[];
   employeePayments: EmployeePayment[];
+  employeeLedgerTransactions?: EmployeeLedgerTransaction[];
   accounts?: any[];
   transfers?: any[];
   adjustments?: any[];
@@ -768,6 +770,39 @@ class ApiClient {
     return this.request<{ success: boolean; data: EmployeePayment }>('/employees/payments', {
       method: 'POST',
       body: JSON.stringify(payment),
+    });
+  }
+
+  // Employee Ledger (virtual accounts)
+  public async getEmployeeLedgerTransactions(
+    params?: { employeeId?: string }
+  ): Promise<{ success: boolean; data: EmployeeLedgerTransaction[] }> {
+    const qs = params?.employeeId ? `?employeeId=${encodeURIComponent(params.employeeId)}` : '';
+    return this.request<{ success: boolean; data: EmployeeLedgerTransaction[] }>(`/employees/ledger${qs}`);
+  }
+
+  public async addEmployeeLedgerTransaction(
+    txn: Partial<EmployeeLedgerTransaction>
+  ): Promise<{ success: boolean; data: EmployeeLedgerTransaction }> {
+    return this.request<{ success: boolean; data: EmployeeLedgerTransaction }>('/employees/ledger', {
+      method: 'POST',
+      body: JSON.stringify(txn),
+    });
+  }
+
+  public async updateEmployeeLedgerTransaction(
+    id: string,
+    updates: Partial<EmployeeLedgerTransaction>
+  ): Promise<{ success: boolean; data: EmployeeLedgerTransaction }> {
+    return this.request<{ success: boolean; data: EmployeeLedgerTransaction }>(`/employees/ledger/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  }
+
+  public async deleteEmployeeLedgerTransaction(id: string): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(`/employees/ledger/${id}`, {
+      method: 'DELETE',
     });
   }
 

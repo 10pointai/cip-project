@@ -45,6 +45,7 @@ function AppContent() {
     purchases,
     employees,
     employeePayments,
+    employeeLedgerTransactions,
     accounts,
     transfers,
     adjustments,
@@ -539,6 +540,7 @@ function AppContent() {
               transactions={transactions}
               orders={orders}
               employeePayments={employeePayments}
+              employeeLedgerTransactions={employeeLedgerTransactions}
               settings={settings}
               onAddAccount={handleAddAccount}
               onUpdateAccount={handleUpdateAccount}

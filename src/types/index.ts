@@ -605,6 +605,13 @@ export interface Employee {
   defaultInTime?: string;
   /** Employee's standard shift out-time (HH:mm) */
   defaultOutTime?: string;
+  /**
+   * Employee ledger opening balance (SIGNED, ledger = employee's virtual account):
+   * +ve → company owes the employee (employee's credit, e.g. advance salary given);
+   * −ve → employee owes the company (e.g. advance taken before the ledger existed).
+   * The CREATE UI collects a positive amount plus the employer's sign choice.
+   */
+  openingBalance?: number;
   createdAt: string;
 }
 
@@ -666,6 +673,52 @@ export interface EmployeePayment {
 }
 
 export type EvidenceEntityType = 'party' | 'vehicle' | 'employee' | 'production' | 'general';
+
+/**
+ * Employee Ledger row — one line of an employee's virtual account (running
+ * balance kept like the account ledger: opening + chronological fold, no
+ * stored balance column). amount is ALWAYS a positive number; the type (and
+ * bank direction) decides the effect's sign:
+ *   wage_accrual      + amount (auto earnings row — daily wages from attendance,
+ *                     monthly salary on the 1st minus absent/half-day deductions)
+ *   add_balance       + amount (balance up; NEVER bank-linked)
+ *   reduce_balance    − amount from the employee's balance; when a bank account
+ *                     is chosen the payout also leaves that account (money out)
+ *   direct_transaction  employee balance UNTOUCHED; bank optional (direction picks
+ *                     money in/out on that account)
+ */
+export interface EmployeeLedgerTransaction {
+  id: string;
+  /** FK employees.id ONLY (Golden Rule §2) — the name resolves from the
+   *  employees master via read-time hydration, never stored on the row */
+  employeeId: string;
+  /** Hydrated read-time display field (never persisted on the row) */
+  employeeName?: string;
+  /** Effective ledger date (YYYY-MM-DD) — accruals dated their earning day */
+  date: string;
+  type: 'wage_accrual' | 'add_balance' | 'reduce_balance' | 'direct_transaction';
+  /** Always POSITIVE; sign comes from the type + bank direction */
+  amount: number;
+  /** Mandatory reason: salary, festival bonus, advance disbursed, reimbursement … */
+  reason: string;
+  /** FK cash_bank_accounts.id — only on bank-linked reduce / direct rows */
+  accountId?: string;
+  /** Bank side of a bank-linked DIRECT transaction (reduce rows are always out) */
+  direction?: 'money_in' | 'money_out';
+  /**
+   * Which record surface created the row — drives the Particulars tag:
+   *   'adjust'   → "Adjusted" (green on an increase, red on a reduce)
+   *   'paid'     → "Paid To Employee" (red)
+   *   'received' → "Received From Employee" (green)
+   */
+  intent?: 'adjust' | 'paid' | 'received';
+  /** Auto rows from the accrual engine are locked — the employer cannot edit them */
+  source?: 'accrual_engine' | 'manual';
+  notes?: string;
+  /** Hydrated read-time display field (never persisted on the row) */
+  accountName?: string;
+  createdAt: string;
+}
 
 export interface EvidenceFolder {
   id: string;

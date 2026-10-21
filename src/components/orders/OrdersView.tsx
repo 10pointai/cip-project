@@ -38,6 +38,7 @@ import {
 import { Order, OrderItem, OrderType, SalesStage, PurchaseStage, Party, Item, CompanySettings, Sale, Purchase, PaymentMode } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { AddPurchaseModal } from './AddPurchaseModal';
+import { BulkSalesCreateModal } from './BulkSalesCreateModal';
 import { OrderDocumentsSection, StagedDocument } from './OrderDocumentsSection';
 import { SearchableSelect } from './SearchableSelect';
 import {
@@ -136,6 +137,9 @@ export function OrdersView({
   // carried as documentIds on the create payload — the server links them)
   const [stagedSaleDocs, setStagedSaleDocs] = useState<StagedDocument[]>([]);
   const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
+  // Bulk create: one batch of independent sales documents (same stage type,
+  // auto-sequential numbers) created in one go from the stage popover
+  const [isBulkCreateOpen, setIsBulkCreateOpen] = useState(false);
   const [editingPurchaseOrder, setEditingPurchaseOrder] = useState<OrderDisplay | null>(null);
   // Purchase mirror of the sales stage machinery: the stage the Add-Purchase
   // popover picked (new purchase) and the successive stage the row ⋮ menu is
@@ -425,6 +429,19 @@ export function OrdersView({
     }
     return `${prefix}-${year}-${Date.now().toString().slice(-4)}`;
   };
+
+  // Every document number already in use (masters + issued stage documents,
+  // sales and purchases) — feeds the bulk-create batch's auto-sequential
+  // numbering so generated numbers never collide with live ones.
+  const knownDocNumbers = useMemo(
+    () => [
+      ...sales.map((s) => s.saleNumber),
+      ...purchaseOrders.map((p) => p.purchaseNumber),
+      ...sales.flatMap((s) => (s.stages || []).map((st) => st.stageNumber)),
+      ...purchaseOrders.flatMap((p) => (p.stages || []).map((st) => st.stageNumber)),
+    ].filter(Boolean),
+    [sales, purchaseOrders]
+  );
 
   // Handle open Form Modal for Create
   const handleOpenCreate = (type: OrderType, stage?: SalesStage | PurchaseStage) => {
@@ -1121,6 +1138,25 @@ export function OrdersView({
                     <ChevronRight className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
                   </button>
                 ))}
+                {/* Bulk create — several sales documents in one go */}
+                <button
+                  key="bulk_create"
+                  type="button"
+                  onClick={() => {
+                    setIsStageMenuOpen(false);
+                    setIsBulkCreateOpen(true);
+                  }}
+                  className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50 bg-[var(--color-primary-container)]/20"
+                >
+                  <div>
+                    <p className="text-xs font-bold text-[var(--color-on-surface)] flex items-center gap-1.5">
+                      Bulk Create
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--color-primary)] text-[var(--color-on-primary)] uppercase">Fast</span>
+                    </p>
+                    <p className="text-[10px] text-[var(--color-on-surface-variant)]">Multiple sales documents in one go</p>
+                  </div>
+                  <Layers className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
+                </button>
               </div>
             )}
           </div>
@@ -2385,6 +2421,19 @@ export function OrdersView({
         parties={parties}
         items={items}
         settings={settings}
+      />
+
+      {/* BULK CREATE: several independent sales documents in one grid —
+          one row per document with its own type/date/items/settlement and
+          a per-stage auto number. One onAddSale call is issued per row. */}
+      <BulkSalesCreateModal
+        isOpen={isBulkCreateOpen}
+        onClose={() => setIsBulkCreateOpen(false)}
+        parties={parties}
+        items={items}
+        settings={settings}
+        existingNumbers={knownDocNumbers}
+        onAddSale={onAddSale}
       />
 
       {/* Add Purchase 3-Stage Workflow Modal */}

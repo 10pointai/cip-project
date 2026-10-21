@@ -12,23 +12,23 @@ import {
 } from 'lucide-react';
 import { Employee, EmployeeAttendance } from '../../types';
 import { api } from '../../services/api';
-import { calculateWorkingHours, deriveInOutStatus } from '../../utils/attendanceUtils';
+import { calculateWorkingHours } from '../../utils/attendanceUtils';
 import { EmployeeMonthlyTimesheetModal } from './EmployeeMonthlyTimesheetModal';
 
 interface AttendanceInOutViewProps {
   employees: Employee[];
-  onSaveDailyAttendance: (records: Omit<EmployeeAttendance, 'id'>[]) => void;
+  /** Resolves once the sheet's posts are confirmed by the server */
+  onSaveDailyAttendance: (records: Omit<EmployeeAttendance, 'id'>[]) => void | Promise<void>;
 }
 
 /**
  * Attendance Sheet — ONE simple daily marking surface (no sub-tabs, no kiosk,
- * no bulk punches). The employer types each employee's In Time and Out Time;
- * the status derives itself from the employee's OWN saved shift times:
- *   in after his In Time          → late
- *   out before his Out Time       → early_exit
- *   otherwise                     → present
- * Absent is marked manually through the status dropdown. Clicking an
- * employee's name opens his Monthly Timesheet.
+ * no bulk punches). STATUS is the primary entity: the employer marks each
+ * employee Present / Late / Early Exit / Absent directly via the dropdown,
+ * and that choice is final — the In Time / Out Time columns are OPTIONAL
+ * informational entries and never change or re-derive the status. Marking
+ * Absent clears any times entered for that row. Clicking an employee's name
+ * opens his Monthly Timesheet.
  */
 export function AttendanceInOutView({
   employees,
@@ -124,29 +124,19 @@ export function AttendanceInOutView({
     setIsSheetDirty(true);
   };
 
-  // Time change — the status re-derives itself from the employee's shift times.
-  // In Time after Out Time is allowed (overnight shifts crossing midnight).
+  // Time change — purely informational. The status stays exactly as the
+  // employer set it in the dropdown; times only feed the Net Hours display
+  // and the saved record.
   const handleRowTimeChange = (empId: string, field: 'checkInTime' | 'checkOutTime', value: string) => {
-    const emp = employees.find((e) => e.id === empId);
     markRowDirty(empId);
     setDailySheetState((prev) => {
       const current = prev[empId] || { checkInTime: '', checkOutTime: '', status: 'present' as const, notes: '', dirty: false };
-      const next: DailyRowState = { ...current, [field]: value };
-      if (next.checkInTime || next.checkOutTime) {
-        next.status = deriveInOutStatus(
-          next.checkInTime || undefined,
-          next.checkOutTime || undefined,
-          emp?.defaultInTime,
-          emp?.defaultOutTime
-        );
-      } else {
-        next.status = 'present';
-      }
-      return { ...prev, [empId]: next };
+      return { ...prev, [empId]: { ...current, [field]: value } };
     });
   };
 
-  // Manual status override via the dropdown (e.g. Absent)
+  // Status override via the dropdown — the primary attendance decision.
+  // Marking Absent clears any In/Out times entered for that row.
   const handleRowStatusChange = (empId: string, status: EmployeeAttendance['status']) => {
     markRowDirty(empId);
     setDailySheetState((prev) => ({
@@ -154,6 +144,7 @@ export function AttendanceInOutView({
       [empId]: {
         ...(prev[empId] || { checkInTime: '', checkOutTime: '', notes: '', dirty: false }),
         status,
+        ...(status === 'absent' ? { checkInTime: '', checkOutTime: '' } : {}),
       },
     }));
   };
@@ -166,37 +157,46 @@ export function AttendanceInOutView({
     }));
   };
 
-  // Save the whole daily sheet (upserts per employee+date server-side), then
-  // re-fetch this date's records fresh from the server; saving also unmarks
-  // the dirty rows so the re-fetch's server values may sync them again.
-  const handleSaveSheet = () => {
-    dirtyRowsRef.current = new Set();
-    const recordsToSave: Omit<EmployeeAttendance, 'id'>[] = [];
+  // Save the whole daily sheet (upserts per employee+date server-side), then —
+  // ONLY after the posts are confirmed by the server — unmark the dirty rows
+  // and re-fetch this date's fresh records. Until then the dirty protection
+  // stays on: an early/stale re-fetch must never wipe what the employer typed.
+  const [isSavingSheet, setIsSavingSheet] = useState(false);
+  const handleSaveSheet = async () => {
+    if (isSavingSheet) return;
+    setIsSavingSheet(true);
+    try {
+      const recordsToSave: Omit<EmployeeAttendance, 'id'>[] = [];
 
-    employees.forEach((emp) => {
-      const row = dailySheetState[emp.id];
-      if (!row) return;
+      employees.forEach((emp) => {
+        const row = dailySheetState[emp.id];
+        if (!row) return;
 
-      const existingRecord = dayRecords.find((a) => a.employeeId === emp.id && a.date === selectedDate);
-      const hrs = calculateWorkingHours(row.checkInTime, row.checkOutTime);
+        const existingRecord = dayRecords.find((a) => a.employeeId === emp.id && a.date === selectedDate);
+        const hrs = calculateWorkingHours(row.checkInTime, row.checkOutTime);
 
-      recordsToSave.push({
-        employeeId: emp.id,
-        employeeName: emp.name,
-        date: selectedDate,
-        status: row.status,
-        checkInTime: row.checkInTime || undefined,
-        checkOutTime: row.checkOutTime || undefined,
-        totalHoursWorked: hrs.totalDecimalHours,
-        shiftName: existingRecord?.shiftName,
-        punchLogs: existingRecord?.punchLogs,
-        notes: row.notes || undefined,
+        recordsToSave.push({
+          employeeId: emp.id,
+          employeeName: emp.name,
+          date: selectedDate,
+          status: row.status,
+          checkInTime: row.checkInTime || undefined,
+          checkOutTime: row.checkOutTime || undefined,
+          totalHoursWorked: hrs.totalDecimalHours,
+          shiftName: existingRecord?.shiftName,
+          punchLogs: existingRecord?.punchLogs,
+          notes: row.notes || undefined,
+        });
       });
-    });
 
-    onSaveDailyAttendance(recordsToSave);
-    setIsSheetDirty(false);
-    loadDay(selectedDate);
+      await onSaveDailyAttendance(recordsToSave);
+      // Server confirmed — release the dirty protection and refresh
+      dirtyRowsRef.current = new Set();
+      setIsSheetDirty(false);
+      loadDay(selectedDate);
+    } finally {
+      setIsSavingSheet(false);
+    }
   };
 
   const changeDateByDays = (delta: number) => {
@@ -278,17 +278,29 @@ export function AttendanceInOutView({
           />
         </div>
 
+        {/* Save is ALWAYS available — Present is the default status, so the
+            employer may land on a date and save the all-Present sheet as-is
+            (In/Out times being optional only reinforces that flow) */}
         <button
           type="button"
           onClick={handleSaveSheet}
+          disabled={isSavingSheet}
           className={`flex items-center justify-center gap-1.5 px-4 py-2 font-bold text-xs rounded-xl shadow-xs transition ${
             isSheetDirty
               ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] animate-pulse'
-              : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)]'
-          }`}
+              : 'bg-[var(--color-primary)]/80 text-[var(--color-on-primary)] hover:opacity-90'
+          } disabled:opacity-60 disabled:cursor-not-allowed`}
         >
-          <CheckCircle2 className="w-3.5 h-3.5" />
-          {isSheetDirty ? 'Save Attendance *' : 'Saved'}
+          {isSavingSheet ? (
+            <>
+              <Loader2 className="w-3.5 h-3.5 animate-spin" /> Saving…
+            </>
+          ) : (
+            <>
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              {isSheetDirty ? 'Save Attendance *' : 'Save Attendance'}
+            </>
+          )}
         </button>
       </div>
 
@@ -299,10 +311,10 @@ export function AttendanceInOutView({
             <thead>
               <tr className="bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] text-[11px] font-bold uppercase tracking-wider border-b border-[var(--color-outline-variant)]">
                 <th className="py-3 px-4 min-w-[200px]">Employee</th>
+                <th className="py-3 px-4 min-w-[140px]">Status</th>
                 <th className="py-3 px-4 min-w-[140px]">In Time</th>
                 <th className="py-3 px-4 min-w-[140px]">Out Time</th>
                 <th className="py-3 px-4 min-w-[120px]">Net Hours</th>
-                <th className="py-3 px-4 min-w-[140px]">Status</th>
                 <th className="py-3 px-4 min-w-[160px]">Remarks</th>
               </tr>
             </thead>
@@ -362,7 +374,35 @@ export function AttendanceInOutView({
                         </div>
                       </td>
 
-                      {/* In Time */}
+                      {/* Status — the primary attendance decision, set directly by the employer */}
+                      <td className="py-3 px-4">
+                        <select
+                          value={row.status}
+                          onChange={(e) => handleRowStatusChange(emp.id, e.target.value as EmployeeAttendance['status'])}
+                          className={`text-[11px] font-bold px-2 py-1 rounded-xl border outline-hidden capitalize ${
+                            row.status === 'present'
+                              ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)] border-[var(--color-success)]/30'
+                              : row.status === 'late'
+                              ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)] border-[var(--color-warning)]/30'
+                              : row.status === 'early_exit'
+                              ? 'bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)] border-[var(--color-secondary)]/30'
+                              : row.status === 'half_day'
+                              ? 'bg-[var(--color-tertiary-container)] text-[var(--color-on-tertiary-container)] border-[var(--color-tertiary)]/30'
+                              : row.status === 'holiday'
+                              ? 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)] border-[var(--color-primary)]/30'
+                              : 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)] border-[var(--color-error)]/30'
+                          }`}
+                        >
+                          <option value="present">Present</option>
+                          <option value="late">Late</option>
+                          <option value="early_exit">Early Exit</option>
+                          <option value="half_day">Half Day</option>
+                          <option value="holiday">Holiday</option>
+                          <option value="absent">Absent</option>
+                        </select>
+                      </td>
+
+                      {/* In Time — optional, informational */}
                       <td className="py-3 px-4">
                         <input
                           type="time"
@@ -376,7 +416,7 @@ export function AttendanceInOutView({
                         />
                       </td>
 
-                      {/* Out Time */}
+                      {/* Out Time — optional, informational */}
                       <td className="py-3 px-4">
                         <input
                           type="time"
@@ -392,32 +432,14 @@ export function AttendanceInOutView({
 
                       {/* Net Hours */}
                       <td className="py-3 px-4">
-                        <div className="flex items-center gap-1 font-bold text-[var(--color-on-surface)]">
-                          <Timer className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-                          {hoursCalc.formatted}
-                        </div>
-                      </td>
-
-                      {/* Status — auto-derived; manual override via dropdown */}
-                      <td className="py-3 px-4">
-                        <select
-                          value={row.status}
-                          onChange={(e) => handleRowStatusChange(emp.id, e.target.value as EmployeeAttendance['status'])}
-                          className={`text-[11px] font-bold px-2 py-1 rounded-xl border outline-hidden capitalize ${
-                            row.status === 'present'
-                              ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)] border-[var(--color-success)]/30'
-                              : row.status === 'late'
-                              ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)] border-[var(--color-warning)]/30'
-                              : row.status === 'early_exit'
-                              ? 'bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)] border-[var(--color-secondary)]/30'
-                              : 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)] border-[var(--color-error)]/30'
-                          }`}
-                        >
-                          <option value="present">Present</option>
-                          <option value="late">Late</option>
-                          <option value="early_exit">Early Exit</option>
-                          <option value="absent">Absent</option>
-                        </select>
+                        {row.checkInTime && row.checkOutTime ? (
+                          <div className="flex items-center gap-1 font-bold text-[var(--color-on-surface)]">
+                            <Timer className="w-3.5 h-3.5 text-[var(--color-primary)]" />
+                            {hoursCalc.formatted}
+                          </div>
+                        ) : (
+                          <span className="text-[var(--color-on-surface-variant)]">—</span>
+                        )}
                       </td>
 
                       {/* Remarks */}
@@ -440,7 +462,7 @@ export function AttendanceInOutView({
       </div>
 
       <p className="text-[10px] text-[var(--color-on-surface-variant)] px-1">
-        Late and Early Exit are decided automatically against each employee's saved In/Out shift times — open the employee from Staff Directory to edit those times.
+        Status is the primary attendance entry — mark it directly and it never changes on its own. In/Out times are optional: they only feed the Net Hours display and stay on the record for reference.
       </p>
 
       {/* Monthly timesheet of the clicked employee */}

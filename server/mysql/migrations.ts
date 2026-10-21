@@ -807,6 +807,15 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           await conn.query('ALTER TABLE employees ADD COLUMN default_out_time VARCHAR(8) NULL AFTER default_in_time');
           console.log('[MySQL Migration] Added default_out_time column to employees table.');
         }
+        // The driver's DL. The ORIGINAL live table (created by the first
+        // migration) NEVER had license_number — no CREATE ever defined it and
+        // no guard added it, so every write sending license_number (the
+        // create REPLACE and liveSyncEmployee's REPLACE) FAILED on the live
+        // table and the DL never persisted. NULL-able: old rows predate DLs.
+        if (!empNames.includes('license_number')) {
+          await conn.query('ALTER TABLE employees ADD COLUMN license_number VARCHAR(64) NULL AFTER pan_number');
+          console.log('[MySQL Migration] Added license_number column to employees table.');
+        }
       } catch (empColErr: any) {
         console.warn('[MySQL Migration] employees columns notice:', empColErr.message);
       }
@@ -828,6 +837,30 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           INDEX idx_att_emp (employee_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
+
+      // Older deployments' attendance table still carries employee_name
+      // (NOT NULL, no default) from before the JOIN-based display switch —
+      // it has NO default value and the write paths no longer send it, so
+      // EVERY attendance insert fails with "Field 'employee_name' doesn't
+      // have a default value" and attendance never persists. Drop it:
+      // the name is a live view JOINed from the employees master
+      // (same FK-purity cleanup already applied to employee_payments).
+      try {
+        const [attCols]: any = await conn.query('SHOW COLUMNS FROM attendance');
+        const attNames = (attCols || []).map((c: any) => c.Field);
+        if (attNames.length > 0 && attNames.includes('employee_name')) {
+          try {
+            await conn.query('ALTER TABLE attendance DROP COLUMN employee_name');
+            console.log('[MySQL Migration] Dropped employee_name column from attendance (JOIN-based display).');
+          } catch (attDropErr: any) {
+            console.warn('[MySQL Migration] DROP failed, making employee_name nullable instead:', attDropErr.message);
+            await conn.query("ALTER TABLE attendance MODIFY COLUMN employee_name VARCHAR(255) NULL DEFAULT NULL");
+            console.log('[MySQL Migration] attendance.employee_name is now nullable — writes succeed.');
+          }
+        }
+      } catch (attNameErr: any) {
+        console.warn('[MySQL Migration] attendance employee_name notice:', attNameErr.message);
+      }
 
       await conn.query(`
         CREATE TABLE IF NOT EXISTS leaves (
@@ -876,6 +909,54 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         }
       } catch (payColErr: any) {
         console.warn('[MySQL Migration] employee_payments columns notice:', payColErr.message);
+      }
+
+      // Employee Ledger — one virtual account per employee (running balance
+      // derived as opening + chronological fold; FK-only employee_id, the
+      // name JOINs from the employees master at read time).
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS employee_ledger_transactions (
+          id VARCHAR(64) PRIMARY KEY,
+          employee_id VARCHAR(64) NOT NULL,
+          date VARCHAR(32) NOT NULL,
+          type VARCHAR(32) NOT NULL,
+          amount DECIMAL(15,2) NOT NULL,
+          reason TEXT NOT NULL,
+          account_id VARCHAR(64),
+          direction VARCHAR(16),
+          intent VARCHAR(16),
+          source VARCHAR(32) DEFAULT 'manual',
+          notes TEXT,
+          created_at VARCHAR(64) NOT NULL,
+          INDEX idx_elt_emp (employee_id, date),
+          INDEX idx_elt_account (account_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      // Ledger rows gained the record-surface marker (adjust/paid/received)
+      // for the Particulars tag; older deployments predate it.
+      try {
+        const [eltCols]: any = await conn.query('SHOW COLUMNS FROM employee_ledger_transactions');
+        const eltNames = (eltCols || []).map((c: any) => c.Field);
+        if (eltNames.length > 0 && !eltNames.includes('intent')) {
+          await conn.query('ALTER TABLE employee_ledger_transactions ADD COLUMN intent VARCHAR(16) NULL AFTER direction');
+          console.log('[MySQL Migration] Added intent column to employee_ledger_transactions table.');
+        }
+      } catch (eltIntentErr: any) {
+        console.warn('[MySQL Migration] employee_ledger_transactions intent notice:', eltIntentErr.message);
+      }
+
+      // Employees gained the ledger opening balance (signed: +ve = company
+      // owes the employee). Older deployments predate it (guard = idempotent).
+      try {
+        const [empCols]: any = await conn.query('SHOW COLUMNS FROM employees');
+        const empNames = (empCols || []).map((c: any) => c.Field);
+        if (!empNames.includes('opening_balance')) {
+          await conn.query('ALTER TABLE employees ADD COLUMN opening_balance DECIMAL(15,2) DEFAULT 0.00 AFTER daily_wage_rate');
+          console.log('[MySQL Migration] Added opening_balance column to employees table.');
+        }
+      } catch (empOpenBalErr: any) {
+        console.warn('[MySQL Migration] employees opening_balance notice:', empOpenBalErr.message);
       }
 
       // 11. Evidence & Cloud Documents

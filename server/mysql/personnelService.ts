@@ -5,6 +5,7 @@ import {
   EmployeeAttendance,
   EmployeeLeave,
   EmployeePayment,
+  EmployeeLedgerTransaction,
   CompanySettings,
   EvidenceFolder,
   EvidenceFile,
@@ -45,7 +46,9 @@ export async function fetchEmployeesDirect(): Promise<Employee[]> {
     aadhaarNo: emp.aadhar_number || emp.aadhaarNo || undefined,
     panNo: emp.pan_number || emp.panNo || undefined,
     joiningDate: emp.date_of_joining || emp.joiningDate || '2026-01-01',
-    salaryBase: parseNum(emp.base_salary || emp.salaryBase),
+    // base_salary is THE store for the payout (both types); daily_wage_rate
+    // falls back for legacy rows whose amount was split into it
+    salaryBase: parseNum(emp.base_salary) || parseNum(emp.daily_wage_rate) || parseNum(emp.salaryBase),
     salaryType: (emp.salary_type || emp.salaryType || 'monthly') as any,
     status: (emp.status || 'active') as any,
     licenseNo: emp.license_number || emp.licenseNo || undefined,
@@ -55,6 +58,7 @@ export async function fetchEmployeesDirect(): Promise<Employee[]> {
     nameOnAccount: emp.name_on_account || undefined,
     defaultInTime: emp.default_in_time || undefined,
     defaultOutTime: emp.default_out_time || undefined,
+    openingBalance: parseNum(emp.opening_balance),
     createdAt: emp.created_at || new Date().toISOString(),
   }));
 }
@@ -300,8 +304,8 @@ export async function createEmployeeDirect(empData: any): Promise<Employee> {
       id, employee_code, name, designation, department, phone, email,
       aadhar_number, pan_number, date_of_joining, base_salary, salary_type,
       status, license_number, bank_details, upi_address, name_on_account,
-      default_in_time, default_out_time, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      default_in_time, default_out_time, opening_balance, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       emp.id,
       emp.id,
@@ -322,6 +326,7 @@ export async function createEmployeeDirect(empData: any): Promise<Employee> {
       emp.nameOnAccount || null,
       emp.defaultInTime || null,
       emp.defaultOutTime || null,
+      emp.openingBalance || 0,
       emp.createdAt || new Date().toISOString(),
     ]
   );
@@ -338,26 +343,40 @@ export async function updateEmployeeDirect(id: string, updates: any): Promise<Em
       designation = COALESCE(?, designation),
       phone = COALESCE(?, phone),
       email = COALESCE(?, email),
+      aadhar_number = COALESCE(?, aadhar_number),
+      pan_number = COALESCE(?, pan_number),
+      date_of_joining = COALESCE(?, date_of_joining),
       status = COALESCE(?, status),
       base_salary = COALESCE(?, base_salary),
       salary_type = COALESCE(?, salary_type),
+      license_number = COALESCE(?, license_number),
+      bank_details = COALESCE(?, bank_details),
       upi_address = COALESCE(?, upi_address),
       name_on_account = COALESCE(?, name_on_account),
       default_in_time = COALESCE(?, default_in_time),
-      default_out_time = COALESCE(?, default_out_time)
+      default_out_time = COALESCE(?, default_out_time),
+      opening_balance = COALESCE(?, opening_balance)
     WHERE id = ?`,
     [
       updates.name || null,
       updates.role || null,
       updates.phone || null,
       updates.email || null,
+      updates.aadhaarNo || null,
+      updates.panNo || null,
+      updates.joiningDate || null,
       updates.status || null,
       updates.salaryBase !== undefined ? updates.salaryBase : null,
       updates.salaryType || null,
+      updates.licenseNo || null,
+      updates.bankAccountNo !== undefined || updates.bankIFSC !== undefined
+        ? JSON.stringify({ accountNumber: updates.bankAccountNo || '', ifscCode: updates.bankIFSC || '' })
+        : null,
       updates.upiAddress || null,
       updates.nameOnAccount || null,
       updates.defaultInTime || null,
       updates.defaultOutTime || null,
+      updates.openingBalance !== undefined ? updates.openingBalance : null,
       id,
     ]
   );
@@ -371,10 +390,64 @@ export async function deleteEmployeeDirect(id: string): Promise<boolean> {
   return true;
 }
 
+// Self-heal: an OLD live attendance table still carries `employee_name`
+// (NOT NULL, no default) — the current write paths don't send it, so every
+// insert fails. Checked PROACTIVELY (once) at the first attendance write:
+// the stale column is dropped; if the drop is blocked, it is made nullable
+// as a fallback so inserts always succeed.
+let attendanceSchemaChecked = false;
+async function ensureAttendanceSchemaHealthy(): Promise<void> {
+  if (attendanceSchemaChecked) return;
+  attendanceSchemaChecked = true;
+  try {
+    const cols = await executeMysqlQuery('SHOW COLUMNS FROM attendance');
+    const names = (cols || []).map((c: any) => c.Field || c.field || c.name);
+    if (names.includes('employee_name')) {
+      try {
+        await executeMysqlQuery('ALTER TABLE attendance DROP COLUMN employee_name');
+        console.log('[MySQL Heal] Dropped stale attendance.employee_name column (JOIN-based display now).');
+      } catch (dropErr: any) {
+        console.warn('[MySQL Heal] DROP failed, making employee_name nullable instead:', dropErr.message);
+        await executeMysqlQuery(
+          "ALTER TABLE attendance MODIFY COLUMN employee_name VARCHAR(255) NULL DEFAULT NULL"
+        );
+        console.log('[MySQL Heal] attendance.employee_name is now nullable — writes succeed.');
+      }
+    }
+  } catch (err: any) {
+    console.warn('[MySQL Heal] attendance schema check skipped:', err.message);
+  }
+}
+
+function isStaleNameColumnError(err: any): boolean {
+  return String(err?.message || '').includes("employee_name") &&
+    String(err?.message || '').includes("doesn't have a default value");
+}
+
 export async function updateAttendanceDirect(attData: any): Promise<EmployeeAttendance> {
   const att = serverDb.recordAttendance(attData);
   if (!isMysqlConfigured()) return att;
 
+  // Proactive schema heal BEFORE the first write of this server process
+  await ensureAttendanceSchemaHealthy();
+
+  try {
+    await persistAttendanceRow(att);
+  } catch (err: any) {
+    if (isStaleNameColumnError(err)) {
+      // Reactive safety net (e.g. the process started before the live check)
+      attendanceSchemaChecked = false;
+      await ensureAttendanceSchemaHealthy();
+      await persistAttendanceRow(att);
+    } else {
+      throw err;
+    }
+  }
+  return att;
+}
+
+/** MySQL upsert per (employee_id, date) — update existing, else idempotent insert. */
+async function persistAttendanceRow(att: EmployeeAttendance): Promise<void> {
   // Correct TABLE (`attendance` — the old code wrote `employee_attendance`,
   // which does not exist, so every attendance POST failed with MySQL on) and
   // CORRECT columns (`in_time/out_time/work_hours` per the schema). UPSERT per
@@ -430,7 +503,6 @@ export async function updateAttendanceDirect(attData: any): Promise<EmployeeAtte
       ]
     );
   }
-  return att;
 }
 
 export async function createLeaveDirect(leaveData: any): Promise<EmployeeLeave> {
@@ -545,4 +617,118 @@ export async function updateEmployeePaymentDirect(id: string, updates: any): Pro
     ]
   );
   return payment;
+}
+
+// ==========================================
+// EMPLOYEE LEDGER (virtual accounts)
+// ==========================================
+
+export async function fetchEmployeeLedgerTransactionsDirect(filters?: {
+  /** one employee's rows (the ledger screen fetches per employee) */
+  employeeId?: string;
+}): Promise<EmployeeLedgerTransaction[]> {
+  if (!isMysqlConfigured()) {
+    let rows = serverDb.getEmployeeLedgerTransactions();
+    if (filters?.employeeId) rows = rows.filter((t) => t.employeeId === filters.employeeId);
+    return rows;
+  }
+  const rows = await executeMysqlQuery(
+    `SELECT t.*, e.name AS employee_name, a.name AS account_name
+     FROM employee_ledger_transactions t
+     LEFT JOIN employees e ON e.id = t.employee_id
+     LEFT JOIN cash_bank_accounts a ON a.id = t.account_id
+     ${filters?.employeeId ? 'WHERE t.employee_id = ?' : ''}
+     ORDER BY t.created_at DESC, t.date DESC`,
+    filters?.employeeId ? [filters.employeeId] : []
+  );
+  return rows.map((t: any) => ({
+    id: t.id,
+    employeeId: t.employee_id,
+    employeeName: t.employee_name,
+    date: t.date,
+    type: t.type,
+    amount: parseNum(t.amount),
+    reason: t.reason || '',
+    accountId: t.account_id || undefined,
+    accountName: t.account_name || undefined,
+    direction: t.direction || undefined,
+    intent: t.intent || undefined,
+    source: t.source || 'manual',
+    notes: t.notes || undefined,
+    createdAt: t.created_at,
+  }));
+}
+
+/**
+ * Records a manual employer transaction (add / reduce / direct). serverDb
+ * validates + reconciles the linked Cash/Bank account; a lock here also
+ * stops the employer from hand-posting engine-owned wage accruals.
+ */
+export async function createEmployeeLedgerTransactionDirect(data: any): Promise<EmployeeLedgerTransaction> {
+  if (data.type === 'wage_accrual') {
+    throw new Error('Wage accruals are generated automatically; record a salary settlement as a Reduce balance instead.');
+  }
+  const txn = serverDb.createEmployeeLedgerTransaction(data);
+  if (!isMysqlConfigured()) return txn;
+
+  // Idempotent insert — liveSyncEmployeeLedgerTransaction writes the same id
+  // in parallel; ON DUPLICATE KEY merges instead of colliding on the PK.
+  // Names never persist (FK-only rows, Golden Rule §2).
+  await executeMysqlQuery(
+    `INSERT INTO employee_ledger_transactions (
+      id, employee_id, date, type, amount, reason, account_id, direction, intent, source, notes, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      date=VALUES(date), type=VALUES(type), amount=VALUES(amount), reason=VALUES(reason),
+      account_id=VALUES(account_id), direction=VALUES(direction), intent=VALUES(intent),
+      source=VALUES(source), notes=VALUES(notes)`,
+    [
+      txn.id,
+      txn.employeeId,
+      txn.date,
+      txn.type,
+      txn.amount,
+      txn.reason,
+      txn.accountId || null,
+      (txn as any).direction || null,
+      (txn as any).intent || null,
+      txn.source || 'manual',
+      txn.notes || null,
+      txn.createdAt || new Date().toISOString(),
+    ]
+  );
+  return txn;
+}
+
+export async function updateEmployeeLedgerTransactionDirect(id: string, updates: any): Promise<EmployeeLedgerTransaction> {
+  const txn = serverDb.updateEmployeeLedgerTransaction(id, updates);
+  if (!isMysqlConfigured()) return txn;
+
+  await executeMysqlQuery(
+    `UPDATE employee_ledger_transactions SET
+      date = ?,
+      amount = ?,
+      reason = ?,
+      account_id = ?,
+      direction = ?,
+      notes = ?
+    WHERE id = ?`,
+    [
+      txn.date,
+      txn.amount,
+      txn.reason,
+      txn.accountId || null,
+      txn.direction || null,
+      txn.notes || null,
+      txn.id,
+    ]
+  );
+  return txn;
+}
+
+export async function deleteEmployeeLedgerTransactionDirect(id: string): Promise<boolean> {
+  const deleted = serverDb.deleteEmployeeLedgerTransaction(id);
+  if (!isMysqlConfigured()) return deleted;
+  await executeMysqlQuery('DELETE FROM employee_ledger_transactions WHERE id = ?', [id]);
+  return true;
 }

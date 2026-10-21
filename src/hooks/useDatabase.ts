@@ -16,6 +16,7 @@ import {
   EmployeeAttendance,
   EmployeeLeave,
   EmployeePayment,
+  EmployeeLedgerTransaction,
   Vehicle,
   Driver,
   TripSlip,
@@ -49,6 +50,7 @@ export function useDatabase() {
   const [attendance, setAttendance] = useState<EmployeeAttendance[]>(() => cloudStore.getAttendance());
   const [leaves, setLeaves] = useState<EmployeeLeave[]>(() => cloudStore.getLeaves());
   const [employeePayments, setEmployeePayments] = useState<EmployeePayment[]>(() => cloudStore.getEmployeePayments());
+  const [employeeLedgerTransactions, setEmployeeLedgerTransactions] = useState<EmployeeLedgerTransaction[]>(() => cloudStore.getEmployeeLedgerTransactions());
   const [accounts, setAccounts] = useState<CashBankAccount[]>(() => cloudStore.getAccounts());
   const [transfers, setTransfers] = useState<InternalTransfer[]>(() => cloudStore.getTransfers());
   const [adjustments, setAdjustments] = useState<AccountAdjustment[]>(() => cloudStore.getAdjustments());
@@ -81,6 +83,7 @@ export function useDatabase() {
     setAttendance(cloudStore.getAttendance());
     setLeaves(cloudStore.getLeaves());
     setEmployeePayments(cloudStore.getEmployeePayments());
+    setEmployeeLedgerTransactions(cloudStore.getEmployeeLedgerTransactions());
     setAccounts(cloudStore.getAccounts());
     setTransfers(cloudStore.getTransfers());
     setAdjustments(cloudStore.getAdjustments());
@@ -134,6 +137,7 @@ export function useDatabase() {
     attendance,
     leaves,
     employeePayments,
+    employeeLedgerTransactions,
     accounts,
     transfers,
     adjustments,

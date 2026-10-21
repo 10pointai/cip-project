@@ -37,6 +37,7 @@ import {
   SalesOrderStage,
   PurchaseOrderItem,
   PurchaseOrderStage,
+  EmployeeLedgerTransaction,
 } from '../../src/types';
 import { DatabaseSchema, AuditLog, StockMovementRecord } from '../db';
 import {
@@ -751,7 +752,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         phone: e.phone,
         email: e.email || undefined,
         joiningDate: e.date_of_joining,
-        salaryBase: parseNum(e.base_salary),
+        salaryBase: parseNum(e.base_salary) || parseNum(e.daily_wage_rate),
         salaryType: (e.salary_type as any) || 'monthly',
         status: (e.status as any) || 'active',
         bankAccountNo: (parseJsonField(e.bank_details, {}) as any).accountNumber || undefined,
@@ -760,6 +761,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         nameOnAccount: e.name_on_account || undefined,
         defaultInTime: e.default_in_time || undefined,
         defaultOutTime: e.default_out_time || undefined,
+        openingBalance: parseNum(e.opening_balance),
         createdAt: e.created_at,
       }));
 
@@ -815,6 +817,31 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         referenceNo: p.reference_no || undefined,
         notes: p.notes || undefined,
         monthYear: p.month_year || undefined,
+      }));
+
+      // 11b. Employee Ledger — FK-only rows; employee name JOINs from the master
+      const [eltRows]: [any[], any] = await conn.query(
+        `SELECT t.*, e.name AS employee_name, a.name AS account_name
+         FROM employee_ledger_transactions t
+         LEFT JOIN employees e ON e.id = t.employee_id
+         LEFT JOIN cash_bank_accounts a ON a.id = t.account_id
+         ORDER BY t.created_at DESC`
+      );
+      const employeeLedgerTransactions: EmployeeLedgerTransaction[] = eltRows.map((t: any) => ({
+        id: t.id,
+        employeeId: t.employee_id,
+        employeeName: t.employee_name || undefined,
+        date: t.date,
+        type: (t.type as any) || 'add_balance',
+        amount: parseNum(t.amount),
+        reason: t.reason || '',
+        accountId: t.account_id || undefined,
+        accountName: t.account_name || undefined,
+        direction: (t.direction as any) || undefined,
+        intent: (t.intent as any) || undefined,
+        source: (t.source as any) || 'manual',
+        notes: t.notes || undefined,
+        createdAt: t.created_at,
       }));
 
       // 12. Cash & Bank Management
@@ -1040,6 +1067,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         attendance,
         leaves,
         employeePayments,
+        employeeLedgerTransactions,
         accounts,
         transfers,
         adjustments,
@@ -1741,8 +1769,8 @@ export async function liveSyncEmployee(emp: Employee, isDelete = false) {
       await pool.query('DELETE FROM employees WHERE id = ?', [emp.id]);
     } else {
       await pool.query(
-        `REPLACE INTO employees (id, employee_code, name, designation, department, phone, email, date_of_joining, salary_type, base_salary, daily_wage_rate, bank_details, upi_address, name_on_account, default_in_time, default_out_time, aadhar_number, pan_number, status, emergency_contact, notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `REPLACE INTO employees (id, employee_code, name, designation, department, phone, email, date_of_joining, salary_type, base_salary, daily_wage_rate, opening_balance, bank_details, upi_address, name_on_account, default_in_time, default_out_time, aadhar_number, pan_number, status, emergency_contact, notes, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           emp.id,
           emp.id,
@@ -1753,8 +1781,9 @@ export async function liveSyncEmployee(emp: Employee, isDelete = false) {
           emp.email || null,
           emp.joiningDate,
           emp.salaryType,
-          emp.salaryType === 'monthly' ? emp.salaryBase : 0,
+          emp.salaryBase,
           emp.salaryType === 'daily' ? emp.salaryBase : 0,
+          emp.openingBalance || 0,
           JSON.stringify({ accountNumber: emp.bankAccountNo, ifscCode: emp.bankIFSC }),
           emp.upiAddress || null,
           emp.nameOnAccount || null,
@@ -1863,6 +1892,39 @@ export async function liveSyncEmployeePayment(ep: EmployeePayment, isDelete = fa
     }
   } catch (e: any) {
     console.error('[Azure MySQL LiveSync] Failed to sync payment:', e.message);
+  }
+}
+
+// Employee ledger rows: FK-only employee_id/account_id — both display names
+// JOIN from their masters at read time (Golden Rule §2)
+export async function liveSyncEmployeeLedgerTransaction(t: EmployeeLedgerTransaction, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM employee_ledger_transactions WHERE id = ?', [t.id]);
+    } else {
+      await pool.query(
+        `REPLACE INTO employee_ledger_transactions (id, employee_id, date, type, amount, reason, account_id, direction, intent, source, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          t.id,
+          t.employeeId,
+          t.date,
+          t.type,
+          t.amount,
+          t.reason,
+          t.accountId || null,
+          t.direction || null,
+          (t as any).intent || null,
+          t.source || 'manual',
+          t.notes || null,
+          t.createdAt || new Date().toISOString(),
+        ]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync employee ledger transaction:', e.message);
   }
 }
 

@@ -1,7 +1,8 @@
 /**
  * Attendance & Working Hours Utility Functions
- * Supports In/Out timestamp parsing, duration computation, overtime estimation,
- * and automated status derivation.
+ * Supports In/Out timestamp parsing, duration computation, and
+ * overtime estimation. Status is NOT derived from times — it is a
+ * primary, employer-chosen entry on the attendance sheet.
  */
 
 export interface TimeDurationResult {
@@ -63,36 +64,6 @@ export function calculateWorkingHours(
     totalDecimalHours,
     formatted: `${hours}h ${minutes.toString().padStart(2, '0')}m`,
   };
-}
-
-/**
- * Derives the daily status from the employer-marked In/Out times against the
- * EMPLOYEE'S OWN saved shift times (exact comparison, no grace minutes):
- *   after his In Time            → 'late'
- *   before his Out Time          → 'early_exit'
- *   in on time (+ out on/after)  → 'present'
- *   no In Time marked at all     → caller decides (UI defaults to 'present'
- *                                  until the employer marks otherwise)
- */
-export function deriveInOutStatus(
-  checkInTime?: string,
-  checkOutTime?: string,
-  defaultInTime?: string,
-  defaultOutTime?: string
-): 'present' | 'late' | 'early_exit' {
-  const inMin = timeStringToMinutes(checkInTime);
-  const outMin = timeStringToMinutes(checkOutTime);
-  const shiftInMin = timeStringToMinutes(defaultInTime);
-  const shiftOutMin = timeStringToMinutes(defaultOutTime);
-
-  if (inMin !== null && shiftInMin !== null && inMin > shiftInMin) {
-    return 'late';
-  }
-  if (outMin !== null && shiftOutMin !== null && outMin < shiftOutMin) {
-    return 'early_exit';
-  }
-  // No reference shift time on the employee record — nothing is a violation
-  return 'present';
 }
 
 /**
