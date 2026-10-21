@@ -29,7 +29,6 @@ export function SearchableSelect({
   const [query, setQuery] = React.useState('');
   const [menuPos, setMenuPos] = React.useState<{ left: number; top: number; minWidth: number } | null>(null);
   const inputRef = React.useRef<HTMLInputElement | null>(null);
-  const menuRef = React.useRef<HTMLDivElement | null>(null);
   const lowerQuery = query.trim().toLowerCase();
   const matches = (
     lowerQuery
@@ -115,7 +114,6 @@ export function SearchableSelect({
       />
       {open && menuPos && createPortal(
         <div
-          ref={menuRef}
           style={{ position: 'fixed', left: menuPos.left, top: menuPos.top, minWidth: menuPos.minWidth, maxWidth: 320 }}
           className="z-[70] max-h-56 overflow-y-auto rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] shadow-lg"
           onMouseDown={(e) => e.preventDefault()}
