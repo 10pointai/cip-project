@@ -157,6 +157,63 @@ function rOr(v: any): number {
 }
 
 /**
+ * Backfill of balance_after on historical stock_movements rows. The snapshots
+ * were historically taken from an in-memory stock that clamped at zero
+ * (Math.max(0, current + delta)) while the MySQL path applies the raw delta
+ * unclamped — so a deduction into negative stock recorded 0 while the item's
+ * authoritative current_stock went to e.g. -15.
+ *
+ * Recompute every row per item as an ANCHORED running sum: walk the
+ * chronological ledger BACKWARDS from the item's live current_stock (truth),
+ * so the result is exact regardless of how much ledger coverage exists.
+ * Convergent — only rows whose stored balance disagrees are rewritten — so
+ * leaving it ungated on every boot is safe and self-healing.
+ */
+async function backfillStockMovementBalances(conn: any): Promise<void> {
+  try {
+    const [itemRows]: any = await conn.query('SELECT id, current_stock FROM items');
+    const stockById = new Map<string, number>(
+      (itemRows || []).map((r: any) => [r.id, Number(r.current_stock) || 0])
+    );
+    const [movRows]: any = await conn.query(
+      'SELECT id, item_id, quantity, balance_after FROM stock_movements ORDER BY item_id ASC, movement_date ASC, created_at ASC'
+    );
+    if (!movRows || movRows.length === 0) return;
+
+    const byItem = new Map<string, { id: string; qty: number; stored: any }[]>();
+    for (const m of movRows || []) {
+      if (!stockById.has(m.item_id)) continue; // no authoritative anchor (item deleted) — leave as-is
+      if (!byItem.has(m.item_id)) byItem.set(m.item_id, []);
+      byItem.get(m.item_id)!.push({ id: m.id, qty: Number(m.quantity) || 0, stored: m.balance_after });
+    }
+
+    let updated = 0;
+    for (const [itemId, movs] of byItem) {
+      let acc = stockById.get(itemId)!;
+      for (let i = movs.length - 1; i >= 0; i--) {
+        const m = movs[i];
+        // DECIMAL columns roundtrip as strings; compare numerically
+        const storedNum = m.stored === null || m.stored === undefined ? null : Number(m.stored);
+        if (storedNum === null || isNaN(storedNum) || Math.abs(storedNum - acc) > 1e-9) {
+          try {
+            await conn.query('UPDATE stock_movements SET balance_after = ? WHERE id = ?', [acc, m.id]);
+            updated++;
+          } catch (e: any) {
+            console.warn('[MySQL Migration] movement balance backfill notice:', e.message);
+          }
+        }
+        acc -= m.qty;
+      }
+    }
+    if (updated > 0) {
+      console.log(`[MySQL Migration] balance_after backfill corrected ${updated} stock_movements rows.`);
+    }
+  } catch (e: any) {
+    console.warn('[MySQL Migration] stock movement balance backfill skipped:', e.message);
+  }
+}
+
+/**
  * Automatically provisions the MySQL database schema and runs initial migrations
  * if tables do not exist, ensuring zero downtime and immediate table availability.
  */
@@ -1354,6 +1411,10 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
       } catch (backfillErr: any) {
         console.warn('[MySQL Migration] stock_movements backfill notice:', backfillErr.message);
       }
+
+      // Recompute balance_after on ledger rows whose stored snapshot disagrees
+      // with the anchored running sum (legacy clamped-snapshot rows).
+      await backfillStockMovementBalances(conn);
 
       // =====================================================================
       // ITEMS FK NORMALIZATION (Golden Rule §2, migrated 2026-10-14):

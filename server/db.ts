@@ -960,7 +960,11 @@ class ServerLocalDatabase {
     const item = this.findItemRaw(id);
     if (!item) throw new Error(`Item ${id} not found.`);
     const current = item.currentStock || 0;
-    const nextStock = Math.max(0, current + delta);
+    // NEGATIVE STOCK IS ALLOWED (mirrors the Azure MySQL path, which applies
+    // the raw delta unclamped in liveSyncStockMovement): clamping here made
+    // the ledger's balance_after snapshot diverge from the authoritative
+    // MySQL current_stock (e.g. deduction to -15 recorded as 0).
+    const nextStock = current + delta;
     const movementId = `stk-${this.nextLedgerMs()}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Normalize and deduplicate existing location stock breakdown
@@ -1014,7 +1018,7 @@ class ServerLocalDatabase {
         const curLocStock = Number(updatedLocations[locIdx].currentStock) || 0;
         updatedLocations[locIdx] = {
           ...updatedLocations[locIdx],
-          currentStock: Math.max(0, curLocStock + delta),
+          currentStock: curLocStock + delta,
         };
         targetLocationId = updatedLocations[locIdx].locationId;
       } else if (delta > 0) {
@@ -3040,7 +3044,8 @@ class ServerLocalDatabase {
     const newSlip: TripSlip = { ...data, id: `ts-${Date.now()}`, createdAt: new Date().toISOString() };
     this.data.tripSlips.unshift(newSlip);
 
-    // Sync vehicle & driver status
+    // Sync vehicle status; drivers are employees (managed by the Employees
+    // module), so there is no separate driver status to flip here.
     const isBusy = data.status === 'transit' || data.status === 'loading';
     try {
       this.updateVehicle(data.vehicleId, {
@@ -3048,7 +3053,6 @@ class ServerLocalDatabase {
         currentDriverId: data.driverId,
         currentDriverName: data.driverName,
       });
-      this.updateDriver(data.driverId, { status: isBusy ? 'on_duty' : 'available' });
     } catch (e) {
       console.error('Error syncing vehicle status:', e);
     }
@@ -3072,7 +3076,6 @@ class ServerLocalDatabase {
         currentDriverId: updated.driverId,
         currentDriverName: updated.driverName,
       });
-      this.updateDriver(updated.driverId, { status: isBusy ? 'on_duty' : 'available' });
     } catch (e) {
       console.error('Error syncing vehicle status:', e);
     }

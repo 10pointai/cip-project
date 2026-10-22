@@ -78,7 +78,8 @@ const FEATURE_COLLECTIONS: Record<string, CollectionName[]> = {
   sales: ['sales', 'purchases', 'transactions', 'accounts'],
   purchases: ['purchases', 'sales', 'transactions', 'accounts'],
   production: ['productionBatches', 'items'],
-  logistics: ['vehicles', 'drivers', 'tripSlips', 'tyres'],
+  // drivers are employees with role 'driver' — loaded via 'employees'.
+  logistics: ['vehicles', 'tripSlips', 'tyres', 'employees'],
   // attendance reads are date-scoped (daily sheet / register fetch their own
   // window); the ledger rows carry each employee's virtual account balance,
   // and accounts ride along — recording a bank-linked payout needs them.

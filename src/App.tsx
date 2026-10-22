@@ -195,19 +195,6 @@ function AppContent() {
     }
   }, [sidebarCollapsed]);
 
-  // Opening a party's detail screen collapses the sidebar by default;
-  // going back restores whatever the user had before.
-  const sidebarWasCollapsed = React.useRef<boolean>(false);
-  const handlePartyDetailOpenChange = (isOpen: boolean) => {
-    if (isOpen) {
-      sidebarWasCollapsed.current = sidebarCollapsed;
-      setSidebarCollapsed(true);
-    } else if (sidebarWasCollapsed.current) {
-      sidebarWasCollapsed.current = false;
-      setSidebarCollapsed(false);
-    }
-  };
-
   // Handlers for Accounts & Transfers
   const handleAddAccount = (accData: any) => {
     db.addAccount(accData);
@@ -528,7 +515,6 @@ function AppContent() {
               onAddTransaction={handleAddTransaction}
               onRecordPayment={handleRecordPayment}
               onOpenInOrders={handleOpenInOrders}
-              onPartyDetailOpenChange={handlePartyDetailOpenChange}
             />
           )}
 

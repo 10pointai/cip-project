@@ -2320,12 +2320,19 @@ export async function liveSyncStockMovement(item: Item, movement: StockMovementR
         id, item_id, location_id, movement_type, quantity,
         balance_after, rate, movement_value, valuation_rate_after,
         reference_type, reference_number, reference_id, party_id, notes, movement_date, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?,
+        IFNULL((SELECT current_stock FROM items WHERE id = ?) + ?, ?),
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         movement.id,
         item.id,
         movement.locationId || null,
         movement.type,
+        delta,
+        // Running balance anchored to the DB's own pre-delta current_stock
+        // (authoritative; falls back to the in-memory snapshot if the items
+        // row does not exist yet — the REPLACE fallback below creates it).
+        item.id,
         delta,
         movement.balanceAfter !== undefined && movement.balanceAfter !== null ? Number(movement.balanceAfter) : null,
         movement.rate !== undefined && movement.rate !== null ? Number(movement.rate) : null,

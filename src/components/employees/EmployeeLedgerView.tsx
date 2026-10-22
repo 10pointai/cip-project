@@ -13,6 +13,7 @@ import {
   Filter,
   Banknote,
   IndianRupee,
+  AlertTriangle,
 } from 'lucide-react';
 import { useDatabase } from '../../hooks/useDatabase';
 import { Employee, EmployeeLedgerTransaction, EmployeePayment, CashBankAccount } from '../../types';
@@ -380,7 +381,10 @@ export function EmployeeLedgerView({ employees, focusedEmpId }: EmployeeLedgerVi
             <thead className="sticky top-16 z-20">
               <tr className="bg-[var(--color-surface-container-low)] border-b border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] text-[11px] font-bold uppercase tracking-wider">
                 <th className="p-4 min-w-[150px]">Date &amp; Time</th>
-                <th className="p-4">Employee</th>
+                {/* Employee column only on the all-employees view — the detail
+                    page's Ledger tab already shows the employee's name in its
+                    header, so the column is redundant there */}
+                {!focusEmp && <th className="p-4">Employee</th>}
                 <th className="p-4">Particulars</th>
                 <th className="p-4">Bank / Account</th>
                 <th className="p-4 min-w-[140px]">Amount</th>
@@ -391,7 +395,7 @@ export function EmployeeLedgerView({ employees, focusedEmpId }: EmployeeLedgerVi
             <tbody className="divide-y divide-[var(--color-outline-variant)]/60 text-xs">
               {displayLines.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="p-8 text-center text-[var(--color-on-surface-variant)] font-semibold">
+                  <td colSpan={focusEmp ? 6 : 7} className="p-8 text-center text-[var(--color-on-surface-variant)] font-semibold">
                     No transactions yet — record the first entry (opening balances are carried on each employee's card).
                   </td>
                 </tr>
@@ -430,7 +434,9 @@ export function EmployeeLedgerView({ employees, focusedEmpId }: EmployeeLedgerVi
                         <p className="font-bold text-[var(--color-on-surface)]">{line.date}</p>
                         {regTime && <p className="text-[10px] font-semibold text-[var(--color-on-surface-variant)]">{regTime}</p>}
                       </td>
-                      <td className="p-4 font-bold text-[var(--color-on-surface)]">{line.employeeName}</td>
+                      {!focusEmp && (
+                        <td className="p-4 font-bold text-[var(--color-on-surface)]">{line.employeeName}</td>
+                      )}
                       <td className="p-4">
                         <div className="flex flex-col items-start gap-1">
                           <span className={`inline-flex items-center gap-1 px-2 py-0.5 font-bold text-[10px] rounded-full whitespace-nowrap ${tag.cls}`}>
@@ -469,7 +475,7 @@ export function EmployeeLedgerView({ employees, focusedEmpId }: EmployeeLedgerVi
       </div>
 
       <p className="text-[10px] text-[var(--color-on-surface-variant)] px-1">
-        Wage rows post automatically: daily wagers earn per attendance day (Present/Late/Early Exit full, Half Day half, Holiday paid); monthly wagers get full salary on the 1st, minus absents and half-days. Record Transaction → Adjust Ledger opens Increase/Reduce tabs (always on-ledger, book on credit, no bank); Paid To Employee pays OUT of a chosen bank (or books on credit, with an "Add on Ledger" switch); Received From Employee raises the balance and MUST name the bank account the money arrived in (money IN). Employee Balance shows the row's employee's running balance, not a combined total.
+        Wage rows post automatically: daily wagers earn per attendance day (Present/Late/Early Exit full, Half Day half, Holiday paid); monthly wagers get full salary on the 1st, minus absents and half-days. Record Transaction → Adjust Ledger opens Increase/Reduce tabs (always on-ledger, book on credit, no bank); Paid To Employee pays OUT of a chosen bank (MANDATORY, with an "Add on Ledger" switch); Received From Employee raises the balance and MUST name the bank account the money arrived in (money IN). Employee Balance shows the row's employee's running balance, not a combined total.
       </p>
 
       {/* MODAL: Record ledger transaction — the employee is chosen HERE */}
@@ -507,7 +513,7 @@ interface LedgerTxnModalProps {
    *  'adjust'   = Adjust Ledger — Increase/Reduce tabs, no bank, no checkbox
    *               (always on-ledger, book on credit) —
    *  'paid'     = ORIGINAL Paid To Employee — balance ↓, bank money OUT
-   *               (empty = credit), "Add on Ledger" checkbox —
+   *               (bank MANDATORY), "Add on Ledger" checkbox —
    *  'received' = Received From Employee — balance ↑ ALWAYS, bank REQUIRED
    *               (money IN), no checkbox.
    *  */
@@ -527,8 +533,8 @@ interface LedgerTxnModalProps {
  *   'adjust'   — Adjust Ledger: Increase/Reduce tabs, NO bank account, NO
  *                checkbox — every row lands on the ledger (book on credit).
  *   'paid'     — original Paid To Employee: balance goes DOWN with a Bank
- *                Account picker (money OUT; empty = book on credit) and the
- *                "Add on Ledger" checkbox (unchecked = ledger-free direct txn).
+ *                Account picker (money OUT; REQUIRED) and the "Add on Ledger"
+ *                checkbox (unchecked = ledger-free direct txn).
  *   'received' — Received From Employee: balance goes UP ALWAYS ("Add on
  *                Ledger" is implicit), and the employer MUST choose the bank
  *                account the money was received into (movement = money IN).
@@ -556,8 +562,10 @@ export function LedgerTxnModal({
   );
   // Paid variant's checkbox (checked by default — uncheck = direct transaction)
   const [addOnLedger, setAddOnLedger] = useState<boolean>(editingTxn ? editingTxn.type !== 'direct_transaction' : true);
-  // Bank account: paid = optional (empty = book on credit); received = required
+  // Bank account: REQUIRED in both paid & received variants
   const [accountId, setAccountId] = useState<string>(editingTxn?.accountId || '');
+  // Inline mandatory-field error (bank account left unselected on submit)
+  const [showAccountError, setShowAccountError] = useState<boolean>(false);
   const [date, setDate] = useState<string>(editingTxn?.date || new Date().toISOString().split('T')[0]);
   const [amount, setAmount] = useState<string>(editingTxn ? String(editingTxn.amount) : '');
   const [reason, setReason] = useState<string>(editingTxn?.reason || '');
@@ -586,8 +594,9 @@ export function LedgerTxnModal({
       alert('Enter a positive amount.');
       return;
     }
-    if (isReceived && !accountId) {
-      alert('Select the bank account where the money was received.');
+    if (isBankLinked && !accountId) {
+      // Inline error instead of an alert: red field + error caption below it
+      setShowAccountError(true);
       return;
     }
     setIsSubmitting(true);
@@ -599,8 +608,8 @@ export function LedgerTxnModal({
         amount: amt,
         reason: reason.trim(),
         // The Adjust modal never links a bank account; the Paid modal pays
-        // OUT of its account (empty = book on credit) and a ledger-free direct
-        // row books a money-OUT movement; Received books money-IN (required).
+        // OUT of its account (REQUIRED) and a ledger-free direct row books a
+        // money-OUT movement; Received books money-IN (required).
         // intent marks the record surface — it drives the Particulars tag.
         accountId: isBankLinked && accountId ? accountId : undefined,
         direction: isReceived && accountId ? 'money_in' : (isPaid && !addOnLedger && accountId ? 'money_out' : undefined),
@@ -728,18 +737,27 @@ export function LedgerTxnModal({
           </div>
 
           {/* BANK-LINKED variants (paid + received): the bank account picker —
-              money OUT on record for paid; money IN (required) for received;
-              empty for paid books the row on credit. */}
+              money OUT on record for paid; money IN for received. REQUIRED in
+              both variants (no credit-booking through this modal). */}
           {isBankLinked && (
             <div className="bg-[var(--color-surface-container-high)] p-3 rounded-xl border border-[var(--color-outline-variant)] space-y-3">
               <label className="text-xs font-bold text-[var(--color-on-surface-variant)] flex items-center gap-1.5">
                 <Landmark className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-                {isReceived ? 'Received In (Bank Account) *' : 'Bank Account'}
+                {isReceived ? 'Received In (Bank Account) *' : 'Bank Account *'}
               </label>
-              <div className="px-3 py-2 bg-[var(--color-surface-container-lowest)] rounded-lg border border-transparent focus-within:border-[var(--color-primary)]">
+              <div
+                className={`px-3 py-2 bg-[var(--color-surface-container-lowest)] rounded-lg border transition-colors ${
+                  showAccountError
+                    ? 'border-[var(--color-error)]'
+                    : 'border-transparent focus-within:border-[var(--color-primary)]'
+                }`}
+              >
                 <SearchableSelect
                   value={accountId}
-                  onChange={setAccountId}
+                  onChange={(v) => {
+                    setAccountId(v);
+                    if (v) setShowAccountError(false);
+                  }}
                   placeholder="Type to search accounts..."
                   options={accounts.filter((a) => a.isActive !== false).map((a) => ({
                     value: a.id,
@@ -748,12 +766,18 @@ export function LedgerTxnModal({
                   }))}
                 />
               </div>
+              {showAccountError && !accountId && (
+                <p className="text-[10px] font-bold text-[var(--color-error)] flex items-center gap-1">
+                  <AlertTriangle className="w-3 h-3 shrink-0" />
+                  {isReceived
+                    ? 'Select the bank account where the money was received — this field is mandatory.'
+                    : 'Select the bank account the payment goes out of — this field is mandatory.'}
+                </p>
+              )}
               <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)]">
                 {isReceived
                   ? "Money comes INTO this account's ledger on record."
-                  : addOnLedger
-                  ? "Money goes OUT of this account's ledger on record. Leave empty to book on credit."
-                  : 'Money goes OUT of the selected account on record. Leave empty to keep it informational.'}
+                  : "Money goes OUT of this account's ledger on record."}
               </p>
             </div>
           )}

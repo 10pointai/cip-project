@@ -1163,11 +1163,15 @@ export function OrdersView({
         </div>
       </div>
 
-      {/* Orders Table Display */}
-      <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl overflow-hidden shadow-xs">
-        <div className="overflow-x-auto">
+      {/* Orders Table Display — NO container scroll: the page scrolls and
+          the header rides sticky beneath the app header (h-16), matching the
+          parties ledger table. overflow-clip keeps the rounded corners while
+          letting the sticky header anchor to the viewport (an overflow-
+          hidden/auto ancestor would turn it into its own scroll container). */}
+      <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl overflow-clip shadow-xs">
+        <div>
           <table className="w-full text-left border-collapse">
-            <thead>
+            <thead className="sticky top-16 z-20">
               <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
                 <th className="py-3.5 px-4">{fixedType === 'sales' ? 'Sale ID' : fixedType === 'purchase' ? 'Purchase ID' : 'Order ID'}</th>
                 {!fixedType && <th className="py-3.5 px-3">Type</th>}

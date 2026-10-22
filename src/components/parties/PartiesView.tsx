@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Search,
   Plus,
@@ -42,8 +42,6 @@ interface PartiesViewProps {
   onRecordPayment?: (paymentData: any) => void;
   /** Jump to the Sales/Purchases module with an order's flow deep-linked */
   onOpenInOrders?: (orderId: string, orderType: 'sales' | 'purchase', action: string) => void;
-  /** A party detail screen opened / closed (App collapses the sidebar) */
-  onPartyDetailOpenChange?: (isOpen: boolean) => void;
 }
 
 export function PartiesView({
@@ -59,7 +57,6 @@ export function PartiesView({
   onAddTransaction,
   onRecordPayment,
   onOpenInOrders,
-  onPartyDetailOpenChange,
 }: PartiesViewProps) {
   const { showToast } = useToast();
   const { hasPermission } = useAuth();
@@ -82,13 +79,6 @@ export function PartiesView({
     partyId?: string;
     type: 'payment_in' | 'payment_out';
   }>({ isOpen: false, type: 'payment_in' });
-
-  // Notify the shell when the dedicated detail screen opens/closes
-  // (the App collapses the sidebar by default for the detail view).
-  useEffect(() => {
-    onPartyDetailOpenChange?.(!!selectedPartyId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPartyId]);
 
   // Filtered Parties
   const filteredParties = useMemo(() => {

@@ -30,13 +30,13 @@ import {
   ShieldAlert,
   DollarSign,
 } from 'lucide-react';
-import { Vehicle, Driver, TripSlip, Order, CompanySettings, Tyre, VehicleEmiDetails } from '../../types';
+import { Vehicle, Employee, TripSlip, Order, CompanySettings, Tyre, VehicleEmiDetails } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 
 export const LogisticsView: React.FC = () => {
   // Database States
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
-  const [drivers, setDrivers] = useState<Driver[]>([]);
+  const [employees, setEmployees] = useState<Employee[]>([]);
   const [slips, setSlips] = useState<TripSlip[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [settings, setSettings] = useState<CompanySettings | null>(null);
@@ -54,7 +54,6 @@ export const LogisticsView: React.FC = () => {
   // Creation Modals
   const [isSlipModalOpen, setIsSlipModalOpen] = useState(false);
   const [isVehicleModalOpen, setIsVehicleModalOpen] = useState(false);
-  const [isDriverModalOpen, setIsDriverModalOpen] = useState(false);
 
   // Form States - Trip Slip
   const [formSlipNo, setFormSlipNo] = useState('');
@@ -100,12 +99,6 @@ export const LogisticsView: React.FC = () => {
   const [formVehEmiStatus, setFormVehEmiStatus] = useState<'active' | 'closed' | 'defaulted'>('active');
   const [formVehEmiNotes, setFormVehEmiNotes] = useState<string>('');
 
-  // Form States - Driver
-  const [formDrName, setFormDrName] = useState('');
-  const [formDrLicense, setFormDrLicense] = useState('');
-  const [formDrPhone, setFormDrPhone] = useState('');
-  const [formDrStatus, setFormDrStatus] = useState<'available' | 'on_duty' | 'leave'>('available');
-
   // Creation / Editing Modals for Tyres
   const [isTyreModalOpen, setIsTyreModalOpen] = useState(false);
   const [editingTyre, setEditingTyre] = useState<Tyre | null>(null);
@@ -132,7 +125,7 @@ export const LogisticsView: React.FC = () => {
   // Load and subscribe to database changes
   const loadData = () => {
     setVehicles(localDb.getVehicles());
-    setDrivers(localDb.getDrivers());
+    setEmployees(localDb.getEmployees());
     setSlips(localDb.getTripSlips());
     setOrders(localDb.getOrders());
     setSettings(localDb.getSettings());
@@ -149,6 +142,9 @@ export const LogisticsView: React.FC = () => {
   useEffect(() => {
     loadData();
   }, [activeSubTab]);
+
+  // Drivers are employees of role 'driver', managed in the Employees module
+  const driverEmployees = useMemo(() => employees.filter(e => e.role === 'driver'), [employees]);
 
   // Format Helper
   const formatCurrency = (val: number) => {
@@ -249,7 +245,7 @@ export const LogisticsView: React.FC = () => {
   const handleSlipVehicleChange = (vehId: string) => {
     setFormSlipVehicleId(vehId);
     const veh = vehicles.find(v => v.id === vehId);
-    if (veh && veh.currentDriverId) {
+    if (veh && veh.currentDriverId && driverEmployees.some(e => e.id === veh.currentDriverId)) {
       setFormSlipDriverId(veh.currentDriverId);
     }
   };
@@ -262,7 +258,7 @@ export const LogisticsView: React.FC = () => {
     }
 
     const selectedVehicle = vehicles.find(v => v.id === formSlipVehicleId);
-    const selectedDriver = drivers.find(d => d.id === formSlipDriverId);
+    const selectedDriver = driverEmployees.find(d => d.id === formSlipDriverId);
     const selectedOrder = orders.find(o => o.id === formSlipOrderId);
 
     if (!selectedVehicle || !selectedDriver) return;
@@ -312,12 +308,11 @@ export const LogisticsView: React.FC = () => {
   };
 
   const handleDeleteTrip = (id: string) => {
-    if (confirm('Are you sure you want to delete this trip slip? This will release the vehicle and driver status.')) {
+    if (confirm('Are you sure you want to delete this trip slip? This will release the vehicle status.')) {
       // Release vehicle first
       const slip = slips.find(s => s.id === id);
       if (slip) {
         localDb.updateVehicle(slip.vehicleId, { status: 'available' });
-        localDb.updateDriver(slip.driverId, { status: 'available' });
       }
       localDb.deleteTripSlip(id);
       setViewingSlip(null);
@@ -408,7 +403,7 @@ export const LogisticsView: React.FC = () => {
       return;
     }
 
-    const assignedDriver = drivers.find(d => d.id === formVehDriverId);
+    const assignedDriver = driverEmployees.find(d => d.id === formVehDriverId);
 
     const emiDetails: VehicleEmiDetails = formVehHasEmi
       ? {
@@ -480,30 +475,6 @@ export const LogisticsView: React.FC = () => {
         lastPaymentDate: new Date().toISOString().split('T')[0],
       },
     });
-  };
-
-  // Handle Add Driver Form
-  const handleCreateDriver = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formDrName || !formDrPhone || !formDrLicense) {
-      alert('Please fill in all mandatory fields.');
-      return;
-    }
-
-    const newDriver: Omit<Driver, 'id' | 'createdAt'> = {
-      name: formDrName.trim(),
-      phone: formDrPhone.trim(),
-      licenseNo: formDrLicense.toUpperCase().trim(),
-      status: formDrStatus,
-    };
-
-    localDb.addDriver(newDriver);
-    setIsDriverModalOpen(false);
-
-    // Clear Form
-    setFormDrName('');
-    setFormDrPhone('');
-    setFormDrLicense('');
   };
 
   // Tyre Handlers
@@ -612,17 +583,17 @@ export const LogisticsView: React.FC = () => {
     });
   }, [vehicles, searchQuery, statusFilter]);
 
-  const filteredDrivers = useMemo(() => {
-    return drivers.filter(d => {
-      const matchesSearch = 
+  const filteredDriverEmployees = useMemo(() => {
+    return driverEmployees.filter(d => {
+      const matchesSearch =
         d.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        d.licenseNo.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (d.licenseNo || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
         d.phone.includes(searchQuery);
-      
+
       const matchesStatus = statusFilter === 'all' || d.status === statusFilter;
       return matchesSearch && matchesStatus;
     });
-  }, [drivers, searchQuery, statusFilter]);
+  }, [driverEmployees, searchQuery, statusFilter]);
 
   const filteredTyres = useMemo(() => {
     return tyres.filter(t => {
@@ -664,11 +635,11 @@ export const LogisticsView: React.FC = () => {
           Vehicle EMI & Loans
         </button>
         <button
-          onClick={() => setIsDriverModalOpen(true)}
+          onClick={() => setActiveSubTab('drivers')}
           className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--color-surface-container-lowest)] hover:bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border border-[var(--color-outline-variant)] rounded-full text-xs font-semibold shadow-2xs transition-colors"
         >
           <User className="h-4 w-4 text-[var(--color-outline)]" />
-          Add Driver
+          Drivers Directory
         </button>
         <button
           onClick={() => handleOpenTyreModal(null)}
@@ -803,7 +774,7 @@ export const LogisticsView: React.FC = () => {
             <User className="h-4 w-4" />
             Drivers Directory
             <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)]">
-              {drivers.length}
+              {driverEmployees.length}
             </span>
           </button>
           <button
@@ -872,9 +843,8 @@ export const LogisticsView: React.FC = () => {
               )}
               {activeSubTab === 'drivers' && (
                 <>
-                  <option value="available">Available</option>
-                  <option value="on_duty">On Duty</option>
-                  <option value="leave">On Leave</option>
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive</option>
                 </>
               )}
               {activeSubTab === 'tyres' && (
@@ -1638,88 +1608,94 @@ export const LogisticsView: React.FC = () => {
         </div>
       )}
 
-      {/* 3. DRIVERS DIRECTORY LIST VIEW */}
+      {/* 3. DRIVERS DIRECTORY (sourced from Employees module, read-only) */}
       {activeSubTab === 'drivers' && (
-        <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-[28px] overflow-hidden shadow-2xs">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-                  <th className="py-3.5 px-4">Driver Details</th>
-                  <th className="py-3.5 px-3">Commercial License No</th>
-                  <th className="py-3.5 px-3">Contact Phone</th>
-                  <th className="py-3.5 px-3">Status</th>
-                  <th className="py-3.5 px-4 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[var(--color-outline-variant)]">
-                {filteredDrivers.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="py-12 text-center text-[var(--color-on-surface-variant)]">
-                      <User className="h-8 w-8 text-[var(--color-outline)] mx-auto mb-2" />
-                      <p className="text-xs font-bold uppercase">No drivers registered</p>
-                    </td>
+        <div className="space-y-4">
+          <div className="bg-[var(--color-info-container)]/40 border border-[var(--color-info)]/30 rounded-[24px] p-4 flex gap-3 text-left">
+            <User className="h-5 w-5 text-[var(--color-primary)] shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <h5 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider">Drivers Come From The Employees Module</h5>
+              <p className="text-[11px] text-[var(--color-on-surface-variant)] leading-normal">
+                This directory lists every active employee with the <b>driver</b> role. Register, edit, or deactivate drivers in the
+                Employees section — they automatically appear here for vehicle assignment and trip slip dispatch.
+              </p>
+            </div>
+          </div>
+
+          <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-[28px] overflow-hidden shadow-2xs">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
+                    <th className="py-3.5 px-4">Driver Details</th>
+                    <th className="py-3.5 px-3">Commercial License No</th>
+                    <th className="py-3.5 px-3">Contact Phone</th>
+                    <th className="py-3.5 px-3">Assigned Vehicles</th>
+                    <th className="py-3.5 px-3">Status</th>
                   </tr>
-                ) : (
-                  filteredDrivers.map((driver) => (
-                    <tr key={driver.id} className="hover:bg-[var(--color-surface-container)]/40 transition-colors text-xs text-[var(--color-on-surface)]">
-                      <td className="py-3.5 px-4">
-                        <div className="flex items-center gap-3">
-                          <div className="h-9 w-9 rounded-full bg-[var(--color-surface-container-high)] border border-[var(--color-outline-variant)] flex items-center justify-center font-bold text-[var(--color-on-surface)] text-sm">
-                            {driver.name.charAt(0)}
-                          </div>
-                          <div>
-                            <span className="font-bold text-[var(--color-on-surface)] block">{driver.name}</span>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="py-3.5 px-3">
-                        <span className="font-mono text-xs text-[var(--color-on-surface-variant)] font-bold">{driver.licenseNo}</span>
-                      </td>
-                      <td className="py-3.5 px-3">
-                        <span className="text-[var(--color-on-surface)] font-bold">{driver.phone}</span>
-                      </td>
-                      <td className="py-3.5 px-3">
-                        <span className={`text-[10px] font-extrabold uppercase px-2.5 py-0.5 rounded-full ${
-                          driver.status === 'available'
-                            ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)] border border-[var(--color-success)]/20'
-                            : driver.status === 'on_duty'
-                              ? 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)] border border-[var(--color-info)]/20'
-                              : 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)] border border-[var(--color-warning)]/20'
-                        }`}>
-                          {driver.status === 'available' && 'Available'}
-                          {driver.status === 'on_duty' && 'On Duty'}
-                          {driver.status === 'leave' && 'On Leave'}
-                        </span>
-                      </td>
-                      <td className="py-3.5 px-4 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <a
-                            href={`tel:${driver.phone}`}
-                            className="px-3 py-1 text-[11px] bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] font-bold rounded-full transition-colors"
-                          >
-                            Call
-                          </a>
-                          <button
-                            onClick={() => {
-                              const isLeave = driver.status === 'leave';
-                              localDb.updateDriver(driver.id, { status: isLeave ? 'available' : 'leave' });
-                            }}
-                            className={`px-3 py-1 text-[11px] font-bold rounded-full transition-colors ${
-                              driver.status === 'leave'
-                                ? 'bg-[var(--color-success-container)] hover:opacity-90 text-[var(--color-on-success-container)]'
-                                : 'bg-[var(--color-warning-container)] hover:opacity-90 text-[var(--color-on-warning-container)]'
-                            }`}
-                          >
-                            {driver.status === 'leave' ? 'Mark Back' : 'Mark Leave'}
-                          </button>
-                        </div>
+                </thead>
+                <tbody className="divide-y divide-[var(--color-outline-variant)]">
+                  {filteredDriverEmployees.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                        <User className="h-8 w-8 text-[var(--color-outline)] mx-auto mb-2" />
+                        <p className="text-xs font-bold uppercase">No driver-role employees found</p>
+                        <p className="text-[11px] mt-1 text-[var(--color-on-surface-variant)]">
+                          Create a driver in the Employees module to see them listed here.
+                        </p>
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  ) : (
+                    filteredDriverEmployees.map((driver) => {
+                      const assignedVehs = vehicles.filter(v => v.currentDriverId === driver.id);
+
+                      return (
+                        <tr key={driver.id} className="hover:bg-[var(--color-surface-container)]/40 transition-colors text-xs text-[var(--color-on-surface)]">
+                          <td className="py-3.5 px-4">
+                            <div className="flex items-center gap-3">
+                              <div className="h-9 w-9 rounded-full bg-[var(--color-surface-container-high)] border border-[var(--color-outline-variant)] flex items-center justify-center font-bold text-[var(--color-on-surface)] text-sm">
+                                {driver.name.charAt(0)}
+                              </div>
+                              <div>
+                                <span className="font-bold text-[var(--color-on-surface)] block">{driver.name}</span>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-3">
+                            <span className="font-mono text-xs text-[var(--color-on-surface-variant)] font-bold">{driver.licenseNo || '—'}</span>
+                          </td>
+                          <td className="py-3.5 px-3">
+                            <span className="text-[var(--color-on-surface)] font-bold">{driver.phone}</span>
+                          </td>
+                          <td className="py-3.5 px-3">
+                            {assignedVehs.length === 0 ? (
+                              <span className="text-[var(--color-on-surface-variant)] font-semibold">None</span>
+                            ) : (
+                              <div className="flex flex-wrap gap-1">
+                                {assignedVehs.map(v => (
+                                  <span key={v.id} className="font-mono text-[10px] font-bold bg-[var(--color-surface-container-highest)] px-2 py-0.5 rounded-full border border-[var(--color-outline-variant)]">
+                                    {v.vehicleNo}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-3">
+                            <span className={`text-[10px] font-extrabold uppercase px-2.5 py-0.5 rounded-full ${
+                              driver.status === 'active'
+                                ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)] border border-[var(--color-success)]/20'
+                                : 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)] border border-[var(--color-warning)]/20'
+                            }`}>
+                              {driver.status === 'active' ? 'Active' : 'Inactive'}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
@@ -2308,12 +2284,17 @@ export const LogisticsView: React.FC = () => {
                     required
                   >
                     <option value="">-- Choose Driver --</option>
-                    {drivers.map(d => (
+                    {driverEmployees.map(d => (
                       <option key={d.id} value={d.id}>
-                        {d.name} ({d.status === 'on_duty' ? 'On Duty' : 'Available'})
+                        {d.name} ({d.status === 'active' ? 'Active' : 'Inactive'})
                       </option>
                     ))}
                   </select>
+                  {driverEmployees.length === 0 && (
+                    <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-1">
+                      No drivers yet — add a driver-role employee in the Employees module.
+                    </p>
+                  )}
                 </div>
 
                 {/* Material & Qty */}
@@ -2532,9 +2513,12 @@ export const LogisticsView: React.FC = () => {
                           className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
                         >
                           <option value="">-- Unassigned --</option>
-                          {drivers.map(d => (
+                          {driverEmployees.map(d => (
                             <option key={d.id} value={d.id}>{d.name}</option>
                           ))}
+                          {driverEmployees.length === 0 && (
+                            <option value="" disabled>Add a driver in the Employees module</option>
+                          )}
                         </select>
                       </div>
                     </div>
@@ -2812,81 +2796,6 @@ export const LogisticsView: React.FC = () => {
                     {editingVehicle ? 'Save Changes' : 'Register Vehicle'}
                   </button>
                 </div>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* 4. ADD DRIVER MODAL */}
-      {isDriverModalOpen && (
-        <div className="fixed inset-0 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-          <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] max-w-sm w-full overflow-hidden">
-            <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
-              <h3 className="font-extrabold text-[var(--color-on-surface)] text-sm flex items-center gap-2">
-                <User className="h-4.5 w-4.5 text-[var(--color-primary)]" /> Register Heavy Driver
-              </h3>
-              <button
-                onClick={() => setIsDriverModalOpen(false)}
-                className="p-1.5 hover:bg-[var(--color-surface-container-high)] rounded-full text-[var(--color-on-surface-variant)] transition"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateDriver}>
-              <div className="p-5 space-y-4 text-left">
-                <div className="space-y-1.5">
-                  <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Driver Full Name *</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Satnam Singh"
-                    value={formDrName}
-                    onChange={(e) => setFormDrName(e.target.value)}
-                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                    required
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">HGV Driving License (DL) *</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. PB-02-2012-0012345"
-                    value={formDrLicense}
-                    onChange={(e) => setFormDrLicense(e.target.value)}
-                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                    required
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Mobile Number *</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. +91 98765 43210"
-                    value={formDrPhone}
-                    onChange={(e) => setFormDrPhone(e.target.value)}
-                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="p-4 bg-[var(--color-surface-container)] border-t border-[var(--color-outline-variant)] flex justify-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => setIsDriverModalOpen(false)}
-                  className="px-4 py-2 border border-[var(--color-outline-variant)] rounded-full text-xs font-bold bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)]"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-bold transition shadow-xs"
-                >
-                  Register Driver
-                </button>
               </div>
             </form>
           </div>
