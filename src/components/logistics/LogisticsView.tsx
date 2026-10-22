@@ -872,19 +872,13 @@ export const LogisticsView: React.FC = () => {
 
       {/* 1. TRIP SLIPS LOG TAB */}
       {activeSubTab === 'trips' && (
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 items-start">
+        <div className="grid grid-cols-1 gap-6 items-start">
           {/* List of Trip Slips */}
-          <div className="xl:col-span-2 space-y-3">
+          <div className=" space-y-3">
             {filteredSlips.length === 0 ? (
               <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-[28px] p-12 text-center shadow-2xs">
                 <FileText className="h-10 w-10 text-[var(--color-outline)] mx-auto mb-3" />
                 <p className="text-[var(--color-on-surface-variant)] font-medium text-xs">No trip slips found matching filters.</p>
-                <button
-                  onClick={handleOpenSlipModal}
-                  className="mt-4 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-semibold shadow-xs"
-                >
-                  Create Your First Trip Slip
-                </button>
               </div>
             ) : (
               filteredSlips.map((slip) => (
@@ -970,7 +964,7 @@ export const LogisticsView: React.FC = () => {
 
           {/* Interactive Slip Details & Thermal Receipt Printer */}
           <div className="xl:col-span-1">
-            {viewingSlip ? (
+            {viewingSlip && (
               <div className="space-y-4">
                 {/* Actions Panel */}
                 <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs space-y-3">
@@ -1117,14 +1111,6 @@ export const LogisticsView: React.FC = () => {
                     </div>
                   </div>
                 </div>
-              </div>
-            ) : (
-              <div className="bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-[28px] p-8 text-center text-[var(--color-on-surface-variant)]">
-                <Truck className="h-8 w-8 text-[var(--color-outline)] mx-auto mb-2" />
-                <p className="text-xs font-bold uppercase tracking-wider text-[var(--color-on-surface)]">Select a Trip Slip</p>
-                <p className="text-[11px] mt-1 text-[var(--color-on-surface-variant)] leading-normal">
-                  Click on any trip slip from the log to view live status details, issue trip status updates, or print a thermal driver receipt.
-                </p>
               </div>
             )}
           </div>
