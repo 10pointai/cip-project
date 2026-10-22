@@ -21,6 +21,7 @@ import {
   Driver,
   TripSlip,
   Tyre,
+  VehicleEmiEntry,
   CashBankAccount,
   InternalTransfer,
   AccountAdjustment,
@@ -46,6 +47,7 @@ export function useDatabase() {
   const [drivers, setDrivers] = useState<Driver[]>(() => cloudStore.getDrivers());
   const [tripSlips, setTripSlips] = useState<TripSlip[]>(() => cloudStore.getTripSlips());
   const [tyres, setTyres] = useState<Tyre[]>(() => cloudStore.getTyres());
+  const [vehicleEmiEntries, setVehicleEmiEntries] = useState<VehicleEmiEntry[]>(() => cloudStore.getVehicleEmiEntries());
   const [employees, setEmployees] = useState<Employee[]>(() => cloudStore.getEmployees());
   const [attendance, setAttendance] = useState<EmployeeAttendance[]>(() => cloudStore.getAttendance());
   const [leaves, setLeaves] = useState<EmployeeLeave[]>(() => cloudStore.getLeaves());
@@ -79,6 +81,7 @@ export function useDatabase() {
     setDrivers(cloudStore.getDrivers());
     setTripSlips(cloudStore.getTripSlips());
     setTyres(cloudStore.getTyres());
+    setVehicleEmiEntries(cloudStore.getVehicleEmiEntries());
     setEmployees(cloudStore.getEmployees());
     setAttendance(cloudStore.getAttendance());
     setLeaves(cloudStore.getLeaves());
@@ -133,6 +136,7 @@ export function useDatabase() {
     drivers,
     tripSlips,
     tyres,
+    vehicleEmiEntries,
     employees,
     attendance,
     leaves,

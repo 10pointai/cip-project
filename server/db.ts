@@ -46,6 +46,8 @@ import {
   PartyDocumentLink,
   ItemDocumentLink,
   EmployeeDocumentLink,
+  VehicleDocumentLink,
+  VehicleEmiEntry,
   UserPermissions,
   UserRole,
   UserStatus,
@@ -72,7 +74,9 @@ import {
   liveSyncPartyDocLink,
   liveSyncItemDocLink,
   liveSyncEmployeeDocLink,
+  liveSyncVehicleDocLink,
   liveSyncVehicle,
+  liveSyncVehicleEmiEntry,
   liveSyncDriver,
   liveSyncTripSlip,
   liveSyncTyre,
@@ -93,6 +97,9 @@ import {
   liveSyncStockMovement,
 } from './mysql/azureSync';
 import { isMysqlConfigured } from './mysql/connection';
+
+/** Document-mapping feature kinds (one join table per kind). */
+type DocLinkKind = 'sale' | 'purchase' | 'party' | 'item' | 'employee' | 'vehicle';
 import {
   computeItemValuation,
   computeOutwardConsumptionRate,
@@ -174,6 +181,10 @@ export interface DatabaseSchema {
   itemDocuments: ItemDocumentLink[];
   /** employee ↔ document mapping rows (table employee_documents) */
   employeeDocuments: EmployeeDocumentLink[];
+  /** vehicle ↔ document mapping rows (table vehicle_documents) */
+  vehicleDocuments: VehicleDocumentLink[];
+  /** vehicle EMI ledger rows (table vehicle_emi_entries) — balance stream */
+  vehicleEmiEntries: VehicleEmiEntry[];
 }
 
 /**
@@ -242,6 +253,8 @@ class ServerLocalDatabase {
       partyDocuments: [],
       itemDocuments: [],
       employeeDocuments: [],
+      vehicleDocuments: [],
+      vehicleEmiEntries: [],
       auditLogs: [
         {
           id: `aud-${Date.now()}`,
@@ -2975,18 +2988,39 @@ class ServerLocalDatabase {
 
   // --- LOGISTICS: FLEET, DRIVERS, TRIP SLIPS, TYRES ---
   public getVehicles(): Vehicle[] {
-    return this.data.vehicles;
+    // FK-only storage (Golden Rule §2): the driver display name resolves from
+    // the employees master at READ time, so any employee rename propagates to
+    // every vehicle display without touching vehicle rows. The MySQL path
+    // hydrates identically via LEFT JOIN employees.
+    return this.data.vehicles.map((v) => ({
+      ...v,
+      currentDriverName: this.data.employees.find((e) => e.id === v.currentDriverId)?.name || undefined,
+    }));
   }
 
   public createVehicle(data: Omit<Vehicle, 'id' | 'createdAt'>): Vehicle {
+    // documentIds ride the create payload like createEmployee's flow — staged
+    // uploads (Pending/*) registered while the form was open; strip before
+    // the vehicle spread (never persisted on the row) and link below.
+    const createDocIds = this.extractDocumentIds(data);
+    delete (data as any).documentIds;
+    // Driver display name is NEVER persisted — only the FK id (resolved by
+    // JOIN at read time; see getVehicles).
+    delete (data as any).currentDriverName;
     const newVeh: Vehicle = { ...data, id: `veh-${Date.now()}`, createdAt: new Date().toISOString() };
     this.data.vehicles.unshift(newVeh);
     this.save();
     liveSyncVehicle(newVeh);
+    if (createDocIds.length > 0) this.linkVehicleDocuments(newVeh.id, createDocIds);
     return newVeh;
   }
 
   public updateVehicle(id: string, updates: Partial<Vehicle>): Vehicle {
+    // Defensive strip: edit-mode uploads link immediately via the documents
+    // endpoint — documentIds should never ride an update. The driver display
+    // name is likewise never persisted (FK-only, JOINed at read time).
+    delete (updates as any).documentIds;
+    delete (updates as any).currentDriverName;
     const idx = this.data.vehicles.findIndex((v) => v.id === id);
     if (idx === -1) throw new Error(`Vehicle ${id} not found.`);
     this.data.vehicles[idx] = { ...this.data.vehicles[idx], ...updates };
@@ -3000,9 +3034,77 @@ class ServerLocalDatabase {
     if (idx === -1) return false;
     const veh = this.data.vehicles[idx];
     this.data.vehicles.splice(idx, 1);
+    this.detachVehicleDocuments(id);
     this.save();
     liveSyncVehicle(veh, true);
     return true;
+  }
+
+  // --- VEHICLE EMI LEDGER (entries posted by the daily cron or by operators) ---
+
+  private hydrateVehicleEmiEntry(e: VehicleEmiEntry): VehicleEmiEntry {
+    return {
+      ...e,
+      vehicleNo: this.data.vehicles.find((v) => v.id === e.vehicleId)?.vehicleNo || e.vehicleNo,
+      accountName: this.getAccountById(e.accountId)?.name || e.accountName,
+    };
+  }
+
+  public getVehicleEmiEntries(vehicleId?: string): VehicleEmiEntry[] {
+    const list = this.data.vehicleEmiEntries || [];
+    return (vehicleId ? list.filter((e) => e.vehicleId === vehicleId) : list)
+      .map((e) => this.hydrateVehicleEmiEntry(e));
+  }
+
+  public addVehicleEmiEntry(data: Omit<VehicleEmiEntry, 'id' | 'createdAt'>): VehicleEmiEntry {
+    if (!this.data.vehicleEmiEntries) this.data.vehicleEmiEntries = [];
+    const entry: VehicleEmiEntry = {
+      ...data,
+      id: `vem-${this.nextLedgerMs()}`,
+      createdAt: new Date().toISOString(),
+    };
+    this.data.vehicleEmiEntries.unshift(entry);
+    // Debit the linked account (entry amount leaves the account's balance)
+    this.recalculateAccountBalance(entry.accountId);
+    this.logAudit('CREATE', 'VEHICLE_EMI', entry.id, `${data.source === 'auto' ? 'Auto-posted' : 'Recorded'} vehicle EMI ${this.formatRupee(Number(data.amount) || 0)} for ${this.data.vehicles.find((v) => v.id === data.vehicleId)?.vehicleNo || data.vehicleId} from ${this.getAccountById(data.accountId)?.name || data.accountId}`);
+    this.save();
+    liveSyncVehicleEmiEntry(entry);
+    return entry;
+  }
+
+  public updateVehicleEmiEntry(id: string, updates: Partial<VehicleEmiEntry>): VehicleEmiEntry {
+    const idx = (this.data.vehicleEmiEntries || []).findIndex((e) => e.id === id);
+    if (idx === -1) throw new Error(`Vehicle EMI entry ${id} not found.`);
+    const prev = this.data.vehicleEmiEntries[idx];
+    const updated: VehicleEmiEntry = { ...prev, ...updates, createdAt: prev.createdAt };
+    this.data.vehicleEmiEntries[idx] = updated;
+    // Edit-by-delta: any amount/account change flows straight into the
+    // balance streams on the next recalculation — the entry list is the truth.
+    if (prev.accountId !== updated.accountId) {
+      this.recalculateAccountBalance(prev.accountId);
+    }
+    this.recalculateAccountBalance(updated.accountId);
+    this.logAudit('UPDATE', 'VEHICLE_EMI', id, `Edited vehicle EMI entry (amount ${this.formatRupee(Number(prev.amount) || 0)} → ${this.formatRupee(Number(updated.amount) || 0)})`);
+    this.save();
+    liveSyncVehicleEmiEntry(updated);
+    return updated;
+  }
+
+  public deleteVehicleEmiEntry(id: string): boolean {
+    const idx = (this.data.vehicleEmiEntries || []).findIndex((e) => e.id === id);
+    if (idx === -1) return false;
+    const removed = this.data.vehicleEmiEntries[idx];
+    this.data.vehicleEmiEntries.splice(idx, 1);
+    // Removing the entry reverses its debit from the account balance.
+    this.recalculateAccountBalance(removed.accountId);
+    this.logAudit('DELETE', 'VEHICLE_EMI', id, `Deleted vehicle EMI entry (reverses ${this.formatRupee(Number(removed.amount) || 0)} on ${this.getAccountById(removed.accountId)?.name || removed.accountId})`);
+    this.save();
+    liveSyncVehicleEmiEntry(removed, true);
+    return true;
+  }
+
+  private formatRupee(n: number): string {
+    return `₹${Math.round(n).toLocaleString('en-IN')}`;
   }
 
   public getDrivers(): Driver[] {
@@ -3045,13 +3147,13 @@ class ServerLocalDatabase {
     this.data.tripSlips.unshift(newSlip);
 
     // Sync vehicle status; drivers are employees (managed by the Employees
-    // module), so there is no separate driver status to flip here.
+    // module) and only the driver FK is stored on the vehicle — the display
+    // name resolves from the employees master at read time.
     const isBusy = data.status === 'transit' || data.status === 'loading';
     try {
       this.updateVehicle(data.vehicleId, {
         status: isBusy ? 'on_trip' : 'available',
         currentDriverId: data.driverId,
-        currentDriverName: data.driverName,
       });
     } catch (e) {
       console.error('Error syncing vehicle status:', e);
@@ -3074,7 +3176,6 @@ class ServerLocalDatabase {
       this.updateVehicle(updated.vehicleId, {
         status: isBusy ? 'on_trip' : 'available',
         currentDriverId: updated.driverId,
-        currentDriverName: updated.driverName,
       });
     } catch (e) {
       console.error('Error syncing vehicle status:', e);
@@ -3630,10 +3731,14 @@ class ServerLocalDatabase {
     return this.documentsFor('employee', employeeId);
   }
 
-  private documentsFor(kind: 'sale' | 'purchase' | 'party' | 'item' | 'employee', ownerId: string): AppDocument[] {
+  public getDocumentsForVehicle(vehicleId: string): AppDocument[] {
+    return this.documentsFor('vehicle', vehicleId);
+  }
+
+  private documentsFor(kind: DocLinkKind, ownerId: string): AppDocument[] {
     const links = this.docLinksFor(kind);
     const ids = (links as any[])
-      .filter((l) => (kind === 'sale' ? l.saleId : kind === 'purchase' ? l.purchaseId : kind === 'party' ? l.partyId : kind === 'employee' ? l.employeeId : l.itemId) === ownerId)
+      .filter((l) => (kind === 'sale' ? l.saleId : kind === 'purchase' ? l.purchaseId : kind === 'party' ? l.partyId : kind === 'employee' ? l.employeeId : kind === 'vehicle' ? l.vehicleId : l.itemId) === ownerId)
       .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
       .map((l) => l.documentId);
     return (this.data.documents || []).filter(
@@ -3642,7 +3747,7 @@ class ServerLocalDatabase {
   }
 
   /** The in-memory mapping rows for a documents feature kind (create-on-read). */
-  private docLinksFor(kind: 'sale' | 'purchase' | 'party' | 'item' | 'employee'): any[] {
+  private docLinksFor(kind: DocLinkKind): any[] {
     switch (kind) {
       case 'sale':
         return (this.data.saleOrderDocuments = this.data.saleOrderDocuments || []);
@@ -3654,6 +3759,8 @@ class ServerLocalDatabase {
         return (this.data.itemDocuments = this.data.itemDocuments || []);
       case 'employee':
         return (this.data.employeeDocuments = this.data.employeeDocuments || []);
+      case 'vehicle':
+        return (this.data.vehicleDocuments = this.data.vehicleDocuments || []);
     }
   }
 
@@ -3708,8 +3815,12 @@ class ServerLocalDatabase {
     return this.linkOrderDocuments('employee', employeeId, documentIds);
   }
 
+  public linkVehicleDocuments(vehicleId: string, documentIds: string[]): number {
+    return this.linkOrderDocuments('vehicle', vehicleId, documentIds);
+  }
+
   /** Idempotent FK-link writer — mapping rows only (no document mutation). */
-  private linkOrderDocuments(kind: 'sale' | 'purchase' | 'party' | 'item' | 'employee', ownerId: string, documentIds: string[]): number {
+  private linkOrderDocuments(kind: DocLinkKind, ownerId: string, documentIds: string[]): number {
     if (!Array.isArray(documentIds)) return 0;
     const validIds = [...new Set(documentIds.map(String).filter(Boolean))].filter((id) =>
       (this.data.documents || []).some((d) => d.id === id && d.status === 'active')
@@ -3717,7 +3828,7 @@ class ServerLocalDatabase {
     const links = this.docLinksFor(kind);
     let added = 0;
     validIds.forEach((docId) => {
-      const ownerKey = kind === 'sale' ? 'saleId' : kind === 'purchase' ? 'purchaseId' : kind === 'party' ? 'partyId' : kind === 'employee' ? 'employeeId' : 'itemId';
+      const ownerKey = kind === 'sale' ? 'saleId' : kind === 'purchase' ? 'purchaseId' : kind === 'party' ? 'partyId' : kind === 'employee' ? 'employeeId' : kind === 'vehicle' ? 'vehicleId' : 'itemId';
       const exists = links.some((l: any) => l.documentId === docId && l[ownerKey] === ownerId);
       if (exists) return;
       const link = {
@@ -3737,11 +3848,12 @@ class ServerLocalDatabase {
   }
 
   /** Live-write one mapping row to its MySQL table (fire-and-forget). */
-  private liveSyncDocLink(kind: 'sale' | 'purchase' | 'party' | 'item' | 'employee', link: any, isDelete = false): void {
+  private liveSyncDocLink(kind: DocLinkKind, link: any, isDelete = false): void {
     if (kind === 'sale') liveSyncSaleOrderDocLink(link as SaleOrderDocumentLink, isDelete);
     else if (kind === 'purchase') liveSyncPurchaseOrderDocLink(link as PurchaseOrderDocumentLink, isDelete);
     else if (kind === 'party') liveSyncPartyDocLink(link as PartyDocumentLink, isDelete);
     else if (kind === 'employee') liveSyncEmployeeDocLink(link as EmployeeDocumentLink, isDelete);
+    else if (kind === 'vehicle') liveSyncVehicleDocLink(link as VehicleDocumentLink, isDelete);
     else liveSyncItemDocLink(link as ItemDocumentLink, isDelete);
   }
 
@@ -3754,7 +3866,7 @@ class ServerLocalDatabase {
    * row's s3_key and url then point at the final location. Fire-and-forget
    * like the other cloud syncs; idempotent (only Pending/* keys participate).
    */
-  private settlePendingDocumentMoves(kind: 'sale' | 'purchase' | 'party' | 'item' | 'employee', ownerId: string, documentIds: string[]): void {
+  private settlePendingDocumentMoves(kind: DocLinkKind, ownerId: string, documentIds: string[]): void {
     const pendingIds = documentIds.filter((docId) => {
       const doc = (this.data.documents || []).find((d) => d.id === docId);
       return !!doc && doc.s3Key.startsWith('Pending/');
@@ -3811,11 +3923,15 @@ class ServerLocalDatabase {
     this.detachOrderDocuments('item', itemId);
   }
 
+  public detachVehicleDocuments(vehicleId: string): void {
+    this.detachOrderDocuments('vehicle', vehicleId);
+  }
+
   /** Cascade for owner deletion: drop mappings, soft-delete orphaned documents. */
-  private detachOrderDocuments(kind: 'sale' | 'purchase' | 'party' | 'item' | 'employee', ownerId: string): void {
-    const ownerKey = kind === 'sale' ? 'saleId' : kind === 'purchase' ? 'purchaseId' : kind === 'party' ? 'partyId' : kind === 'employee' ? 'employeeId' : 'itemId';
+  private detachOrderDocuments(kind: DocLinkKind, ownerId: string): void {
+    const ownerKey = kind === 'sale' ? 'saleId' : kind === 'purchase' ? 'purchaseId' : kind === 'party' ? 'partyId' : kind === 'employee' ? 'employeeId' : kind === 'vehicle' ? 'vehicleId' : 'itemId';
     const removed = this.docLinksFor(kind).filter((l: any) => l[ownerKey] === ownerId);
-    const kinds: Array<'sale' | 'purchase' | 'party' | 'item' | 'employee'> = ['sale', 'purchase', 'party', 'item', 'employee'];
+    const kinds: DocLinkKind[] = ['sale', 'purchase', 'party', 'item', 'employee', 'vehicle'];
     // Drop this kind's mapping rows for the deleted owner
     const keptForKind = this.docLinksFor(kind).filter((l: any) => l[ownerKey] !== ownerId);
     switch (kind) {
@@ -3833,6 +3949,9 @@ class ServerLocalDatabase {
         break;
       case 'employee':
         this.data.employeeDocuments = keptForKind as EmployeeDocumentLink[];
+        break;
+      case 'vehicle':
+        this.data.vehicleDocuments = keptForKind as VehicleDocumentLink[];
         break;
     }
     removed.forEach((l: any) => this.liveSyncDocLink(kind, l, true));
@@ -3854,7 +3973,7 @@ class ServerLocalDatabase {
   }
 
   /** Read-only view of the mapping rows for a kind (post-mutation safe). */
-  private docLinkRows(kind: 'sale' | 'purchase' | 'party' | 'item' | 'employee'): any[] {
+  private docLinkRows(kind: DocLinkKind): any[] {
     switch (kind) {
       case 'sale':
         return this.data.saleOrderDocuments || [];
@@ -3866,6 +3985,8 @@ class ServerLocalDatabase {
         return this.data.itemDocuments || [];
       case 'employee':
         return this.data.employeeDocuments || [];
+      case 'vehicle':
+        return this.data.vehicleDocuments || [];
     }
   }
 
@@ -4235,6 +4356,14 @@ class ServerLocalDatabase {
       } else if (t.type === 'direct_transaction') {
         balance += t.direction === 'money_in' ? amt : -amt;
       }
+    }
+
+    // 6. Vehicle EMI debits — every auto/posted loan installment against this
+    // account (created/edited/deleted via the vehicle EMI ledger; the entry
+    // list is the truth and edits rebalance by delta automatically).
+    const vehEmiEntries = (this.data.vehicleEmiEntries || []).filter((e) => e.accountId === accountId);
+    for (const e of vehEmiEntries) {
+      balance -= Number(e.amount) || 0;
     }
 
     this.updateAccount(accountId, { currentBalance: balance });

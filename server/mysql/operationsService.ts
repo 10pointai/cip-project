@@ -427,7 +427,14 @@ export async function fetchVehiclesDirect(): Promise<Vehicle[]> {
   if (!isMysqlConfigured()) {
     return serverDb.getVehicles();
   }
-  const rows = await executeMysqlQuery('SELECT * FROM vehicles ORDER BY registration_number ASC');
+  // Driver display name JOINs from the employees master — FK-only storage,
+  // so renames/deactivation in Employees propagate to every vehicle display.
+  const rows = await executeMysqlQuery(`
+    SELECT v.*, e.name AS assigned_driver_name
+    FROM vehicles v
+    LEFT JOIN employees e ON e.id = v.assigned_driver_id
+    ORDER BY v.registration_number ASC
+  `);
   return rows.map((v: any) => ({
     id: v.id,
     vehicleNo: v.registration_number || v.vehicleNo || '',
@@ -438,9 +445,30 @@ export async function fetchVehiclesDirect(): Promise<Vehicle[]> {
     currentDriverId: v.assigned_driver_id || v.currentDriverId || undefined,
     currentDriverName: v.assigned_driver_name || v.currentDriverName || undefined,
     insuranceExpiry: v.insurance_expiry_date || v.insuranceExpiry || undefined,
+    insuranceMonthlyAmount: parseNum(v.insurance_monthly_amount) || undefined,
     fitnessExpiry: v.fitness_expiry_date || v.fitnessExpiry || undefined,
     notes: v.notes || undefined,
     createdAt: v.created_at || new Date().toISOString(),
+    // EMI/financing config — persisted on the vehicle row (the auto-debit
+    // cron and the EMI ledger read from these columns).
+    emiDetails: {
+      hasEmi: !!v.emi_has_emi,
+      financierName: v.emi_financier_name || undefined,
+      loanAccountNumber: v.emi_loan_account_number || undefined,
+      monthlyEmiAmount: parseNum(v.emi_amount) || undefined,
+      emiDueDay: Number(v.emi_due_day) || undefined,
+      loanStartDate: v.emi_loan_start_date || undefined,
+      loanEndDate: v.emi_loan_end_date || undefined,
+      totalLoanAmount: parseNum(v.emi_total_loan_amount) || undefined,
+      interestRate: parseNum(v.emi_interest_rate) || undefined,
+      totalTenureMonths: Number(v.emi_tenure_months) || undefined,
+      paidEmisCount: Number(v.emi_paid_count) || undefined,
+      emiAccountId: v.emi_account_id || undefined,
+      autoDebitAccount: v.emi_auto_debit_account || undefined,
+      status: (v.emi_status as any) || undefined,
+      lastPaymentDate: v.emi_last_payment_date || undefined,
+      notes: v.emi_notes || undefined,
+    },
   }));
 }
 
@@ -745,16 +773,28 @@ export async function createVehicleDirect(vehData: any): Promise<Vehicle> {
   await executeMysqlQuery(
     `INSERT INTO vehicles (
       id, registration_number, type, capacity_tonnes, ownership, status,
-      assigned_driver_id, assigned_driver_name, insurance_expiry_date,
-      fitness_expiry_date, notes, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      assigned_driver_id, insurance_expiry_date, insurance_monthly_amount,
+      fitness_expiry_date, notes, created_at,
+      emi_has_emi, emi_financier_name, emi_loan_account_number, emi_amount,
+      emi_due_day, emi_loan_start_date, emi_loan_end_date, emi_total_loan_amount,
+      emi_interest_rate, emi_tenure_months, emi_paid_count, emi_account_id,
+      emi_auto_debit_account, emi_status, emi_last_payment_date, emi_notes
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       registration_number=VALUES(registration_number), type=VALUES(type),
       capacity_tonnes=VALUES(capacity_tonnes), ownership=VALUES(ownership),
       status=VALUES(status), assigned_driver_id=VALUES(assigned_driver_id),
-      assigned_driver_name=VALUES(assigned_driver_name),
       insurance_expiry_date=VALUES(insurance_expiry_date),
-      fitness_expiry_date=VALUES(fitness_expiry_date), notes=VALUES(notes)`,
+      insurance_monthly_amount=VALUES(insurance_monthly_amount),
+      fitness_expiry_date=VALUES(fitness_expiry_date), notes=VALUES(notes),
+      emi_has_emi=VALUES(emi_has_emi), emi_financier_name=VALUES(emi_financier_name),
+      emi_loan_account_number=VALUES(emi_loan_account_number), emi_amount=VALUES(emi_amount),
+      emi_due_day=VALUES(emi_due_day), emi_loan_start_date=VALUES(emi_loan_start_date),
+      emi_loan_end_date=VALUES(emi_loan_end_date), emi_total_loan_amount=VALUES(emi_total_loan_amount),
+      emi_interest_rate=VALUES(emi_interest_rate), emi_tenure_months=VALUES(emi_tenure_months),
+      emi_paid_count=VALUES(emi_paid_count), emi_account_id=VALUES(emi_account_id),
+      emi_auto_debit_account=VALUES(emi_auto_debit_account), emi_status=VALUES(emi_status),
+      emi_last_payment_date=VALUES(emi_last_payment_date), emi_notes=VALUES(emi_notes)`,
     [
       veh.id,
       veh.vehicleNo,
@@ -763,11 +803,28 @@ export async function createVehicleDirect(vehData: any): Promise<Vehicle> {
       veh.ownership || 'owned',
       veh.status || 'available',
       veh.currentDriverId || null,
-      veh.currentDriverName || null,
       veh.insuranceExpiry || null,
+      veh.insuranceMonthlyAmount ?? null,
       veh.fitnessExpiry || null,
       veh.notes || null,
       veh.createdAt || new Date().toISOString(),
+      // EMI financing config
+      veh.emiDetails?.hasEmi ? 1 : 0,
+      veh.emiDetails?.financierName || null,
+      veh.emiDetails?.loanAccountNumber || null,
+      veh.emiDetails?.monthlyEmiAmount ?? null,
+      veh.emiDetails?.emiDueDay ?? null,
+      veh.emiDetails?.loanStartDate || null,
+      veh.emiDetails?.loanEndDate || null,
+      veh.emiDetails?.totalLoanAmount ?? null,
+      veh.emiDetails?.interestRate ?? null,
+      veh.emiDetails?.totalTenureMonths ?? null,
+      veh.emiDetails?.paidEmisCount ?? null,
+      veh.emiDetails?.emiAccountId || null,
+      veh.emiDetails?.autoDebitAccount || null,
+      veh.emiDetails?.status || null,
+      veh.emiDetails?.lastPaymentDate || null,
+      veh.emiDetails?.notes || null,
     ]
   );
   return veh;

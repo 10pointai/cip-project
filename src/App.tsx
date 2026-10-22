@@ -50,6 +50,7 @@ function AppContent() {
     transfers,
     adjustments,
     stockAdjustments,
+    vehicleEmiEntries,
     isOnline,
     counts,
     loadFeature,
@@ -369,8 +370,8 @@ function AppContent() {
         };
       case 'logistics':
         return {
-          title: 'Logistics & Fleet Management',
-          subtitle: 'Insulated tipper trucks, bitumen tankers & driver trip slips',
+          title: 'Fleet Management',
+          subtitle: '',
         };
       case 'sales':
         return {
@@ -527,6 +528,7 @@ function AppContent() {
               orders={orders}
               employeePayments={employeePayments}
               employeeLedgerTransactions={employeeLedgerTransactions}
+              vehicleEmiEntries={vehicleEmiEntries}
               settings={settings}
               onAddAccount={handleAddAccount}
               onUpdateAccount={handleUpdateAccount}

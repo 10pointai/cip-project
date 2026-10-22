@@ -224,6 +224,38 @@ documentsRouter.post(
   }
 );
 
+// GET /api/documents/vehicle/:vehicleId — documents attached to a fleet vehicle
+// (RC book, insurance policy, fitness certificate, financing NOC scans)
+documentsRouter.get(
+  '/vehicle/:vehicleId',
+  requirePermission('manage_fleet'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const docs = serverDb.getDocumentsForVehicle(req.params.vehicleId);
+      res.json({ success: true, count: docs.length, data: docs });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+);
+
+// POST /api/documents/vehicle/:vehicleId/link — map already-uploaded documents
+// to a vehicle (used by the vehicle create form's staged uploads on register;
+// edit-mode uploads link immediately)
+documentsRouter.post(
+  '/vehicle/:vehicleId/link',
+  requirePermission('manage_fleet'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { documentIds } = req.body || {};
+      const added = serverDb.linkVehicleDocuments(req.params.vehicleId, Array.isArray(documentIds) ? documentIds : []);
+      res.json({ success: true, added, message: `${added} document(s) linked to the vehicle.` });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+);
+
 /**
  * GET /api/documents/:id/download — view link, served via CloudFront ALWAYS
  * (user rule: every served URL is the CDN form; documents.url already carries

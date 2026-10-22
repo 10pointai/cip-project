@@ -236,6 +236,16 @@ export interface EmployeeDocumentLink {
   createdAt: string;
 }
 
+/** vehicles ↔ documents join row (FK-only) — table vehicle_documents */
+export interface VehicleDocumentLink {
+  id: string;
+  /** FK vehicles.id */
+  vehicleId: string;
+  /** FK documents.id */
+  documentId: string;
+  createdAt: string;
+}
+
 export interface ItemStockAdjustment {
   id: string;
   adjustmentNumber: string; // e.g. "STK-ADJ-26/001"
@@ -507,10 +517,12 @@ export interface VehicleEmiDetails {
   interestRate?: number; // e.g. 8.75%
   totalTenureMonths?: number; // e.g. 48
   paidEmisCount?: number; // e.g. 18
-  autoDebitAccount?: string; // Bank account name
+  autoDebitAccount?: string; // Bank account name (legacy string — emiAccountId is the FK authority)
   status?: 'active' | 'closed' | 'defaulted';
   lastPaymentDate?: string;
   notes?: string;
+  /** FK cash_bank_accounts.id — the account the auto EMI debit posts against */
+  emiAccountId?: string;
 }
 
 export interface Vehicle {
@@ -521,8 +533,13 @@ export interface Vehicle {
   ownership: VehicleOwnership;
   status: VehicleStatus;
   currentDriverId?: string;
+  /** Hydrated read-time only — JOINed from the employees master by
+   * currentDriverId (NEVER persisted on the vehicle row; renames in
+   * Employees propagate automatically). */
   currentDriverName?: string;
   insuranceExpiry?: string;
+  /** Monthly insurance premium paid for this vehicle (₹/mo) */
+  insuranceMonthlyAmount?: number;
   fitnessExpiry?: string;
   emiDetails?: VehicleEmiDetails;
   notes?: string;
@@ -580,6 +597,32 @@ export interface Tyre {
   threadDepthMm?: number;
   notes?: string;
   createdAt: string;
+}
+
+/**
+ * Vehicle EMI ledger entry — one row per monthly loan installment debited
+ * from a cash/bank account against a financed vehicle. `auto` rows are
+ * posted by the server-side daily cron (on the EMI due date); `manual`
+ * rows are recorded by an operator (early payment, missed auto debit…).
+ * Any edit/delete rebalances the linked account (entries are a balance
+ * stream in recalculateAccountBalance — the truth is this list).
+ */
+export interface VehicleEmiEntry {
+  id: string;
+  /** FK vehicles.id */
+  vehicleId: string;
+  /** FK cash_bank_accounts.id — the account the EMI debited */
+  accountId: string;
+  /** Effective debit date YYYY-MM-DD */
+  date: string;
+  amount: number;
+  /** 'auto' — cron-posted on the due date; 'manual' — operator recorded */
+  source: 'auto' | 'manual';
+  notes?: string;
+  createdAt: string;
+  // Hydrated read-time view fields (never persisted)
+  vehicleNo?: string;
+  accountName?: string;
 }
 
 export interface Employee {

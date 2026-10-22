@@ -615,13 +615,14 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           type VARCHAR(64) NOT NULL,
           capacity_tonnes DECIMAL(8,2),
           tare_weight_kg DECIMAL(10,2),
+          ownership VARCHAR(32) DEFAULT 'owned',
           status VARCHAR(32) DEFAULT 'available',
           assigned_driver_id VARCHAR(64),
-          assigned_driver_name VARCHAR(128),
           current_odometer DECIMAL(12,2) DEFAULT 0.00,
           fuel_capacity_litres DECIMAL(8,2),
           fitness_expiry_date VARCHAR(32),
           insurance_expiry_date VARCHAR(32),
+          insurance_monthly_amount DECIMAL(12,2),
           puc_expiry_date VARCHAR(32),
           notes TEXT,
           is_active BOOLEAN DEFAULT TRUE,
@@ -629,6 +630,66 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           updated_at VARCHAR(64)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
+
+      // 9a. Vehicle EMI financing columns (backward-compatible ALTERs — the
+      // emiDetails config persists on the vehicles row so the daily auto-debit
+      // cron reads it from the saved table).
+      try {
+        const [vehCols]: any = await conn.query('SHOW COLUMNS FROM vehicles');
+        const vehColNames = (vehCols || []).map((c: any) => c.Field);
+        await conn.query(`
+          CREATE TABLE IF NOT EXISTS vehicle_emi_entries (
+            id VARCHAR(64) PRIMARY KEY,
+            vehicle_id VARCHAR(64) NOT NULL,
+            account_id VARCHAR(64) NOT NULL,
+            date VARCHAR(32) NOT NULL,
+            amount DECIMAL(14,2) NOT NULL DEFAULT 0,
+            source VARCHAR(16) DEFAULT 'auto',
+            notes TEXT,
+            created_at VARCHAR(64),
+            INDEX idx_vem_vehicle (vehicle_id),
+            INDEX idx_vem_account (account_id),
+            INDEX idx_vem_date (date)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        `);
+        const vehEmiCols: Array<[string, string, string | null]> = [
+          ['ownership', "VARCHAR(32) DEFAULT 'owned'", null],
+          ['insurance_monthly_amount', 'DECIMAL(12,2) NULL', null],
+          ['emi_has_emi', 'BOOLEAN DEFAULT FALSE', null],
+          ['emi_financier_name', 'VARCHAR(128) NULL', null],
+          ['emi_loan_account_number', 'VARCHAR(64) NULL', null],
+          ['emi_amount', 'DECIMAL(14,2) NULL', null],
+          ['emi_due_day', 'INT NULL', null],
+          ['emi_loan_start_date', 'VARCHAR(32) NULL', null],
+          ['emi_loan_end_date', 'VARCHAR(32) NULL', null],
+          ['emi_total_loan_amount', 'DECIMAL(14,2) NULL', null],
+          ['emi_interest_rate', 'DECIMAL(6,2) NULL', null],
+          ['emi_tenure_months', 'INT NULL', null],
+          ['emi_paid_count', 'INT NULL', null],
+          ['emi_account_id', 'VARCHAR(64) NULL', null],
+          ['emi_auto_debit_account', 'VARCHAR(255) NULL', null],
+          ['emi_status', "VARCHAR(24) NULL", null],
+          ['emi_last_payment_date', 'VARCHAR(32) NULL', null],
+          ['emi_notes', 'TEXT NULL', null],
+        ];
+        for (const [col, ddl] of vehEmiCols) {
+          if (!vehColNames.includes(col)) {
+            await conn.query(`ALTER TABLE vehicles ADD COLUMN ${col} ${ddl}`);
+          }
+        }
+        // De-normalized driver name is GONE (client directive 2026-10-22):
+        // only the assigned_driver_id FK is stored; display names resolve by
+        // JOIN against the employees master at read time.
+        if (vehColNames.includes('assigned_driver_name')) {
+          await conn.query('ALTER TABLE vehicles DROP COLUMN assigned_driver_name');
+          console.log('[MySQL Migration] Dropped vehicles.assigned_driver_name (driver names now JOIN from employees).');
+        }
+        if (!vehColNames.includes('emi_has_emi')) {
+          console.log('[MySQL Migration] Added EMI financing columns to vehicles table.');
+        }
+      } catch (vehEmiErr: any) {
+        console.warn('[MySQL Migration] vehicles EMI column alter check notice:', vehEmiErr.message);
+      }
 
       await conn.query(`
         CREATE TABLE IF NOT EXISTS drivers (
@@ -812,6 +873,18 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           UNIQUE KEY uq_employee_doc (employee_id, document_id),
           INDEX idx_ed_employee (employee_id),
           INDEX idx_ed_document (document_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS vehicle_documents (
+          id VARCHAR(64) PRIMARY KEY,
+          vehicle_id VARCHAR(64) NOT NULL,
+          document_id VARCHAR(64) NOT NULL,
+          created_at VARCHAR(64) NOT NULL,
+          UNIQUE KEY uq_vehicle_doc (vehicle_id, document_id),
+          INDEX idx_vd_vehicle (vehicle_id),
+          INDEX idx_vd_document (document_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
@@ -2098,8 +2171,8 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
       // Seed vehicles
       for (const v of (snapshot.vehicles || []) as any[]) {
         await conn.query(
-          `REPLACE INTO vehicles (id, registration_number, type, capacity_tonnes, tare_weight_kg, status, assigned_driver_id, assigned_driver_name, current_odometer, fuel_capacity_litres, fitness_expiry_date, insurance_expiry_date, puc_expiry_date, notes, is_active, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `REPLACE INTO vehicles (id, registration_number, type, capacity_tonnes, tare_weight_kg, status, assigned_driver_id, current_odometer, fuel_capacity_litres, fitness_expiry_date, insurance_expiry_date, puc_expiry_date, notes, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             v.id,
             (v as any).registrationNumber || (v as any).vehicleNumber || (v as any).registrationNo || v.id,
@@ -2108,7 +2181,6 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
             (v as any).tareWeightKg || 0,
             v.status || 'available',
             (v as any).assignedDriverId || (v as any).currentDriverId || null,
-            (v as any).assignedDriverName || (v as any).currentDriverName || null,
             (v as any).currentOdometer || (v as any).currentOdometerKm || 0,
             (v as any).fuelCapacityLitres || 200,
             (v as any).fitnessExpiryDate || null,

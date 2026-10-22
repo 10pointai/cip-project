@@ -25,6 +25,8 @@ import {
   PartyDocumentLink,
   ItemDocumentLink,
   EmployeeDocumentLink,
+  VehicleDocumentLink,
+  VehicleEmiEntry,
   DocumentStatus,
   CashBankAccount,
   InternalTransfer,
@@ -677,7 +679,12 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
       }
 
       // 9. Vehicles & Drivers
-      const [vehRows]: [any[], any] = await conn.query('SELECT * FROM vehicles ORDER BY registration_number ASC');
+      const [vehRows]: [any[], any] = await conn.query(`
+        SELECT v.*, e.name AS assigned_driver_name
+        FROM vehicles v
+        LEFT JOIN employees e ON e.id = v.assigned_driver_id
+        ORDER BY v.registration_number ASC
+      `);
       const vehicles: Vehicle[] = vehRows.map((v) => ({
         id: v.id,
         vehicleNo: v.registration_number,
@@ -686,11 +693,34 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         ownership: (v.ownership as any) || 'owned',
         status: (v.status as any) || 'available',
         currentDriverId: v.assigned_driver_id || undefined,
+        // Driver name JOINed from the employees master (FK-only storage) —
+        // an employee rename propagates to every vehicle display.
         currentDriverName: v.assigned_driver_name || undefined,
         insuranceExpiry: v.insurance_expiry_date || undefined,
+        insuranceMonthlyAmount: parseNum(v.insurance_monthly_amount) || undefined,
         fitnessExpiry: v.fitness_expiry_date || undefined,
         notes: v.notes || undefined,
         createdAt: v.created_at || new Date().toISOString(),
+        // EMI/financing config — the daily cron deducts from these persisted
+        // columns (emiDetails round-trips through the vehicles table now).
+        emiDetails: {
+          hasEmi: !!v.emi_has_emi,
+          financierName: v.emi_financier_name || undefined,
+          loanAccountNumber: v.emi_loan_account_number || undefined,
+          monthlyEmiAmount: parseNum(v.emi_amount) || undefined,
+          emiDueDay: Number(v.emi_due_day) || undefined,
+          loanStartDate: v.emi_loan_start_date || undefined,
+          loanEndDate: v.emi_loan_end_date || undefined,
+          totalLoanAmount: parseNum(v.emi_total_loan_amount) || undefined,
+          interestRate: parseNum(v.emi_interest_rate) || undefined,
+          totalTenureMonths: Number(v.emi_tenure_months) || undefined,
+          paidEmisCount: Number(v.emi_paid_count) || undefined,
+          emiAccountId: v.emi_account_id || undefined,
+          autoDebitAccount: v.emi_auto_debit_account || undefined,
+          status: (v.emi_status as any) || undefined,
+          lastPaymentDate: v.emi_last_payment_date || undefined,
+          notes: v.emi_notes || undefined,
+        },
       }));
 
       const [driverRows]: [any[], any] = await conn.query('SELECT * FROM drivers ORDER BY name ASC');
@@ -1037,6 +1067,31 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         documentId: l.document_id,
         createdAt: l.created_at,
       }));
+      const [vehicleDocRows]: any[] = await conn.query(
+        'SELECT * FROM vehicle_documents ORDER BY created_at ASC'
+      );
+      const vehicleDocuments: VehicleDocumentLink[] = (vehicleDocRows || []).map((l: any) => ({
+        id: l.id,
+        vehicleId: l.vehicle_id,
+        documentId: l.document_id,
+        createdAt: l.created_at,
+      }));
+
+      // 10a-iv. Vehicle EMI ledger — posted monthly installments (auto cron
+      // rows land here too, debiting the linked cash/bank account).
+      const [vehEmiRows]: any[] = await conn.query(
+        'SELECT * FROM vehicle_emi_entries ORDER BY date ASC'
+      );
+      const vehicleEmiEntries: VehicleEmiEntry[] = (vehEmiRows || []).map((e: any) => ({
+        id: e.id,
+        vehicleId: e.vehicle_id,
+        accountId: e.account_id,
+        date: e.date,
+        amount: parseNum(e.amount),
+        source: (e.source as any) || 'auto',
+        notes: e.notes || undefined,
+        createdAt: e.created_at || new Date().toISOString(),
+      }));
 
       if (!settings) {
         return null;
@@ -1079,6 +1134,8 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         partyDocuments,
         itemDocuments,
         employeeDocuments,
+        vehicleDocuments,
+        vehicleEmiEntries,
         auditLogs,
       };
     } finally {
@@ -1615,8 +1672,9 @@ export async function liveSyncVehicle(v: Vehicle, isDelete = false) {
       await pool.query('DELETE FROM vehicles WHERE id = ?', [v.id]);
     } else {
       await pool.query(
-        `REPLACE INTO vehicles (id, registration_number, type, capacity_tonnes, tare_weight_kg, status, assigned_driver_id, assigned_driver_name, current_odometer, fuel_capacity_litres, fitness_expiry_date, insurance_expiry_date, puc_expiry_date, notes, is_active, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `REPLACE INTO vehicles (id, registration_number, type, capacity_tonnes, tare_weight_kg, status, assigned_driver_id, current_odometer, fuel_capacity_litres, fitness_expiry_date, insurance_expiry_date, insurance_monthly_amount, puc_expiry_date, notes, is_active, created_at, updated_at,
+          emi_has_emi, emi_financier_name, emi_loan_account_number, emi_amount, emi_due_day, emi_loan_start_date, emi_loan_end_date, emi_total_loan_amount, emi_interest_rate, emi_tenure_months, emi_paid_count, emi_account_id, emi_auto_debit_account, emi_status, emi_last_payment_date, emi_notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           v.id,
           v.vehicleNo,
@@ -1625,21 +1683,55 @@ export async function liveSyncVehicle(v: Vehicle, isDelete = false) {
           0,
           v.status || 'available',
           v.currentDriverId || null,
-          v.currentDriverName || null,
           0,
           200,
           v.fitnessExpiry || null,
           v.insuranceExpiry || null,
+          v.insuranceMonthlyAmount ?? null,
           null,
           v.notes || null,
           1,
           v.createdAt || new Date().toISOString(),
           new Date().toISOString(),
+          // EMI config (the emiDetails object persists with the vehicle row)
+          v.emiDetails?.hasEmi ? 1 : 0,
+          v.emiDetails?.financierName || null,
+          v.emiDetails?.loanAccountNumber || null,
+          v.emiDetails?.monthlyEmiAmount ?? null,
+          v.emiDetails?.emiDueDay ?? null,
+          v.emiDetails?.loanStartDate || null,
+          v.emiDetails?.loanEndDate || null,
+          v.emiDetails?.totalLoanAmount ?? null,
+          v.emiDetails?.interestRate ?? null,
+          v.emiDetails?.totalTenureMonths ?? null,
+          v.emiDetails?.paidEmisCount ?? null,
+          v.emiDetails?.emiAccountId || null,
+          v.emiDetails?.autoDebitAccount || null,
+          v.emiDetails?.status || null,
+          v.emiDetails?.lastPaymentDate || null,
+          v.emiDetails?.notes || null,
         ]
       );
     }
   } catch (e: any) {
     console.error('[Azure MySQL LiveSync] Failed to sync vehicle:', e.message);
+  }
+}
+
+export async function liveSyncVehicleEmiEntry(entry: VehicleEmiEntry, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM vehicle_emi_entries WHERE id = ?', [entry.id]);
+    } else {
+      await pool.query(
+        `REPLACE INTO vehicle_emi_entries (id, vehicle_id, account_id, date, amount, source, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [entry.id, entry.vehicleId, entry.accountId, entry.date, entry.amount || 0, entry.source || 'auto', entry.notes || null, entry.createdAt || new Date().toISOString()]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync vehicle EMI entry:', e.message);
   }
 }
 
@@ -2112,6 +2204,23 @@ export async function liveSyncEmployeeDocLink(link: EmployeeDocumentLink, isDele
     }
   } catch (e: any) {
     console.error('[Azure MySQL LiveSync] Failed to sync employee document link:', e.message);
+  }
+}
+
+export async function liveSyncVehicleDocLink(link: VehicleDocumentLink, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM vehicle_documents WHERE id = ?', [link.id]);
+    } else {
+      await pool.query(
+        `REPLACE INTO vehicle_documents (id, vehicle_id, document_id, created_at) VALUES (?, ?, ?, ?)`,
+        [link.id, link.vehicleId, link.documentId, link.createdAt]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync vehicle document link:', e.message);
   }
 }
 

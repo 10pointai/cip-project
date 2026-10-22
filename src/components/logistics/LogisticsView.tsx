@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Truck,
   User,
@@ -11,45 +11,85 @@ import {
   AlertCircle,
   CheckCircle2,
   MapPin,
-  Fuel,
   TrendingUp,
   Clock,
   Compass,
-  ArrowRight,
-  ChevronRight,
-  ExternalLink,
-  Check,
   X,
-  CreditCard,
+  Check,
+  ChevronDown,
+  MoreVertical,
   Building,
   Navigation2,
   Disc,
   Landmark,
   Edit3,
-  Percent,
-  ShieldAlert,
   DollarSign,
 } from 'lucide-react';
-import { Vehicle, Employee, TripSlip, Order, CompanySettings, Tyre, VehicleEmiDetails } from '../../types';
+import { Vehicle, Employee, TripSlip, Order, CompanySettings, Tyre, VehicleEmiDetails, VehicleEmiEntry, CashBankAccount } from '../../types';
+import { EntityDocumentsSection, StagedDocument } from '../common/EntityDocumentsSection';
 import { cloudStore as localDb } from '../../services/cloudStore';
 
 export const LogisticsView: React.FC = () => {
   // Database States
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [accounts, setAccounts] = useState<CashBankAccount[]>([]);
+  const [emiEntries, setEmiEntries] = useState<VehicleEmiEntry[]>([]);
   const [slips, setSlips] = useState<TripSlip[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [settings, setSettings] = useState<CompanySettings | null>(null);
   const [tyres, setTyres] = useState<Tyre[]>([]);
 
   // App Navigation & Filter state
-  const [activeSubTab, setActiveSubTab] = useState<'trips' | 'fleet' | 'drivers' | 'simulator' | 'tyres' | 'emi'>('trips');
+  const [activeSubTab, setActiveSubTab] = useState<'trips' | 'fleet' | 'drivers' | 'simulator' | 'tyres' | 'emi-entries'>('trips');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
 
   // Selected Detail Modal State
   const [viewingSlip, setViewingSlip] = useState<TripSlip | null>(null);
   const [showPrintPreview, setShowPrintPreview] = useState(false);
+
+  // Fleet Table — per-row "More Actions" popover (EMI + Tyres). The popover
+  // renders with VIEWPORT-FIXED coordinates because the table's
+  // overflow-x-auto container clips absolutely-positioned children; the anchor
+  // rect is captured from the ⋮ button at open time and re-closed on
+  // scroll/resize (fixed coords never scroll with the row).
+  const [vehicleMoreMenu, setVehicleMoreMenu] = useState<{ id: string; top: number; left: number } | null>(null);
+  const moreVehicleMenuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!vehicleMoreMenu) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (moreVehicleMenuRef.current && !moreVehicleMenuRef.current.contains(e.target as Node)) {
+        setVehicleMoreMenu(null);
+      }
+    };
+    const handleViewportChange = () => setVehicleMoreMenu(null);
+    document.addEventListener('mousedown', handleClickOutside);
+    window.addEventListener('scroll', handleViewportChange, true);
+    window.addEventListener('resize', handleViewportChange);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('scroll', handleViewportChange, true);
+      window.removeEventListener('resize', handleViewportChange);
+    };
+  }, [vehicleMoreMenu]);
+
+  /** Anchor the ⋮ popover at the button (fixed) — flip up near the viewport bottom. */
+  const toggleVehicleMoreMenu = (vehicleId: string, btn: HTMLElement) => {
+    if (vehicleMoreMenu?.id === vehicleId) {
+      setVehicleMoreMenu(null);
+      return;
+    }
+    const MENU_W = 176;   // w-44
+    const MENU_H_EST = 150;
+    const GAP = 4;
+    const rect = btn.getBoundingClientRect();
+    let top = rect.bottom + GAP;
+    if (top + MENU_H_EST > window.innerHeight) {
+      top = Math.max(8, rect.top - MENU_H_EST - GAP);
+    }
+    setVehicleMoreMenu({ id: vehicleId, top, left: Math.max(8, rect.right - MENU_W) });
+  };
 
   // Creation Modals
   const [isSlipModalOpen, setIsSlipModalOpen] = useState(false);
@@ -72,32 +112,52 @@ export const LogisticsView: React.FC = () => {
 
   // Form States - Vehicle
   const [editingVehicle, setEditingVehicle] = useState<Vehicle | null>(null);
-  const [vehicleModalTab, setVehicleModalTab] = useState<'general' | 'emi'>('general');
   const [formVehNo, setFormVehNo] = useState('');
   const [formVehType, setFormVehType] = useState<'tipper' | 'tanker' | 'mixer' | 'loader' | 'other'>('tipper');
-  const [formVehCapacity, setFormVehCapacity] = useState('');
-  const [formVehOwner, setFormVehOwner] = useState<'owned' | 'contractor' | 'market'>('owned');
-  const [formVehStatus, setFormVehStatus] = useState<'available' | 'on_trip' | 'maintenance'>('available');
-  const [formVehDriverId, setFormVehDriverId] = useState('');
   const [formVehInsurance, setFormVehInsurance] = useState('');
-  const [formVehFitness, setFormVehFitness] = useState('');
+  const [formVehInsuranceAmount, setFormVehInsuranceAmount] = useState('');
   const [formVehNotes, setFormVehNotes] = useState('');
 
-  // Form States - Vehicle Loan & EMI Financing
-  const [formVehHasEmi, setFormVehHasEmi] = useState<boolean>(false);
+  // Assigned driver (employee with Operational Role Designation: driver) —
+  // searchable pick inside the Vehicle Details accordion
+  const [formVehDriverId, setFormVehDriverId] = useState('');
+  const [vehDriverPickerOpen, setVehDriverPickerOpen] = useState(false);
+  const [vehDriverQuery, setVehDriverQuery] = useState('');
+  const vehDriverPickerRef = useRef<HTMLDivElement | null>(null);
+
+  // Vehicle modal accordions
+  const [vehDetailsOpen, setVehDetailsOpen] = useState(true);
+  const [vehLoanOpen, setVehLoanOpen] = useState(true);
+
+  // Close the driver search list when clicking outside it
+  useEffect(() => {
+    if (!vehDriverPickerOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (vehDriverPickerRef.current && !vehDriverPickerRef.current.contains(e.target as Node)) {
+        setVehDriverPickerOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [vehDriverPickerOpen]);
+
+  // Form States - Vehicle Loan & EMI Financing (full loan capture at register:
+  // loan amount, tenure, EMI amount, due day, linked account, dates — the
+  // auto-debit cron deducts the monthly EMI from the linked account)
   const [formVehEmiFinancier, setFormVehEmiFinancier] = useState<string>('');
   const [formVehEmiLoanAccNo, setFormVehEmiLoanAccNo] = useState<string>('');
+  const [formVehEmiTotalLoan, setFormVehEmiTotalLoan] = useState<string>('');
+  const [formVehEmiTenureMonths, setFormVehEmiTenureMonths] = useState<string>('');
   const [formVehEmiAmount, setFormVehEmiAmount] = useState<string>('');
   const [formVehEmiDueDay, setFormVehEmiDueDay] = useState<string>('10');
+  const [formVehEmiAccountId, setFormVehEmiAccountId] = useState<string>('');
   const [formVehEmiStartDate, setFormVehEmiStartDate] = useState<string>('');
-  const [formVehEmiEndDate, setFormVehEmiEndDate] = useState<string>('');
-  const [formVehEmiTotalLoan, setFormVehEmiTotalLoan] = useState<string>('');
-  const [formVehEmiInterestRate, setFormVehEmiInterestRate] = useState<string>('');
-  const [formVehEmiTenureMonths, setFormVehEmiTenureMonths] = useState<string>('');
-  const [formVehEmiPaidCount, setFormVehEmiPaidCount] = useState<string>('');
-  const [formVehEmiAutoDebitAccount, setFormVehEmiAutoDebitAccount] = useState<string>('');
+  const [formVehEmiOpenPaid, setFormVehEmiOpenPaid] = useState<string>('0');
   const [formVehEmiStatus, setFormVehEmiStatus] = useState<'active' | 'closed' | 'defaulted'>('active');
   const [formVehEmiNotes, setFormVehEmiNotes] = useState<string>('');
+
+  // Vehicle documents (S3 upload feature) — staged while registering
+  const [stagedVehicleDocs, setStagedVehicleDocs] = useState<StagedDocument[]>([]);
 
   // Creation / Editing Modals for Tyres
   const [isTyreModalOpen, setIsTyreModalOpen] = useState(false);
@@ -122,10 +182,21 @@ export const LogisticsView: React.FC = () => {
   const [formTyreCondition, setFormTyreCondition] = useState<'excellent' | 'good' | 'worn' | 'damaged'>('excellent');
   const [formTyreNotes, setFormTyreNotes] = useState('');
 
+  // EMI Entry ledger modal (record manual / edit automated entries)
+  const [isEmiEntryModalOpen, setIsEmiEntryModalOpen] = useState(false);
+  const [editingEmiEntry, setEditingEmiEntry] = useState<VehicleEmiEntry | null>(null);
+  const [formEmiVehicleId, setFormEmiVehicleId] = useState('');
+  const [formEmiAccountId, setFormEmiAccountId] = useState('');
+  const [formEmiDate, setFormEmiDate] = useState('');
+  const [formEmiAmount, setFormEmiAmount] = useState('');
+  const [formEmiNotes, setFormEmiNotes] = useState('');
+
   // Load and subscribe to database changes
   const loadData = () => {
     setVehicles(localDb.getVehicles());
     setEmployees(localDb.getEmployees());
+    setAccounts(localDb.getAccounts());
+    setEmiEntries(localDb.getVehicleEmiEntries().sort((a, b) => (b.date || '').localeCompare(a.date || '')));
     setSlips(localDb.getTripSlips());
     setOrders(localDb.getOrders());
     setSettings(localDb.getSettings());
@@ -146,31 +217,24 @@ export const LogisticsView: React.FC = () => {
   // Drivers are employees of role 'driver', managed in the Employees module
   const driverEmployees = useMemo(() => employees.filter(e => e.role === 'driver'), [employees]);
 
+  // EMI alerts follow the shared 2-days-before window (dashboard + fleet row highlight)
+  const emiAlertList = useMemo(() => localDb.getVehicleEmiAlerts(), [vehicles, emiEntries]);
+
   // Format Helper
   const formatCurrency = (val: number) => {
     const symbol = settings?.currency?.symbol || '₹';
     return `${symbol}${val.toLocaleString('en-IN')}`;
   };
 
-  // Metrics Calculations
-  const stats = useMemo(() => {
-    const totalVeh = vehicles.length;
-    const onTripVeh = vehicles.filter(v => v.status === 'on_trip').length;
-    const availableVeh = vehicles.filter(v => v.status === 'available').length;
-    const maintVeh = vehicles.filter(v => v.status === 'maintenance').length;
+  // Plant timezone (IST) calendar date — EMI due dates & alerts run on this
+  const istToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 
-    const totalFuelAdvanced = slips.reduce((sum, s) => sum + (s.fuelIssuedLiters || 0), 0);
-    const totalCashAdvanced = slips.reduce((sum, s) => sum + (s.cashAdvanceRupees || 0), 0);
-
-    return {
-      totalVeh,
-      onTripVeh,
-      availableVeh,
-      maintVeh,
-      totalFuelAdvanced,
-      totalCashAdvanced,
-    };
-  }, [vehicles, slips]);
+  // Client display format: YYYY-MM-DD → DD-MM-YYYY (pass-through otherwise)
+  const formatDdMmYyyy = (ymd?: string) => {
+    if (!ymd) return '—';
+    const [y, m, d] = ymd.split('-');
+    return /^\d{4}-\d{2}-\d{2}$/.test(ymd) ? `${d}-${m}-${y}` : ymd;
+  };
 
   // Handle Opening Trip Slip Form with Pre-fills
   const handleOpenSlipModal = () => {
@@ -197,27 +261,6 @@ export const LogisticsView: React.FC = () => {
     
     setIsSlipModalOpen(true);
   };
-
-  React.useEffect(() => {
-    const handleHeaderAction = (e: Event) => {
-      const customEvent = e as CustomEvent;
-      if (customEvent.detail === 'logistics-slip') {
-        handleOpenSlipModal();
-      } else if (customEvent.detail === 'logistics-vehicle') {
-        setFormVehNo('');
-        setFormVehCapacity('');
-        setFormVehDriverId('');
-        setFormVehInsurance('');
-        setFormVehFitness('');
-        setFormVehNotes('');
-        setIsVehicleModalOpen(true);
-      } else if (customEvent.detail === 'logistics-tyre') {
-        handleOpenTyreModal(null);
-      }
-    };
-    window.addEventListener('app-header-action', handleHeaderAction);
-    return () => window.removeEventListener('app-header-action', handleHeaderAction);
-  }, [slips.length]);
 
   // Handle order selection side effect to prefill material/party details
   const handleOrderChange = (orderId: string) => {
@@ -320,121 +363,114 @@ export const LogisticsView: React.FC = () => {
   };
 
   // Handle Open Vehicle Modal for Create / Edit
-  const handleOpenVehicleModal = (veh?: Vehicle | null, initialTab: 'general' | 'emi' = 'general') => {
+  const handleOpenVehicleModal = (veh?: Vehicle | null) => {
+    setStagedVehicleDocs([]);
+    const emi = veh?.emiDetails;
+    const resetEmiFields = (from?: VehicleEmiDetails) => {
+      setFormVehEmiFinancier(from?.financierName || '');
+      setFormVehEmiLoanAccNo(from?.loanAccountNumber || '');
+      setFormVehEmiTotalLoan(from?.totalLoanAmount ? String(from.totalLoanAmount) : '');
+      setFormVehEmiTenureMonths(from?.totalTenureMonths ? String(from.totalTenureMonths) : '');
+      setFormVehEmiAmount(from?.monthlyEmiAmount ? String(from.monthlyEmiAmount) : '');
+      setFormVehEmiDueDay(from?.emiDueDay ? String(from.emiDueDay) : '10');
+      setFormVehEmiAccountId(from?.emiAccountId || '');
+      setFormVehEmiStartDate(from?.loanStartDate || '');
+      setFormVehEmiOpenPaid(from?.paidEmisCount !== undefined ? String(from.paidEmisCount) : '0');
+      setFormVehEmiStatus(from?.status || 'active');
+      setFormVehEmiNotes(from?.notes || '');
+    };
     if (veh) {
       setEditingVehicle(veh);
       setFormVehNo(veh.vehicleNo);
       setFormVehType(veh.type);
-      setFormVehCapacity(String(veh.capacityTonnes));
-      setFormVehOwner(veh.ownership);
-      setFormVehStatus(veh.status as any);
-      setFormVehDriverId(veh.currentDriverId || '');
       setFormVehInsurance(veh.insuranceExpiry || '');
-      setFormVehFitness(veh.fitnessExpiry || '');
+      setFormVehInsuranceAmount(veh.insuranceMonthlyAmount ? String(veh.insuranceMonthlyAmount) : '');
       setFormVehNotes(veh.notes || '');
-
-      if (veh.emiDetails && veh.emiDetails.hasEmi) {
-        setFormVehHasEmi(true);
-        setFormVehEmiFinancier(veh.emiDetails.financierName || '');
-        setFormVehEmiLoanAccNo(veh.emiDetails.loanAccountNumber || '');
-        setFormVehEmiAmount(veh.emiDetails.monthlyEmiAmount ? String(veh.emiDetails.monthlyEmiAmount) : '');
-        setFormVehEmiDueDay(veh.emiDetails.emiDueDay ? String(veh.emiDetails.emiDueDay) : '10');
-        setFormVehEmiStartDate(veh.emiDetails.loanStartDate || '');
-        setFormVehEmiEndDate(veh.emiDetails.loanEndDate || '');
-        setFormVehEmiTotalLoan(veh.emiDetails.totalLoanAmount ? String(veh.emiDetails.totalLoanAmount) : '');
-        setFormVehEmiInterestRate(veh.emiDetails.interestRate ? String(veh.emiDetails.interestRate) : '');
-        setFormVehEmiTenureMonths(veh.emiDetails.totalTenureMonths ? String(veh.emiDetails.totalTenureMonths) : '');
-        setFormVehEmiPaidCount(veh.emiDetails.paidEmisCount !== undefined ? String(veh.emiDetails.paidEmisCount) : '');
-        setFormVehEmiAutoDebitAccount(veh.emiDetails.autoDebitAccount || '');
-        setFormVehEmiStatus(veh.emiDetails.status || 'active');
-        setFormVehEmiNotes(veh.emiDetails.notes || '');
-      } else {
-        setFormVehHasEmi(false);
-        setFormVehEmiFinancier('');
-        setFormVehEmiLoanAccNo('');
-        setFormVehEmiAmount('');
-        setFormVehEmiDueDay('10');
-        setFormVehEmiStartDate('');
-        setFormVehEmiEndDate('');
-        setFormVehEmiTotalLoan('');
-        setFormVehEmiInterestRate('');
-        setFormVehEmiTenureMonths('');
-        setFormVehEmiPaidCount('');
-        setFormVehEmiAutoDebitAccount('');
-        setFormVehEmiStatus('active');
-        setFormVehEmiNotes('');
-      }
+      setFormVehDriverId(veh.currentDriverId || '');
+      resetEmiFields(veh.emiDetails && veh.emiDetails.hasEmi ? veh.emiDetails : undefined);
     } else {
       setEditingVehicle(null);
       setFormVehNo('');
       setFormVehType('tipper');
-      setFormVehCapacity('18');
-      setFormVehOwner('owned');
-      setFormVehStatus('available');
-      setFormVehDriverId('');
       setFormVehInsurance('');
-      setFormVehFitness('');
+      setFormVehInsuranceAmount('');
       setFormVehNotes('');
-
-      setFormVehHasEmi(false);
-      setFormVehEmiFinancier('');
-      setFormVehEmiLoanAccNo('');
-      setFormVehEmiAmount('');
-      setFormVehEmiDueDay('10');
-      setFormVehEmiStartDate('');
-      setFormVehEmiEndDate('');
-      setFormVehEmiTotalLoan('');
-      setFormVehEmiInterestRate('');
-      setFormVehEmiTenureMonths('');
-      setFormVehEmiPaidCount('');
-      setFormVehEmiAutoDebitAccount('');
-      setFormVehEmiStatus('active');
-      setFormVehEmiNotes('');
+      setFormVehDriverId('');
+      resetEmiFields();
     }
-    setVehicleModalTab(initialTab);
+    setVehDriverPickerOpen(false);
+    setVehDriverQuery('');
+    setVehDetailsOpen(true);
+    setVehLoanOpen(true);
     setIsVehicleModalOpen(true);
+  };
+
+  // EMI amount auto-suggest: entering Loan Amount + Tenure prefills the
+  // monthly EMI (flat spread) when the operator hasn't typed one yet.
+  const handleEmiLoanParamsChange = (loan: string, tenure: string) => {
+    const loanNum = Number(loan) || 0;
+    const tenureNum = Number(tenure) || 0;
+    if (loanNum > 0 && tenureNum > 0 && (!formVehEmiAmount || Number(formVehEmiAmount) === 0)) {
+      setFormVehEmiAmount(String(Math.round(loanNum / tenureNum)));
+    }
   };
 
   // Handle Save (Create / Update) Vehicle
   const handleSaveVehicle = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formVehNo || !formVehCapacity) {
-      alert('Please fill in vehicle number and capacity.');
+    if (!formVehNo) {
+      alert('Please fill in the vehicle number.');
       return;
     }
 
+    // Full loan capture: entering a Monthly EMI Amount attaches the loan.
+    // Loan end date derives from start + tenure (day-clamped); a loan with a
+    // linked account + due day + EMI amount is auto-deducted by the cron.
+    const emiAmountNum = Number(formVehEmiAmount) || 0;
+    const hasLoan = emiAmountNum > 0;
+    if (hasLoan && !formVehEmiAccountId) {
+      // Required field (client directive): a financed vehicle must have the
+      // account it auto-debits from selected.
+      setVehLoanOpen(true);
+      alert('Please select the Linked Bank Account for the EMI auto-debit.');
+      return;
+    }
+    const tenureNum = Number(formVehEmiTenureMonths) || 0;
+    const loanEndDate = hasLoan && formVehEmiStartDate && tenureNum > 0
+      ? addMonthsIso(formVehEmiStartDate, tenureNum)
+      : undefined;
+    const emiDetails: VehicleEmiDetails = {
+      ...(editingVehicle?.emiDetails || {}),
+      hasEmi: hasLoan,
+      monthlyEmiAmount: hasLoan ? emiAmountNum : undefined,
+      totalLoanAmount: hasLoan || formVehEmiTotalLoan ? (formVehEmiTotalLoan ? Number(formVehEmiTotalLoan) : undefined) : undefined,
+      totalTenureMonths: hasLoan ? (tenureNum > 0 ? tenureNum : undefined) : undefined,
+      emiDueDay: hasLoan ? Math.min(31, Math.max(1, Number(formVehEmiDueDay) || 10)) : undefined,
+      emiAccountId: hasLoan ? (formVehEmiAccountId || undefined) : undefined,
+      loanStartDate: formVehEmiStartDate || undefined,
+      loanEndDate: loanEndDate || undefined,
+      paidEmisCount: hasLoan ? (Number(formVehEmiOpenPaid) || 0) : undefined,
+      financierName: formVehEmiFinancier.trim() || undefined,
+      loanAccountNumber: formVehEmiLoanAccNo.trim() || undefined,
+      // Interest rate is deliberately not collected or saved (client
+      // directive) — always null it so legacy values don't linger on edit.
+      interestRate: undefined,
+      status: hasLoan ? formVehEmiStatus : undefined,
+      notes: formVehEmiNotes.trim() || undefined,
+    };
+
     const assignedDriver = driverEmployees.find(d => d.id === formVehDriverId);
 
-    const emiDetails: VehicleEmiDetails = formVehHasEmi
-      ? {
-          hasEmi: true,
-          financierName: formVehEmiFinancier.trim() || undefined,
-          loanAccountNumber: formVehEmiLoanAccNo.trim() || undefined,
-          monthlyEmiAmount: Number(formVehEmiAmount) || 0,
-          emiDueDay: Math.min(31, Math.max(1, Number(formVehEmiDueDay) || 10)),
-          loanStartDate: formVehEmiStartDate || undefined,
-          loanEndDate: formVehEmiEndDate || undefined,
-          totalLoanAmount: formVehEmiTotalLoan ? Number(formVehEmiTotalLoan) : undefined,
-          interestRate: formVehEmiInterestRate ? Number(formVehEmiInterestRate) : undefined,
-          totalTenureMonths: formVehEmiTenureMonths ? Number(formVehEmiTenureMonths) : undefined,
-          paidEmisCount: formVehEmiPaidCount ? Number(formVehEmiPaidCount) : 0,
-          autoDebitAccount: formVehEmiAutoDebitAccount.trim() || undefined,
-          status: formVehEmiStatus,
-          notes: formVehEmiNotes.trim() || undefined,
-        }
-      : { hasEmi: false };
-
     if (editingVehicle) {
+      // Driver assignment is editable here; fitness & workshop status remain
+      // operational fields managed outside this modal.
       localDb.updateVehicle(editingVehicle.id, {
         vehicleNo: formVehNo.toUpperCase().trim(),
         type: formVehType,
-        capacityTonnes: Number(formVehCapacity) || 18,
-        ownership: formVehOwner,
-        status: formVehStatus,
+        insuranceExpiry: formVehInsurance || undefined,
+        insuranceMonthlyAmount: Number(formVehInsuranceAmount) || undefined,
         currentDriverId: formVehDriverId || undefined,
         currentDriverName: assignedDriver?.name || undefined,
-        insuranceExpiry: formVehInsurance || undefined,
-        fitnessExpiry: formVehFitness || undefined,
         emiDetails,
         notes: formVehNotes || undefined,
       });
@@ -442,39 +478,100 @@ export const LogisticsView: React.FC = () => {
       const newVeh: Omit<Vehicle, 'id' | 'createdAt'> = {
         vehicleNo: formVehNo.toUpperCase().trim(),
         type: formVehType,
-        capacityTonnes: Number(formVehCapacity) || 18,
-        ownership: formVehOwner,
-        status: formVehStatus,
+        capacityTonnes: 0,
+        ownership: 'owned',
+        status: 'available',
+        insuranceExpiry: formVehInsurance || undefined,
+        insuranceMonthlyAmount: Number(formVehInsuranceAmount) || undefined,
         currentDriverId: formVehDriverId || undefined,
         currentDriverName: assignedDriver?.name || undefined,
-        insuranceExpiry: formVehInsurance || undefined,
-        fitnessExpiry: formVehFitness || undefined,
         emiDetails,
         notes: formVehNotes || undefined,
       };
-      localDb.addVehicle(newVeh);
+      localDb.addVehicle({
+        ...newVeh,
+        // Staged documents (new-vehicle flow) — the server links them in the
+        // same create flow and moves each S3 object from Pending/ under
+        // Vehicle/<id>/
+        ...(stagedVehicleDocs.length > 0 ? { documentIds: stagedVehicleDocs.map((d) => d.id) } : {}),
+      } as Partial<Vehicle>);
     }
 
     setIsVehicleModalOpen(false);
     setEditingVehicle(null);
   };
 
-  // Quick mark vehicle EMI paid for current month
-  const handleQuickMarkEmiPaid = (vehicle: Vehicle) => {
-    if (!vehicle.emiDetails?.hasEmi) return;
-    const currentPaid = vehicle.emiDetails.paidEmisCount || 0;
-    const nextPaid = currentPaid + 1;
-    const totalTenure = vehicle.emiDetails.totalTenureMonths;
-    const isClosed = totalTenure && nextPaid >= totalTenure;
+  /** Month-accurate YYYY-MM-DD adder (day-clamped: Jan 31 + 1m → Feb 28). */
+  function addMonthsIso(ymd: string, months: number): string {
+    const d = new Date(`${ymd}T00:00:00Z`);
+    const day = d.getUTCDate();
+    d.setUTCDate(1);
+    d.setUTCMonth(d.getUTCMonth() + months);
+    const lastDay = new Date(d.getUTCFullYear(), d.getUTCMonth() + 1, 0).getUTCDate();
+    d.setUTCDate(Math.min(day, lastDay));
+    return d.toISOString().split('T')[0];
+  }
 
-    localDb.updateVehicle(vehicle.id, {
-      emiDetails: {
-        ...vehicle.emiDetails,
-        paidEmisCount: nextPaid,
-        status: isClosed ? 'closed' : vehicle.emiDetails.status || 'active',
-        lastPaymentDate: new Date().toISOString().split('T')[0],
-      },
-    });
+  // --- EMI ENTRY LEDGER ----------
+  /** Record Manual: open the entry form prefilled against a vehicle (or generic). */
+  const handleOpenEmiEntryModal = (vehicle?: Vehicle | null, entry?: VehicleEmiEntry | null) => {
+    const emi = vehicle?.emiDetails;
+    if (entry) {
+      setEditingEmiEntry(entry);
+      setFormEmiVehicleId(entry.vehicleId);
+      setFormEmiAccountId(entry.accountId);
+      setFormEmiDate(entry.date);
+      setFormEmiAmount(String(entry.amount));
+      setFormEmiNotes(entry.notes || '');
+    } else {
+      setEditingEmiEntry(null);
+      setFormEmiVehicleId(vehicle?.id || '');
+      // Prefill the vehicle's configured auto-debit account for convenience
+      setFormEmiAccountId(emi?.emiAccountId || '');
+      // Prefill this month's due day (or today if it has already passed)
+      const todayIst = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      const now = new Date(`${todayIst}T00:00:00Z`);
+      const dueDay = Math.min(31, Math.max(1, Number(emi?.emiDueDay) || 1));
+      const lastDay = new Date(now.getUTCFullYear(), now.getUTCMonth() + 1, 0).getUTCDate();
+      const dueDayClamped = Math.min(dueDay, lastDay);
+      const prefillDate = dueDayClamped >= now.getUTCDate()
+        ? `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(dueDayClamped).padStart(2, '0')}`
+        : todayIst;
+      setFormEmiDate(prefillDate);
+      setFormEmiAmount(emi?.monthlyEmiAmount ? String(emi.monthlyEmiAmount) : '');
+      setFormEmiNotes('');
+    }
+    setIsEmiEntryModalOpen(true);
+  };
+
+  const handleSaveEmiEntry = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formEmiVehicleId || !formEmiAccountId || !formEmiDate || !(Number(formEmiAmount) > 0)) {
+      alert('Select the vehicle, account, date and a positive EMI amount.');
+      return;
+    }
+    const entryPayload = {
+      vehicleId: formEmiVehicleId,
+      accountId: formEmiAccountId,
+      date: formEmiDate,
+      amount: Number(formEmiAmount),
+      notes: formEmiNotes.trim() || undefined,
+      source: (editingEmiEntry?.source || 'manual') as 'auto' | 'manual',
+    };
+    if (editingEmiEntry) {
+      // Edit-by-delta: the server rebalances the linked account automatically
+      localDb.updateVehicleEmiEntry(editingEmiEntry.id, entryPayload);
+    } else {
+      localDb.addVehicleEmiEntry(entryPayload);
+    }
+    setIsEmiEntryModalOpen(false);
+    setEditingEmiEntry(null);
+  };
+
+  const handleDeleteEmiEntry = (entry: VehicleEmiEntry) => {
+    if (confirm(`Delete this EMI entry? The account balance reverses the ₹${Number(entry.amount).toLocaleString('en-IN')} debit automatically.`)) {
+      localDb.deleteVehicleEmiEntry(entry.id);
+    }
   };
 
   // Tyre Handlers
@@ -614,32 +711,11 @@ export const LogisticsView: React.FC = () => {
       {/* Action Panel */}
       <div className="flex flex-wrap items-center justify-end gap-2 pb-2">
         <button
-          onClick={handleOpenSlipModal}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-semibold shadow-xs transition"
-        >
-          <Plus className="h-4 w-4" />
-          New Trip Slip
-        </button>
-        <button
-          onClick={() => handleOpenVehicleModal(null, 'general')}
+          onClick={() => handleOpenVehicleModal(null)}
           className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--color-surface-container-lowest)] hover:bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border border-[var(--color-outline-variant)] rounded-full text-xs font-semibold shadow-2xs transition-colors"
         >
           <Truck className="h-4 w-4 text-[var(--color-outline)]" />
           Add Vehicle
-        </button>
-        <button
-          onClick={() => { setActiveSubTab('emi'); }}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--color-surface-container-lowest)] hover:bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border border-[var(--color-outline-variant)] rounded-full text-xs font-semibold shadow-2xs transition-colors"
-        >
-          <Landmark className="h-4 w-4 text-[var(--color-primary)]" />
-          Vehicle EMI & Loans
-        </button>
-        <button
-          onClick={() => setActiveSubTab('drivers')}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--color-surface-container-lowest)] hover:bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border border-[var(--color-outline-variant)] rounded-full text-xs font-semibold shadow-2xs transition-colors"
-        >
-          <User className="h-4 w-4 text-[var(--color-outline)]" />
-          Drivers Directory
         </button>
         <button
           onClick={() => handleOpenTyreModal(null)}
@@ -648,74 +724,6 @@ export const LogisticsView: React.FC = () => {
           <Disc className="h-4 w-4 text-[var(--color-outline)]" />
           Add Tyre
         </button>
-      </div>
-
-      {/* Metrics Dashboard Widgets */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Metric 1 */}
-        <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-start justify-between">
-          <div>
-            <p className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Fleet Strength</p>
-            <h3 className="text-2xl font-extrabold text-[var(--color-on-surface)] mt-1">{stats.totalVeh}</h3>
-            <p className="text-xs text-[var(--color-on-surface-variant)] mt-1.5 flex items-center gap-1.5 font-medium">
-              <span className="inline-block w-2 h-2 rounded-full bg-[var(--color-success)]"></span>
-              {stats.availableVeh} Yard Idle / Available
-            </p>
-          </div>
-          <div className="p-2.5 bg-[var(--color-surface-container)] rounded-2xl">
-            <Truck className="h-5 w-5 text-[var(--color-primary)]" />
-          </div>
-        </div>
-
-        {/* Metric 2 */}
-        <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-start justify-between">
-          <div>
-            <p className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">In Transit (Active)</p>
-            <h3 className="text-2xl font-extrabold text-[var(--color-warning)] mt-1 flex items-center gap-2">
-              {stats.onTripVeh}
-              {stats.onTripVeh > 0 && (
-                <span className="flex h-2.5 w-2.5 relative">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--color-warning)] opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[var(--color-warning)]"></span>
-                </span>
-              )}
-            </h3>
-            <p className="text-xs text-[var(--color-on-surface-variant)] mt-1.5 font-medium">
-              Insulated asphalt hauling active
-            </p>
-          </div>
-          <div className="p-2.5 bg-[var(--color-warning-container)] rounded-2xl">
-            <Navigation2 className="h-5 w-5 text-[var(--color-on-warning-container)] animate-pulse" />
-          </div>
-        </div>
-
-        {/* Metric 3 */}
-        <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-start justify-between">
-          <div>
-            <p className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Fuel Advances</p>
-            <h3 className="text-2xl font-extrabold text-[var(--color-on-surface)] mt-1">{stats.totalFuelAdvanced} L</h3>
-            <p className="text-xs text-[var(--color-on-surface-variant)] mt-1.5 font-medium">
-              Issued this month to tankers
-            </p>
-          </div>
-          <div className="p-2.5 bg-[var(--color-info-container)] rounded-2xl">
-            <Fuel className="h-5 w-5 text-[var(--color-on-info-container)]" />
-          </div>
-        </div>
-
-        {/* Metric 4 */}
-        <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-start justify-between">
-          <div>
-            <p className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Cash Advances</p>
-            <h3 className="text-2xl font-extrabold text-[var(--color-success)] mt-1">{formatCurrency(stats.totalCashAdvanced)}</h3>
-            <p className="text-xs text-[var(--color-on-surface-variant)] mt-1.5 font-medium">
-              Toll & driver batta disbursed
-            </p>
-          </div>
-          <div className="p-2.5 bg-[var(--color-success-container)] rounded-2xl">
-            <CreditCard className="h-5 w-5 text-[var(--color-on-success-container)]" />
-          </div>
-        </div>
       </div>
 
       {/* Sub Tabs Panel */}
@@ -750,17 +758,17 @@ export const LogisticsView: React.FC = () => {
             </span>
           </button>
           <button
-            onClick={() => { setActiveSubTab('emi'); setStatusFilter('all'); }}
+            onClick={() => { setActiveSubTab('emi-entries'); setStatusFilter('all'); }}
             className={`py-3 text-xs font-bold border-b-2 transition-all flex items-center gap-2 whitespace-nowrap ${
-              activeSubTab === 'emi'
+              activeSubTab === 'emi-entries'
                 ? 'border-[var(--color-primary)] text-[var(--color-primary)]'
                 : 'border-transparent text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
             }`}
           >
-            <Landmark className="h-4 w-4" />
-            Vehicle EMI & Loans
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]">
-              {vehicles.filter(v => v.emiDetails?.hasEmi).length}
+            <CheckCircle2 className="h-4 w-4" />
+            EMI Entries — Deductions Ledger
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)]">
+              {emiEntries.length}
             </span>
           </button>
           <button
@@ -806,7 +814,7 @@ export const LogisticsView: React.FC = () => {
       </div>
 
       {/* SEARCH AND FILTER BAR */}
-      {activeSubTab !== 'simulator' && (
+      {activeSubTab !== 'simulator' && activeSubTab !== 'emi-entries' && (
         <div className="flex flex-col sm:flex-row gap-3 bg-[var(--color-surface-container-lowest)] p-3 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs">
           <div className="relative flex-1">
             <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[var(--color-outline)]" />
@@ -1123,43 +1131,115 @@ export const LogisticsView: React.FC = () => {
         </div>
       )}
 
-      {/* 2. FLEET & MACHINERY LIST VIEW */}
+      {/* 2. FLEET & MACHINERY LIST VIEW — merged with Vehicle EMI & Loans */}
       {activeSubTab === 'fleet' && (
+        <>
+          {/* EMI Metrics Summary Cards */}
+          {(() => {
+          const financedVehicles = vehicles.filter(v => v.emiDetails && v.emiDetails.hasEmi);
+          const activeFinanced = financedVehicles.filter(v => v.emiDetails?.status !== 'closed');
+          const totalMonthlyOutflow = activeFinanced.reduce((sum, v) => sum + (v.emiDetails?.monthlyEmiAmount || 0), 0);
+          const totalPortfolioPrincipal = financedVehicles.reduce((sum, v) => sum + (v.emiDetails?.totalLoanAmount || 0), 0);
+
+          // Find next due vehicle
+          const todayDay = new Date().getDate();
+          const sortedByDue = [...activeFinanced].sort((a, b) => {
+            const dueA = a.emiDetails?.emiDueDay || 10;
+            const dueB = b.emiDetails?.emiDueDay || 10;
+            const diffA = dueA >= todayDay ? dueA - todayDay : 30 + (dueA - todayDay);
+            const diffB = dueB >= todayDay ? dueB - todayDay : 30 + (dueB - todayDay);
+            return diffA - diffB;
+          });
+          const nextDueVehicle = sortedByDue[0];
+
+          return (
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              {/* Metric 1 */}
+              <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-start justify-between">
+                <div>
+                  <p className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Monthly EMI Commitment</p>
+                  <h3 className="text-2xl font-extrabold text-[var(--color-primary)] mt-1">{formatCurrency(totalMonthlyOutflow)}</h3>
+                 
+                </div>
+                <div className="p-2.5 bg-[var(--color-primary-container)] rounded-2xl">
+                  <Landmark className="h-5 w-5 text-[var(--color-on-primary-container)]" />
+                </div>
+              </div>
+
+              {/* Metric 2 */}
+              <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-start justify-between">
+                <div>
+                  <p className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Financed Fleet</p>
+                  <h3 className="text-2xl font-extrabold text-[var(--color-on-surface)] mt-1">
+                    {activeFinanced.length} <span className="text-sm font-semibold text-[var(--color-on-surface-variant)]">/ {vehicles.length} Trucks</span>
+                  </h3>
+                  
+                </div>
+                <div className="p-2.5 bg-[var(--color-surface-container)] rounded-2xl">
+                  <Truck className="h-5 w-5 text-[var(--color-primary)]" />
+                </div>
+              </div>
+
+             
+            </div>
+          );
+        })()}
+
+
         <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-[28px] overflow-hidden shadow-2xs">
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-                  <th className="py-3.5 px-4">Vehicle No / Ownership</th>
+                  <th className="py-3.5 px-4">Vehicle No</th>
                   <th className="py-3.5 px-3">Equipment Type</th>
-                  <th className="py-3.5 px-3 text-right">Capacity Limit</th>
                   <th className="py-3.5 px-3">Assigned Driver</th>
-                  <th className="py-3.5 px-3">Compliance & Expiry</th>
-                  <th className="py-3.5 px-3">Financing & EMI</th>
-                  <th className="py-3.5 px-3">Status</th>
+                  <th className="py-3.5 px-3">Insurance</th>
+                  <th className="py-3.5 px-3 text-right">Monthly EMI (₹)</th>
+                  <th className="py-3.5 px-3">Due Day & Next Date</th>
+                  <th className="py-3.5 px-3">Tenure / Repayment</th>
+                  <th className="py-3.5 px-3">Auto-Debit Account</th>
+                  <th className="py-3.5 px-3">Loan Status</th>
                   <th className="py-3.5 px-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--color-outline-variant)]">
                 {filteredVehicles.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                    <td colSpan={10} className="py-12 text-center text-[var(--color-on-surface-variant)]">
                       <Truck className="h-8 w-8 text-[var(--color-outline)] mx-auto mb-2" />
                       <p className="text-xs font-bold uppercase">No vehicles registered</p>
                     </td>
                   </tr>
                 ) : (
                   filteredVehicles.map((vehicle) => {
-                    const isInsuranceWarning = vehicle.insuranceExpiry && new Date(vehicle.insuranceExpiry) < new Date(Date.now() + 30*24*60*60*1000);
-                    const isFitnessWarning = vehicle.fitnessExpiry && new Date(vehicle.fitnessExpiry) < new Date(Date.now() + 30*24*60*60*1000);
+                    // Insurance expiry inside 30 days raises the warning tone
+                    const isInsuranceWarning = !!vehicle.insuranceExpiry && new Date(vehicle.insuranceExpiry) < new Date(Date.now() + 30*24*60*60*1000);
 
-                    // EMI Due calculations
+                    // --- EMI / loan computations (entries-aware) ---
                     const emi = vehicle.emiDetails;
                     const hasActiveEmi = emi && emi.hasEmi && emi.status !== 'closed';
-                    const todayDay = new Date().getDate();
-                    const dueDay = emi?.emiDueDay || 10;
-                    const diffDays = dueDay >= todayDay ? dueDay - todayDay : 30 - (todayDay - dueDay);
-                    const isDueSoon = hasActiveEmi && diffDays <= 7;
+                    const postedEntries = emiEntries.filter(e => e.vehicleId === vehicle.id);
+                    const paid = (emi?.paidEmisCount || 0) + postedEntries.length;
+                    const totalTenure = emi?.totalTenureMonths || 0;
+                    const emisLeftForVehicle = hasActiveEmi && totalTenure ? Math.max(0, totalTenure - paid) : undefined;
+                    const progressPercent = totalTenure > 0 ? Math.min(100, Math.round((paid / totalTenure) * 100)) : 0;
+                    const debitAccountName = emi?.emiAccountId ? accounts.find(a => a.id === emi.emiAccountId)?.name || emi.autoDebitAccount : emi?.autoDebitAccount;
+
+                    // 2-DAYS-BEFORE ALERT (client directive) — red reserved for
+                    // short-of-funds; amber for due-soon / overdue
+                    const t = new Date(`${istToday}T00:00:00Z`);
+                    const lastDayThisMonth = new Date(t.getUTCFullYear(), t.getUTCMonth() + 1, 0).getUTCDate();
+                    const dueDayThis = Math.min(31, Math.max(1, emi?.emiDueDay || 10), lastDayThisMonth);
+                    const dueDateThis = `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(dueDayThis).padStart(2, '0')}`;
+                    const daysUntil = Math.round((Date.parse(`${dueDateThis}T00:00:00Z`) - Date.parse(`${istToday}T00:00:00Z`)) / 86_400_000);
+                    const postedThisMonth = postedEntries.some(e => String(e.date).slice(0, 7) === dueDateThis.slice(0, 7));
+                    const isAlertWindow = !postedThisMonth && emi?.status !== 'closed' && daysUntil <= 2;
+                    const isOverdue = isAlertWindow && daysUntil < 0;
+                    const isDueSoon = isAlertWindow && daysUntil >= 0;
+                    const vehicleShortOfFunds = isAlertWindow && emi?.emiAccountId
+                      ? (accounts.find(a => a.id === emi.emiAccountId)?.currentBalance ?? 0) < (Number(emi.monthlyEmiAmount) || 0)
+                      : false;
 
                     return (
                       <tr key={vehicle.id} className="hover:bg-[var(--color-surface-container)]/40 transition-colors text-xs text-[var(--color-on-surface)]">
@@ -1174,13 +1254,6 @@ export const LogisticsView: React.FC = () => {
                               <Disc className="h-3 w-3 text-[var(--color-primary)] animate-spin-slow" />
                               {vehicle.vehicleNo}
                             </button>
-                            <span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded-full ${
-                              vehicle.ownership === 'owned' 
-                               ? 'bg-[var(--color-surface-container)] text-[var(--color-on-surface)]' 
-                                : 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
-                            }`}>
-                              {vehicle.ownership}
-                            </span>
                           </div>
                           {vehicle.notes && (
                             <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-1 italic max-w-[200px] truncate">{vehicle.notes}</p>
@@ -1189,108 +1262,181 @@ export const LogisticsView: React.FC = () => {
                         <td className="py-3.5 px-3">
                           <span className="text-[var(--color-on-surface)] font-bold capitalize">{vehicle.type}</span>
                         </td>
-                        <td className="py-3.5 px-3 text-right">
-                          <span className="text-[var(--color-on-surface)] font-bold">{vehicle.capacityTonnes} MT</span>
-                        </td>
                         <td className="py-3.5 px-3">
-                          <span className="text-[var(--color-on-surface)] font-bold flex items-center gap-1">
-                            <User className="h-3.5 w-3.5 text-[var(--color-outline)]" />
-                            {vehicle.currentDriverName || <span className="text-[var(--color-on-surface-variant)] font-normal">Unassigned</span>}
-                          </span>
-                        </td>
-                        <td className="py-3.5 px-3 space-y-1">
-                          {vehicle.insuranceExpiry && (
-                            <p className={`text-[10px] font-semibold flex items-center gap-1 ${isInsuranceWarning ? 'text-[var(--color-warning)]' : 'text-[var(--color-on-surface-variant)]'}`}>
-                              <Calendar className="h-3 w-3 shrink-0" />
-                              Ins: <span className="font-bold">{vehicle.insuranceExpiry}</span>
-                            </p>
-                          )}
-                          {vehicle.fitnessExpiry && (
-                            <p className={`text-[10px] font-semibold flex items-center gap-1 ${isFitnessWarning ? 'text-[var(--color-warning)]' : 'text-[var(--color-on-surface-variant)]'}`}>
-                              <AlertCircle className="h-3 w-3 shrink-0" />
-                              Fit: <span className="font-bold">{vehicle.fitnessExpiry}</span>
-                            </p>
+                          {vehicle.currentDriverId ? (
+                            (() => {
+                              const drv = driverEmployees.find(e => e.id === vehicle.currentDriverId);
+                              return (
+                                <div className="flex flex-col">
+                                  <span className="text-[var(--color-on-surface)] font-bold flex items-center gap-1">
+                                    <User className="h-3.5 w-3.5 text-[var(--color-outline)]" />
+                                    {vehicle.currentDriverName || drv?.name || '—'}
+                                  </span>
+                                  <span className="text-[9px] font-semibold text-[var(--color-on-surface-variant)] ml-5">
+                                    {drv?.salaryBase ? `${formatCurrency(drv.salaryBase)}/${drv.salaryType === 'daily' ? 'day' : 'mo'}` : '—'}
+                                  </span>
+                                </div>
+                              );
+                            })()
+                          ) : (
+                            <span className="text-[var(--color-on-surface-variant)] font-normal">Unassigned</span>
                           )}
                         </td>
                         <td className="py-3.5 px-3">
-                          {hasActiveEmi ? (
-                            <div className="space-y-1">
-                              <div className="flex items-center gap-1.5">
-                                <span className="font-extrabold text-[var(--color-primary)] font-mono text-xs">
-                                  {formatCurrency(emi.monthlyEmiAmount || 0)}
+                          {vehicle.insuranceMonthlyAmount || vehicle.insuranceExpiry ? (
+                            <div className="flex flex-col">
+                              {vehicle.insuranceMonthlyAmount ? (
+                                <span className={`font-mono font-bold text-xs flex items-center gap-1 ${isInsuranceWarning ? 'text-[var(--color-warning)]' : 'text-[var(--color-on-surface)]'}`}>
+                                  {formatCurrency(vehicle.insuranceMonthlyAmount)}
+                                  <span className="text-[9px] font-bold text-[var(--color-on-surface-variant)]">/mo</span>
                                 </span>
-                                <span className="text-[10px] text-[var(--color-on-surface-variant)]">/mo</span>
-                              </div>
-                              <div className="flex items-center gap-1.5 flex-wrap">
-                                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
-                                  isDueSoon
-                                    ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)] animate-pulse'
-                                    : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
-                                }`}>
-                                  Due: {dueDay}th
+                              ) : (
+                                <span className="text-[var(--color-on-surface)] font-bold">—</span>
+                              )}
+                              {vehicle.insuranceExpiry && (
+                                <span className={`text-[9px] mt-0.5 ${isInsuranceWarning ? 'text-[var(--color-warning)] font-bold' : 'text-[var(--color-on-surface-variant)]'}`}>
+                                  Expiry: {formatDdMmYyyy(vehicle.insuranceExpiry)}
                                 </span>
-                                <span className="text-[10px] text-[var(--color-on-surface-variant)] truncate max-w-[100px]" title={emi.financierName}>
-                                  {emi.financierName || 'Financed'}
+                              )}
+                              {isInsuranceWarning && (
+                                <span className="text-[8px] font-black uppercase w-fit mt-0.5 px-1.5 py-0.2 rounded-full bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]">
+                                  ⚠ Due within 30 days
                                 </span>
-                              </div>
+                              )}
                             </div>
                           ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleOpenVehicleModal(vehicle, 'emi')}
-                              className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--color-primary)] hover:underline"
-                            >
-                              <Plus className="h-3 w-3" /> Add Loan EMI
-                            </button>
+                            <span className="text-[var(--color-on-surface-variant)] font-semibold">—</span>
+                          )}
+                        </td>
+                        <td className="py-3.5 px-3 text-right">
+                          {emi?.hasEmi ? (
+                            <span className="font-mono font-black text-[var(--color-primary)] text-xs">
+                              {formatCurrency(emi.monthlyEmiAmount || 0)}
+                              {emi.totalLoanAmount && (
+                                <span className="text-[9px] font-semibold text-[var(--color-on-surface-variant)] block">
+                                  Total: {formatCurrency(emi.totalLoanAmount)}
+                                </span>
+                              )}
+                            </span>
+                          ) : (
+                            <span className="text-[var(--color-on-surface-variant)] font-semibold">—</span>
                           )}
                         </td>
                         <td className="py-3.5 px-3">
-                          <span className={`text-[10px] font-extrabold uppercase px-2.5 py-0.5 rounded-full ${
-                            vehicle.status === 'available'
-                              ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)] border border-[var(--color-success)]/20'
-                              : vehicle.status === 'on_trip'
-                                ? 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)] border border-[var(--color-info)]/20'
-                                : 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)] border border-[var(--color-warning)]/20'
-                          }`}>
-                            {vehicle.status === 'available' && 'Yard Idle'}
-                            {vehicle.status === 'on_trip' && 'On Duty Trip'}
-                            {vehicle.status === 'maintenance' && 'Workshop'}
+                          {emi?.hasEmi ? (
+                            <div className="space-y-1">
+                              <span className={`inline-flex items-center gap-1 text-[10px] font-extrabold px-2.5 py-0.5 rounded-full ${
+                                vehicleShortOfFunds
+                                  ? 'bg-[var(--color-error)] text-[var(--color-on-error)] animate-pulse'
+                                  : isDueSoon || isOverdue
+                                    ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)] font-bold animate-pulse'
+                                    : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)]'
+                              }`}>
+                                <Clock className="h-2.5 w-2.5" />
+                                {vehicleShortOfFunds
+                                  ? '⚠ Account Short of EMI Funds'
+                                  : isOverdue
+                                    ? `⚠ Overdue (due ${dueDateThis})`
+                                    : isDueSoon
+                                      ? (daysUntil === 1 ? '⚠ Due Tomorrow' : daysUntil === 0 ? '⚠ Due Today' : 'Due in 2 Days')
+                                      : `Every ${emi.emiDueDay || 10}th`}
+                              </span>
+                              {vehicleShortOfFunds && (
+                                <p className="text-[9px] font-bold text-[var(--color-on-error)]">
+                                  ⚠ {debitAccountName || 'Account'} can't cover the {formatCurrency(emi.monthlyEmiAmount || 0)} EMI — top up before the due date.
+                                </p>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-[var(--color-on-surface-variant)] font-semibold">—</span>
+                          )}
+                        </td>
+                        <td className="py-3.5 px-3">
+                          {emi?.hasEmi && totalTenure > 0 ? (
+                            <div className="space-y-1 min-w-[110px]">
+                              <div className="flex justify-between text-[10px] font-bold">
+                                <span>{paid} of {totalTenure} paid{emisLeftForVehicle !== undefined ? ` • ${emisLeftForVehicle} left` : ''}</span>
+                                <span>{progressPercent}%</span>
+                              </div>
+                              <div className="w-full bg-[var(--color-surface-container-high)] h-1.5 rounded-full overflow-hidden">
+                                <div
+                                  className="bg-[var(--color-primary)] h-full rounded-full transition-all"
+                                  style={{ width: `${progressPercent}%` }}
+                                ></div>
+                              </div>
+                            </div>
+                          ) : emi?.hasEmi ? (
+                            <span className="text-[10px] text-[var(--color-on-surface-variant)] font-semibold">Tenure not set</span>
+                          ) : (
+                            <span className="text-[var(--color-on-surface-variant)] font-semibold">—</span>
+                          )}
+                        </td>
+                        <td className="py-3.5 px-3">
+                          <span className="text-[11px] font-medium text-[var(--color-on-surface-variant)] truncate max-w-[130px] block">
+                            {debitAccountName || '—'}
                           </span>
+                        </td>
+                        <td className="py-3.5 px-3">
+                          {emi?.hasEmi ? (
+                            <span className={`text-[10px] font-extrabold uppercase px-2.5 py-0.5 rounded-full ${
+                              emi.status === 'active'
+                                ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
+                                : emi.status === 'closed'
+                                  ? 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)]'
+                                  : 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
+                            }`}>
+                              {emi.status || 'active'}
+                            </span>
+                          ) : (
+                            <span className="text-[var(--color-on-surface-variant)] font-semibold">—</span>
+                          )}
                         </td>
                         <td className="py-3.5 px-4 text-right">
                           <div className="flex items-center justify-end gap-1.5">
-                            <button
-                              onClick={() => handleOpenVehicleModal(vehicle, 'general')}
-                              className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)] hover:bg-[var(--color-surface-container)] rounded-full transition"
-                              title="Edit Vehicle & Specifications"
-                            >
-                              <Edit3 className="h-3.5 w-3.5" />
-                            </button>
-                            <button
-                              onClick={() => handleOpenVehicleModal(vehicle, 'emi')}
-                              className="px-2 py-1 text-[11px] bg-[var(--color-surface-container-lowest)] hover:bg-[var(--color-surface-container)] text-[var(--color-primary)] border border-[var(--color-outline-variant)] font-bold rounded-full flex items-center gap-1 transition shadow-2xs"
-                              title="Manage Vehicle EMI Details"
-                            >
-                              <Landmark className="h-3 w-3" />
-                              EMI
-                            </button>
-                            <button
-                              onClick={() => setSelectedVehicleForTyres(vehicle)}
-                              className="px-2 py-1 text-[11px] bg-[var(--color-surface-container-lowest)] hover:bg-[var(--color-surface-container)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] font-bold rounded-full flex items-center gap-1 transition-colors shadow-2xs"
-                              title="Inspect mounted tyres & axle positions"
-                            >
-                              <Disc className="h-3 w-3" />
-                              Tyres ({tyres.filter(t => t.vehicleId === vehicle.id && t.status === 'mounted').length})
-                            </button>
-                            <button
-                              onClick={() => {
-                                const newStat = vehicle.status === 'available' ? 'maintenance' : 'available';
-                                localDb.updateVehicle(vehicle.id, { status: newStat });
-                              }}
-                              className="px-2 py-1 text-[11px] bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] font-bold rounded-full transition-colors"
-                            >
-                              {vehicle.status === 'maintenance' ? 'Release' : 'To Workshop'}
-                            </button>
+                            <div className="relative" ref={vehicleMoreMenu?.id === vehicle.id ? moreVehicleMenuRef : undefined}>
+                              <button
+                                onClick={(e) => toggleVehicleMoreMenu(vehicle.id, e.currentTarget)}
+                                className={`p-1.5 rounded-full transition ${vehicleMoreMenu?.id === vehicle.id ? 'bg-[var(--color-surface-container-highest)] text-[var(--color-primary)]' : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)]'}`}
+                                title="More Actions"
+                              >
+                                <MoreVertical className="h-3.5 w-3.5" />
+                              </button>
+
+                              {/* More-actions popover: EMI + Tyres live in here.
+                                  VIEWPORT-FIXED so the table's overflow-x-auto
+                                  container can't clip it. */}
+                              {vehicleMoreMenu?.id === vehicle.id && (
+                                <div
+                                  className="fixed w-44 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xl p-1.5 z-50 animate-scaleUp"
+                                  style={{ top: vehicleMoreMenu.top, left: vehicleMoreMenu.left }}
+                                >
+                                  <button
+                                    onClick={() => {
+                                      setVehicleMoreMenu(null);
+                                      handleOpenVehicleModal(vehicle);
+                                    }}
+                                    className="w-full flex items-center gap-2 px-3 py-2 text-[11px] font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)] rounded-xl text-left transition-colors"
+                                  >
+                                    <Edit3 className="h-3.5 w-3.5 text-[var(--color-on-surface-variant)] shrink-0" />
+                                    Edit Vehicle
+                                    {hasActiveEmi && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-[var(--color-primary)]"></span>}
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setVehicleMoreMenu(null);
+                                      setSelectedVehicleForTyres(vehicle);
+                                    }}
+                                    className="w-full flex items-center gap-2 px-3 py-2 text-[11px] font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)] rounded-xl text-left transition-colors"
+                                  >
+                                    <Disc className="h-3.5 w-3.5 text-[var(--color-outline)] shrink-0" />
+                                    Tyres ({tyres.filter(t => t.vehicleId === vehicle.id && t.status === 'mounted').length})
+                                  </button>
+                                  <p className="px-3 pt-1.5 pb-1 text-[9px] text-[var(--color-on-surface-variant)] border-t border-[var(--color-outline-variant)] mt-1 truncate">
+                                    Loan, tyres & axle details for {vehicle.vehicleNo}
+                                  </p>
+                                </div>
+                              )}
+                            </div>
                           </div>
                         </td>
                       </tr>
@@ -1301,121 +1447,26 @@ export const LogisticsView: React.FC = () => {
             </table>
           </div>
         </div>
+        </>
       )}
 
-      {/* 2.5 VEHICLE EMI & LOAN FINANCING VIEW */}
-      {activeSubTab === 'emi' && (
-        <div className="space-y-6">
-          {/* EMI Metrics Summary Cards */}
-          {(() => {
-            const financedVehicles = vehicles.filter(v => v.emiDetails && v.emiDetails.hasEmi);
-            const activeFinanced = financedVehicles.filter(v => v.emiDetails?.status !== 'closed');
-            const totalMonthlyOutflow = activeFinanced.reduce((sum, v) => sum + (v.emiDetails?.monthlyEmiAmount || 0), 0);
-            const totalPortfolioPrincipal = financedVehicles.reduce((sum, v) => sum + (v.emiDetails?.totalLoanAmount || 0), 0);
 
-            // Find next due vehicle
-            const todayDay = new Date().getDate();
-            const sortedByDue = [...activeFinanced].sort((a, b) => {
-              const dueA = a.emiDetails?.emiDueDay || 10;
-              const dueB = b.emiDetails?.emiDueDay || 10;
-              const diffA = dueA >= todayDay ? dueA - todayDay : 30 + (dueA - todayDay);
-              const diffB = dueB >= todayDay ? dueB - todayDay : 30 + (dueB - todayDay);
-              return diffA - diffB;
-            });
-            const nextDueVehicle = sortedByDue[0];
-
-            return (
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                {/* Metric 1 */}
-                <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-start justify-between">
-                  <div>
-                    <p className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Monthly EMI Commitment</p>
-                    <h3 className="text-2xl font-extrabold text-[var(--color-primary)] mt-1">{formatCurrency(totalMonthlyOutflow)}</h3>
-                    <p className="text-xs text-[var(--color-on-surface-variant)] mt-1.5 font-medium">
-                      Across {activeFinanced.length} active vehicle loans
-                    </p>
-                  </div>
-                  <div className="p-2.5 bg-[var(--color-primary-container)] rounded-2xl">
-                    <Landmark className="h-5 w-5 text-[var(--color-on-primary-container)]" />
-                  </div>
-                </div>
-
-                {/* Metric 2 */}
-                <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-start justify-between">
-                  <div>
-                    <p className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Financed Fleet</p>
-                    <h3 className="text-2xl font-extrabold text-[var(--color-on-surface)] mt-1">
-                      {activeFinanced.length} <span className="text-sm font-semibold text-[var(--color-on-surface-variant)]">/ {vehicles.length} Trucks</span>
-                    </h3>
-                    <p className="text-xs text-[var(--color-on-surface-variant)] mt-1.5 font-medium">
-                      {vehicles.length - activeFinanced.length} Owned outright / Unencumbered
-                    </p>
-                  </div>
-                  <div className="p-2.5 bg-[var(--color-surface-container)] rounded-2xl">
-                    <Truck className="h-5 w-5 text-[var(--color-primary)]" />
-                  </div>
-                </div>
-
-                {/* Metric 3 */}
-                <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-start justify-between">
-                  <div>
-                    <p className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Next EMI Debit</p>
-                    {nextDueVehicle ? (
-                      <div>
-                        <h3 className="text-xl font-extrabold text-[var(--color-warning)] mt-1">
-                          {formatCurrency(nextDueVehicle.emiDetails?.monthlyEmiAmount || 0)}
-                        </h3>
-                        <p className="text-xs text-[var(--color-on-surface-variant)] mt-1 font-bold">
-                          {nextDueVehicle.vehicleNo} (Due {nextDueVehicle.emiDetails?.emiDueDay}th)
-                        </p>
-                      </div>
-                    ) : (
-                      <div>
-                        <h3 className="text-xl font-extrabold text-[var(--color-on-surface-variant)] mt-1">None</h3>
-                        <p className="text-xs text-[var(--color-on-surface-variant)] mt-1">No upcoming EMIs</p>
-                      </div>
-                    )}
-                  </div>
-                  <div className="p-2.5 bg-[var(--color-warning-container)] rounded-2xl">
-                    <Calendar className="h-5 w-5 text-[var(--color-on-warning-container)]" />
-                  </div>
-                </div>
-
-                {/* Metric 4 */}
-                <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-start justify-between">
-                  <div>
-                    <p className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Total Loan Principal</p>
-                    <h3 className="text-2xl font-extrabold text-[var(--color-on-surface)] mt-1">{formatCurrency(totalPortfolioPrincipal)}</h3>
-                    <p className="text-xs text-[var(--color-on-surface-variant)] mt-1.5 font-medium">
-                      Combined equipment capital financing
-                    </p>
-                  </div>
-                  <div className="p-2.5 bg-[var(--color-surface-container-high)] rounded-2xl">
-                    <DollarSign className="h-5 w-5 text-[var(--color-on-surface)]" />
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* EMI Master Table */}
+      {/* 2.6 EMI ENTRIES — DEDUCTIONS LEDGER (its own sub-tab) */}
+      {activeSubTab === 'emi-entries' && (
           <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-[28px] overflow-hidden shadow-2xs">
             <div className="p-4 sm:p-5 border-b border-[var(--color-outline-variant)] flex flex-wrap items-center justify-between gap-3 bg-[var(--color-surface-container)]/60">
               <div>
                 <h3 className="text-sm font-extrabold text-[var(--color-on-surface)] flex items-center gap-2">
-                  <Landmark className="h-4.5 w-4.5 text-[var(--color-primary)]" />
-                  Vehicle Financing & EMI Ledger
+                  <CheckCircle2 className="h-4.5 w-4.5 text-[var(--color-success)]" />
+                  EMI Entries — Deductions Ledger
                 </h3>
-                <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                  Automated repayment calendar, financier accounts, monthly installment reminders & tenure logs
-                </p>
+               
               </div>
-
               <button
-                onClick={() => handleOpenVehicleModal(null, 'emi')}
+                onClick={() => handleOpenEmiEntryModal()}
                 className="inline-flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-bold shadow-xs transition"
               >
-                <Plus className="h-4 w-4" /> Add Financed Vehicle
+                <Plus className="h-4 w-4" /> Record EMI Entry
               </button>
             </div>
 
@@ -1423,192 +1474,77 @@ export const LogisticsView: React.FC = () => {
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-                    <th className="py-3.5 px-4">Vehicle / Machinery</th>
-                    <th className="py-3.5 px-3">Financier / Bank</th>
-                    <th className="py-3.5 px-3">Loan Account No</th>
-                    <th className="py-3.5 px-3 text-right">Monthly EMI (₹)</th>
-                    <th className="py-3.5 px-3">Due Day & Next Date</th>
-                    <th className="py-3.5 px-3">Tenure / Repayment</th>
-                    <th className="py-3.5 px-3">Auto-Debit Account</th>
-                    <th className="py-3.5 px-3">Status</th>
+                    <th className="py-3.5 px-4">Date</th>
+                    <th className="py-3.5 px-3">Vehicle</th>
+                    <th className="py-3.5 px-3 text-right">EMI Amount (₹)</th>
+                    <th className="py-3.5 px-3">From Account</th>
+                    <th className="py-3.5 px-3">Source</th>
+                    <th className="py-3.5 px-3">Notes</th>
                     <th className="py-3.5 px-4 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--color-outline-variant)]">
-                  {vehicles.filter(v => v.emiDetails && v.emiDetails.hasEmi).length === 0 ? (
+                  {emiEntries.length === 0 ? (
                     <tr>
-                      <td colSpan={9} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                      <td colSpan={7} className="py-12 text-center text-[var(--color-on-surface-variant)]">
                         <Landmark className="h-8 w-8 text-[var(--color-outline)] mx-auto mb-2" />
-                        <p className="text-xs font-bold uppercase">No financed vehicles found</p>
+                        <p className="text-xs font-bold uppercase">No EMI entries yet</p>
                         <p className="text-[11px] mt-1 text-[var(--color-on-surface-variant)]">
-                          Attach active loan details to any company-owned vehicle to enable dashboard reminders and tracking.
+                          Auto entries post here every EMI date; record early/missed installments manually with "Record EMI Entry".
                         </p>
                       </td>
                     </tr>
                   ) : (
-                    vehicles
-                      .filter(v => v.emiDetails && v.emiDetails.hasEmi)
-                      .map((vehicle) => {
-                        const emi = vehicle.emiDetails!;
-                        const today = new Date();
-                        const todayDay = today.getDate();
-                        const dueDay = emi.emiDueDay || 10;
-                        const diffDays = dueDay >= todayDay ? dueDay - todayDay : 30 - (todayDay - dueDay);
-                        const isDueSoon = emi.status !== 'closed' && diffDays <= 7;
-                        const isDueToday = emi.status !== 'closed' && diffDays === 0;
-
-                        const paid = emi.paidEmisCount || 0;
-                        const totalTenure = emi.totalTenureMonths || 0;
-                        const progressPercent = totalTenure > 0 ? Math.min(100, Math.round((paid / totalTenure) * 100)) : 0;
-
-                        return (
-                          <tr key={vehicle.id} className="hover:bg-[var(--color-surface-container)]/40 transition-colors text-xs text-[var(--color-on-surface)]">
-                            <td className="py-3.5 px-4">
-                              <div className="font-mono text-xs font-black text-[var(--color-on-surface)]">
-                                {vehicle.vehicleNo}
-                              </div>
-                              <span className="text-[10px] font-bold text-[var(--color-on-surface-variant)] capitalize">
-                                {vehicle.type} ({vehicle.capacityTonnes} MT)
-                              </span>
-                            </td>
-                            <td className="py-3.5 px-3">
-                              <span className="font-bold text-[var(--color-on-surface)] block">
-                                {emi.financierName || 'Not Specified'}
-                              </span>
-                              {emi.interestRate && (
-                                <span className="text-[10px] text-[var(--color-on-surface-variant)]">
-                                  {emi.interestRate}% p.a.
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-3.5 px-3">
-                              <span className="font-mono text-xs text-[var(--color-on-surface-variant)] font-bold">
-                                {emi.loanAccountNumber || '—'}
-                              </span>
-                            </td>
-                            <td className="py-3.5 px-3 text-right">
-                              <span className="font-mono text-sm font-black text-[var(--color-primary)] block">
-                                {formatCurrency(emi.monthlyEmiAmount || 0)}
-                              </span>
-                              {emi.totalLoanAmount && (
-                                <span className="text-[10px] text-[var(--color-on-surface-variant)]">
-                                  Total: {formatCurrency(emi.totalLoanAmount)}
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-3.5 px-3">
-                              <div className="space-y-1">
-                                <span className={`inline-flex items-center gap-1 text-[10px] font-extrabold px-2.5 py-0.5 rounded-full ${
-                                  isDueToday
-                                    ? 'bg-[var(--color-error)] text-[var(--color-on-error)] animate-pulse'
-                                    : isDueSoon
-                                      ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)] font-bold'
-                                      : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)]'
-                                }`}>
-                                  <Clock className="h-2.5 w-2.5" />
-                                  {isDueToday ? 'Due Today!' : isDueSoon ? `Due in ${diffDays} days` : `Every ${dueDay}th`}
-                                </span>
-                                {emi.lastPaymentDate && (
-                                  <p className="text-[9px] text-[var(--color-on-surface-variant)]">
-                                    Last paid: {emi.lastPaymentDate}
-                                  </p>
-                                )}
-                              </div>
-                            </td>
-                            <td className="py-3.5 px-3">
-                              <div className="space-y-1 min-w-[110px]">
-                                <div className="flex justify-between text-[10px] font-bold">
-                                  <span>{paid} of {totalTenure || '?'} paid</span>
-                                  <span>{progressPercent}%</span>
-                                </div>
-                                <div className="w-full bg-[var(--color-surface-container-high)] h-1.5 rounded-full overflow-hidden">
-                                  <div
-                                    className="bg-[var(--color-primary)] h-full rounded-full transition-all"
-                                    style={{ width: `${progressPercent}%` }}
-                                  ></div>
-                                </div>
-                              </div>
-                            </td>
-                            <td className="py-3.5 px-3">
-                              <span className="text-[11px] font-medium text-[var(--color-on-surface-variant)] truncate max-w-[130px] block">
-                                {emi.autoDebitAccount || 'Company Bank'}
-                              </span>
-                            </td>
-                            <td className="py-3.5 px-3">
-                              <span className={`text-[10px] font-extrabold uppercase px-2.5 py-0.5 rounded-full ${
-                                emi.status === 'active'
-                                  ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-                                  : emi.status === 'closed'
-                                    ? 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)]'
-                                    : 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
-                              }`}>
-                                {emi.status || 'active'}
-                              </span>
-                            </td>
-                            <td className="py-3.5 px-4 text-right">
-                              <div className="flex items-center justify-end gap-1.5">
-                                {emi.status !== 'closed' && (
-                                  <button
-                                    onClick={() => handleQuickMarkEmiPaid(vehicle)}
-                                    className="px-2.5 py-1 text-[11px] bg-[var(--color-success-container)] hover:opacity-90 text-[var(--color-on-success-container)] font-bold rounded-full transition shadow-2xs flex items-center gap-1"
-                                    title="Record EMI installment paid for this month"
-                                  >
-                                    <CheckCircle2 className="h-3 w-3" />
-                                    Mark Paid
-                                  </button>
-                                )}
-                                <button
-                                  onClick={() => handleOpenVehicleModal(vehicle, 'emi')}
-                                  className="px-2.5 py-1 text-[11px] bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] font-bold rounded-full transition"
-                                  title="Edit Loan & EMI Details"
-                                >
-                                  Edit Loan
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })
+                    emiEntries.map((entry) => (
+                      <tr key={entry.id} className="hover:bg-[var(--color-surface-container)]/40 transition-colors text-xs text-[var(--color-on-surface)]">
+                        <td className="py-3 px-4">
+                          <span className="font-bold block">{entry.date}</span>
+                          <span className="text-[9px] text-[var(--color-on-surface-variant)]">posted {String(entry.createdAt || '').split('T')[0]}</span>
+                        </td>
+                        <td className="py-3 px-3">
+                          <span className="font-mono font-black text-[var(--color-primary)]">{entry.vehicleNo || '—'}</span>
+                        </td>
+                        <td className="py-3 px-3 text-right font-mono font-black text-[var(--color-on-surface)]">
+                          {formatCurrency(entry.amount)}
+                        </td>
+                        <td className="py-3 px-3">
+                          <span className="font-bold text-[var(--color-on-surface)]">{entry.accountName || '—'}</span>
+                        </td>
+                        <td className="py-3 px-3">
+                          <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
+                            entry.source === 'auto'
+                              ? 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)]'
+                              : 'bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]'
+                          }`}>
+                            {entry.source === 'auto' ? '⚙ Auto' : 'Manual'}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3">
+                          <span className="text-[10px] text-[var(--color-on-surface-variant)] truncate block max-w-[220px]" title={entry.notes}>
+                            {entry.notes || '—'}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              onClick={() => handleOpenEmiEntryModal(null, entry)}
+                              className="px-2.5 py-1 text-[10px] bg-[var(--color-surface-container-lowest)] hover:bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] text-[var(--color-on-surface)] font-bold rounded-full transition shadow-2xs"
+                              title="Edit entry — account balance adjusts by the difference automatically"
+                            >
+                              Edit
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
                   )}
                 </tbody>
               </table>
             </div>
           </div>
-
-          {/* Quick Section for Unfinanced Fleet */}
-          {vehicles.filter(v => !v.emiDetails || !v.emiDetails.hasEmi).length > 0 && (
-            <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs">
-              <h4 className="text-xs font-extrabold text-[var(--color-on-surface)] uppercase tracking-wider mb-3">
-                Unencumbered Vehicles ({vehicles.filter(v => !v.emiDetails || !v.emiDetails.hasEmi).length})
-              </h4>
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-                {vehicles
-                  .filter(v => !v.emiDetails || !v.emiDetails.hasEmi)
-                  .map(v => (
-                    <div
-                      key={v.id}
-                      className="p-3 bg-[var(--color-surface-container)]/50 rounded-2xl border border-[var(--color-outline-variant)] flex items-center justify-between"
-                    >
-                      <div>
-                        <p className="font-mono text-xs font-bold text-[var(--color-on-surface)]">{v.vehicleNo}</p>
-                        <p className="text-[10px] text-[var(--color-on-surface-variant)] capitalize">{v.type} • {v.ownership}</p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleOpenVehicleModal(v, 'emi')}
-                        className="text-[10px] font-bold px-2.5 py-1 bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)] rounded-full hover:opacity-90 transition"
-                      >
-                        + Add EMI
-                      </button>
-                    </div>
-                  ))}
-              </div>
-            </div>
-          )}
-        </div>
       )}
 
-      {/* 3. DRIVERS DIRECTORY (sourced from Employees module, read-only) */}
+            {/* 3. DRIVERS DIRECTORY (sourced from Employees module, read-only) */}
       {activeSubTab === 'drivers' && (
         <div className="space-y-4">
           <div className="bg-[var(--color-info-container)]/40 border border-[var(--color-info)]/30 rounded-[24px] p-4 flex gap-3 text-left">
@@ -1630,6 +1566,7 @@ export const LogisticsView: React.FC = () => {
                     <th className="py-3.5 px-4">Driver Details</th>
                     <th className="py-3.5 px-3">Commercial License No</th>
                     <th className="py-3.5 px-3">Contact Phone</th>
+                    <th className="py-3.5 px-3 text-right">Salary</th>
                     <th className="py-3.5 px-3">Assigned Vehicles</th>
                     <th className="py-3.5 px-3">Status</th>
                   </tr>
@@ -1637,7 +1574,7 @@ export const LogisticsView: React.FC = () => {
                 <tbody className="divide-y divide-[var(--color-outline-variant)]">
                   {filteredDriverEmployees.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                      <td colSpan={6} className="py-12 text-center text-[var(--color-on-surface-variant)]">
                         <User className="h-8 w-8 text-[var(--color-outline)] mx-auto mb-2" />
                         <p className="text-xs font-bold uppercase">No driver-role employees found</p>
                         <p className="text-[11px] mt-1 text-[var(--color-on-surface-variant)]">
@@ -1666,6 +1603,14 @@ export const LogisticsView: React.FC = () => {
                           </td>
                           <td className="py-3.5 px-3">
                             <span className="text-[var(--color-on-surface)] font-bold">{driver.phone}</span>
+                          </td>
+                          <td className="py-3.5 px-3 text-right">
+                            <span className="font-mono font-bold text-[var(--color-on-surface)]">
+                              {formatCurrency(driver.salaryBase || 0)}
+                            </span>
+                            <span className="text-[9px] font-bold uppercase text-[var(--color-on-surface-variant)]">
+                              /{driver.salaryType === 'daily' ? 'day' : 'mo'}
+                            </span>
                           </td>
                           <td className="py-3.5 px-3">
                             {assignedVehs.length === 0 ? (
@@ -2400,11 +2345,8 @@ export const LogisticsView: React.FC = () => {
               <div>
                 <h3 className="font-extrabold text-[var(--color-on-surface)] text-sm flex items-center gap-2">
                   <Truck className="h-4.5 w-4.5 text-[var(--color-primary)]" />
-                  {editingVehicle ? `Edit ${editingVehicle.vehicleNo}` : 'Register Fleet Vehicle & Financing'}
+                  {editingVehicle ? `Edit ${editingVehicle.vehicleNo}` : 'Register Fleet Vehicle'}
                 </h3>
-                <p className="text-xs text-[var(--color-on-surface-variant)] mt-0.5">
-                  Configure vehicle specifications, compliance documents, and bank loan EMI schedules.
-                </p>
               </div>
               <button
                 onClick={() => setIsVehicleModalOpen(false)}
@@ -2414,370 +2356,429 @@ export const LogisticsView: React.FC = () => {
               </button>
             </div>
 
-            {/* Modal Internal Tabs */}
-            <div className="flex border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]/50 px-6">
-              <button
-                type="button"
-                onClick={() => setVehicleModalTab('general')}
-                className={`py-2.5 px-4 text-xs font-bold border-b-2 transition flex items-center gap-1.5 ${
-                  vehicleModalTab === 'general'
-                    ? 'border-[var(--color-primary)] text-[var(--color-primary)]'
-                    : 'border-transparent text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
-                }`}
-              >
-                <Truck className="h-3.5 w-3.5" />
-                Vehicle Specifications
-              </button>
-              <button
-                type="button"
-                onClick={() => setVehicleModalTab('emi')}
-                className={`py-2.5 px-4 text-xs font-bold border-b-2 transition flex items-center gap-1.5 ${
-                  vehicleModalTab === 'emi'
-                    ? 'border-[var(--color-primary)] text-[var(--color-primary)]'
-                    : 'border-transparent text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
-                }`}
-              >
-                <Landmark className="h-3.5 w-3.5" />
-                Loan & EMI Details
-                {formVehHasEmi && (
-                  <span className="w-2 h-2 rounded-full bg-[var(--color-primary)] inline-block"></span>
-                )}
-              </button>
-            </div>
-
             <form onSubmit={handleSaveVehicle}>
-              <div className="p-6 space-y-4 max-h-[460px] overflow-y-auto text-left">
-                {/* TAB 1: GENERAL SPECS */}
-                {vehicleModalTab === 'general' && (
-                  <div className="space-y-4">
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Vehicle RTO Number *</label>
-                      <input
-                        type="text"
-                        placeholder="e.g. MH-12-PQ-1234"
-                        value={formVehNo}
-                        onChange={(e) => setFormVehNo(e.target.value)}
-                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-bold focus:outline-none"
-                        required
-                      />
-                    </div>
+              <div className="p-6 space-y-4 max-h-[520px] overflow-y-auto text-left">
+                {/* VEHICLE DETAILS — collapsible accordion */}
+                <div className="rounded-2xl border border-[var(--color-outline-variant)] overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setVehDetailsOpen(o => !o)}
+                    className="w-full flex items-center justify-between px-4 py-3 bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] transition-colors"
+                  >
+                    <span className="text-[11px] font-extrabold text-[var(--color-on-surface-variant)] uppercase tracking-wider flex items-center gap-1.5">
+                      <Truck className="h-3.5 w-3.5" /> Vehicle Details
+                    </span>
+                    <span className="flex items-center gap-2">
+                      {formVehDriverId && !vehDetailsOpen && (
+                        <span className="text-[9px] font-bold text-[var(--color-on-primary-container)] bg-[var(--color-primary-container)] px-2 py-0.5 rounded-full truncate max-w-[140px]">
+                          {driverEmployees.find(d => d.id === formVehDriverId)?.name}
+                        </span>
+                      )}
+                      <ChevronDown className={`h-4 w-4 text-[var(--color-on-surface-variant)] transition-transform ${vehDetailsOpen ? '' : '-rotate-90'}`} />
+                    </span>
+                  </button>
 
-                    <div className="grid grid-cols-2 gap-3">
+                  {vehDetailsOpen && (
+                    <div className="p-4 space-y-4">
                       <div className="space-y-1.5">
-                        <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Equipment Type</label>
-                        <select
-                          value={formVehType}
-                          onChange={(e) => setFormVehType(e.target.value as any)}
-                          className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                        >
-                          <option value="tipper">Tipper Truck</option>
-                          <option value="tanker">Bitumen Tanker</option>
-                          <option value="mixer">Transit Mixer</option>
-                          <option value="loader">Loader (JCB/CAT)</option>
-                          <option value="other">Other Machine</option>
-                        </select>
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Capacity (MT) *</label>
+                        <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Vehicle RTO Number *</label>
                         <input
-                          type="number"
-                          placeholder="e.g. 18"
-                          value={formVehCapacity}
-                          onChange={(e) => setFormVehCapacity(e.target.value)}
-                          className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                          type="text"
+                          placeholder="e.g. MH-12-PQ-1234"
+                          value={formVehNo}
+                          onChange={(e) => setFormVehNo(e.target.value)}
+                          className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-bold focus:outline-none"
                           required
                         />
                       </div>
-                    </div>
 
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Ownership</label>
-                        <select
-                          value={formVehOwner}
-                          onChange={(e) => setFormVehOwner(e.target.value as any)}
-                          className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                        >
-                          <option value="owned">Company Owned</option>
-                          <option value="contractor">Sub-Contractor</option>
-                          <option value="market">Market Hired</option>
-                        </select>
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Assigned Driver</label>
-                        <select
-                          value={formVehDriverId}
-                          onChange={(e) => setFormVehDriverId(e.target.value)}
-                          className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                        >
-                          <option value="">-- Unassigned --</option>
-                          {driverEmployees.map(d => (
-                            <option key={d.id} value={d.id}>{d.name}</option>
-                          ))}
-                          {driverEmployees.length === 0 && (
-                            <option value="" disabled>Add a driver in the Employees module</option>
-                          )}
-                        </select>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Operational Status</label>
-                        <select
-                          value={formVehStatus}
-                          onChange={(e) => setFormVehStatus(e.target.value as any)}
-                          className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                        >
-                          <option value="available">Yard Idle (Available)</option>
-                          <option value="on_trip">On Active Trip</option>
-                          <option value="maintenance">Maintenance / Workshop</option>
-                        </select>
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Fitness Expiry</label>
-                        <input
-                          type="date"
-                          value={formVehFitness}
-                          onChange={(e) => setFormVehFitness(e.target.value)}
-                          className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Insurance Expiry</label>
-                        <input
-                          type="date"
-                          value={formVehInsurance}
-                          onChange={(e) => setFormVehInsurance(e.target.value)}
-                          className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                        />
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Notes / Model</label>
-                        <input
-                          type="text"
-                          placeholder="e.g. Tata Signa 2823, double axle"
-                          value={formVehNotes}
-                          onChange={(e) => setFormVehNotes(e.target.value)}
-                          className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* TAB 2: LOAN & EMI DETAILS */}
-                {vehicleModalTab === 'emi' && (
-                  <div className="space-y-4">
-                    {/* EMI Enable Toggle Card */}
-                    <div className="p-4 bg-[var(--color-surface-container)] rounded-2xl border border-[var(--color-outline-variant)] flex items-center justify-between">
-                      <div>
-                        <p className="text-xs font-extrabold text-[var(--color-on-surface)] flex items-center gap-1.5">
-                          <Landmark className="h-4 w-4 text-[var(--color-primary)]" />
-                          Vehicle Hypothecation & Loan EMI
-                        </p>
-                        <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                          Track bank financier, monthly installment deduction dates, and dashboard alert notifications.
-                        </p>
-                      </div>
-                      <label className="relative inline-flex items-center cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={formVehHasEmi}
-                          onChange={(e) => setFormVehHasEmi(e.target.checked)}
-                          className="sr-only peer"
-                        />
-                        <div className="w-11 h-6 bg-slate-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--color-primary)]"></div>
-                      </label>
-                    </div>
-
-                    {formVehHasEmi ? (
-                      <div className="space-y-3.5 pt-1">
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="space-y-1">
-                            <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Financier / Bank Name *</label>
-                            <input
-                              type="text"
-                              placeholder="e.g. HDFC Bank, Tata Finance"
-                              value={formVehEmiFinancier}
-                              onChange={(e) => setFormVehEmiFinancier(e.target.value)}
-                              className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none font-medium"
-                              required={formVehHasEmi}
-                            />
-                          </div>
-
-                          <div className="space-y-1">
-                            <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Loan Account No</label>
-                            <input
-                              type="text"
-                              placeholder="e.g. LN-VHL-98234"
-                              value={formVehEmiLoanAccNo}
-                              onChange={(e) => setFormVehEmiLoanAccNo(e.target.value)}
-                              className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono focus:outline-none"
-                            />
-                          </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Equipment Type</label>
+                          <select
+                            value={formVehType}
+                            onChange={(e) => setFormVehType(e.target.value as any)}
+                            className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                          >
+                            <option value="tipper">Tipper Truck</option>
+                            <option value="tanker">Bitumen Tanker</option>
+                            <option value="mixer">Transit Mixer</option>
+                            <option value="loader">Loader (JCB/CAT)</option>
+                            <option value="other">Other Machine</option>
+                          </select>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="space-y-1">
-                            <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Monthly EMI Amount (₹) *</label>
-                            <input
-                              type="number"
-                              placeholder="e.g. 48500"
-                              value={formVehEmiAmount}
-                              onChange={(e) => setFormVehEmiAmount(e.target.value)}
-                              className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-bold focus:outline-none"
-                              required={formVehHasEmi}
-                            />
-                          </div>
-
-                          <div className="space-y-1">
-                            <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Monthly Due Day (1 - 31) *</label>
-                            <input
-                              type="number"
-                              min="1"
-                              max="31"
-                              placeholder="e.g. 10 (10th of every month)"
-                              value={formVehEmiDueDay}
-                              onChange={(e) => setFormVehEmiDueDay(e.target.value)}
-                              className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-bold focus:outline-none"
-                              required={formVehHasEmi}
-                            />
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-3 gap-3">
-                          <div className="space-y-1">
-                            <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Total Loan (₹)</label>
-                            <input
-                              type="number"
-                              placeholder="e.g. 2400000"
-                              value={formVehEmiTotalLoan}
-                              onChange={(e) => setFormVehEmiTotalLoan(e.target.value)}
-                              className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                            />
-                          </div>
-
-                          <div className="space-y-1">
-                            <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Tenure (Months)</label>
-                            <input
-                              type="number"
-                              placeholder="e.g. 48"
-                              value={formVehEmiTenureMonths}
-                              onChange={(e) => setFormVehEmiTenureMonths(e.target.value)}
-                              className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                            />
-                          </div>
-
-                          <div className="space-y-1">
-                            <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">EMIs Paid</label>
-                            <input
-                              type="number"
-                              placeholder="e.g. 14"
-                              value={formVehEmiPaidCount}
-                              onChange={(e) => setFormVehEmiPaidCount(e.target.value)}
-                              className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                            />
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="space-y-1">
-                            <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Auto-Debit Account</label>
-                            <input
-                              type="text"
-                              placeholder="e.g. State Bank Current A/C"
-                              value={formVehEmiAutoDebitAccount}
-                              onChange={(e) => setFormVehEmiAutoDebitAccount(e.target.value)}
-                              className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                            />
-                          </div>
-
-                          <div className="space-y-1">
-                            <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Loan Status</label>
-                            <select
-                              value={formVehEmiStatus}
-                              onChange={(e) => setFormVehEmiStatus(e.target.value as any)}
-                              className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                            >
-                              <option value="active">Active (Ongoing EMI)</option>
-                              <option value="closed">Closed (Fully Repaid / NOC Received)</option>
-                              <option value="defaulted">Defaulted / Action Required</option>
-                            </select>
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="space-y-1">
-                            <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Loan Start Date</label>
-                            <input
-                              type="date"
-                              value={formVehEmiStartDate}
-                              onChange={(e) => setFormVehEmiStartDate(e.target.value)}
-                              className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                            />
-                          </div>
-
-                          <div className="space-y-1">
-                            <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Maturity / End Date</label>
-                            <input
-                              type="date"
-                              value={formVehEmiEndDate}
-                              onChange={(e) => setFormVehEmiEndDate(e.target.value)}
-                              className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                            />
-                          </div>
-                        </div>
-
-                        <div className="space-y-1">
-                          <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Financier / Loan Notes</label>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Insurance Expiry</label>
                           <input
-                            type="text"
-                            placeholder="e.g. Hypothecation endorsement in RC book, branch manager Mr. Verma"
-                            value={formVehEmiNotes}
-                            onChange={(e) => setFormVehEmiNotes(e.target.value)}
+                            type="date"
+                            value={formVehInsurance}
+                            onChange={(e) => setFormVehInsurance(e.target.value)}
                             className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
                           />
                         </div>
                       </div>
-                    ) : (
-                      <div className="py-8 text-center text-[var(--color-on-surface-variant)] bg-[var(--color-surface-container)]/30 rounded-2xl border border-dashed border-[var(--color-outline-variant)]">
-                        <Landmark className="h-7 w-7 text-[var(--color-outline)] mx-auto mb-2" />
-                        <p className="text-xs font-bold uppercase">No Loan Attached</p>
-                        <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-1 max-w-xs mx-auto">
-                          Toggle the switch above to attach commercial financing, set monthly EMI deduction dates, and activate dashboard reminders.
-                        </p>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Monthly Insurance Amount (₹)</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            placeholder="e.g. 4500"
+                            value={formVehInsuranceAmount}
+                            onChange={(e) => setFormVehInsuranceAmount(e.target.value)}
+                            className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-bold focus:outline-none"
+                          />
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Notes / Model</label>
+                          <input
+                            type="text"
+                            placeholder="e.g. Tata Signa 2823, double axle"
+                            value={formVehNotes}
+                            onChange={(e) => setFormVehNotes(e.target.value)}
+                            className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                          />
+                        </div>
                       </div>
-                    )}
+
+                      {/* ASSIGNED DRIVER — searchable select of driver-role employees */}
+                      <div className="space-y-1.5 relative" ref={vehDriverPickerRef}>
+                        <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Assigned Driver</label>
+
+                        {vehDriverPickerOpen ? (
+                          <input
+                            type="text"
+                            autoFocus
+                            placeholder="Search drivers by name, phone or license…"
+                            value={vehDriverQuery}
+                            onChange={(e) => setVehDriverQuery(e.target.value)}
+                            className="w-full p-2.5 border border-[var(--color-primary)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                          />
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => { setVehDriverPickerOpen(true); setVehDriverQuery(''); }}
+                            className={`w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm text-left flex items-center justify-between gap-2 transition-colors ${formVehDriverId ? 'bg-[var(--color-surface-container-lowest)]' : 'bg-[var(--color-surface-container)]'}`}
+                          >
+                            {formVehDriverId ? (
+                              (() => {
+                                const sel = driverEmployees.find(d => d.id === formVehDriverId);
+                                return sel ? (
+                                  <span className="flex items-center gap-2 min-w-0">
+                                    <span className="w-6 h-6 rounded-full bg-[var(--color-surface-container-high)] flex items-center justify-center text-[10px] font-bold text-[var(--color-on-surface)] shrink-0">
+                                      {sel.name.charAt(0)}
+                                    </span>
+                                    <span className="font-bold text-[var(--color-on-surface)] truncate">{sel.name}</span>
+                                    <span className="text-[10px] text-[var(--color-on-surface-variant)] shrink-0">{sel.phone}</span>
+                                  </span>
+                                ) : null;
+                              })()
+                            ) : (
+                              <span className="text-[var(--color-on-surface-variant)]">Search & assign a driver…</span>
+                            )}
+                            <span className="flex items-center gap-1 shrink-0">
+                              {formVehDriverId && (
+                                <X
+                                  className="h-3.5 w-3.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-error)]"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setFormVehDriverId('');
+                                  }}
+                                />
+                              )}
+                              <User className="h-3.5 w-3.5 text-[var(--color-outline)]" />
+                            </span>
+                          </button>
+                        )}
+
+                        {vehDriverPickerOpen && (
+                          <div className="max-h-48 overflow-y-auto rounded-xl border border-[var(--color-outline-variant)] bg-[var(--color-surface-container-lowest)] divide-y divide-[var(--color-outline-variant)] shadow-lg">
+                            {(() => {
+                              const q = vehDriverQuery.trim().toLowerCase();
+                              const matches = driverEmployees
+                                .filter(d =>
+                                  !q ||
+                                  d.name.toLowerCase().includes(q) ||
+                                  d.phone.includes(q) ||
+                                  (d.licenseNo || '').toLowerCase().includes(q))
+                                .sort((a, b) => (a.status === b.status ? a.name.localeCompare(b.name) : a.status === 'active' ? -1 : 1));
+                              if (matches.length === 0) {
+                                return (
+                                  <div className="p-4 text-center">
+                                    <User className="h-6 w-6 text-[var(--color-outline)] mx-auto mb-1.5" />
+                                    <p className="text-xs font-bold text-[var(--color-on-surface)]">No driver-role employees found</p>
+                                    <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
+                                      Add one in the Employees module with Operational Role Designation: Driver.
+                                    </p>
+                                  </div>
+                                );
+                              }
+                              return matches.map(d => {
+                                // 1 : 1 mapping — a driver already assigned to
+                                // another vehicle stays visible but is NOT
+                                // selectable from here (this vehicle's own
+                                // current driver remains selectable on edit).
+                                const occupant = vehicles.find(v => v.currentDriverId === d.id && v.id !== editingVehicle?.id);
+                                const disabled = !!occupant;
+                                return (
+                                  <button
+                                    key={d.id}
+                                    type="button"
+                                    disabled={disabled}
+                                    title={disabled ? `${d.name} is assigned to ${occupant?.vehicleNo} (one driver = one vehicle)` : undefined}
+                                    onClick={() => {
+                                      if (disabled) return;
+                                      setFormVehDriverId(d.id);
+                                      setVehDriverPickerOpen(false);
+                                      setVehDriverQuery('');
+                                    }}
+                                    className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left transition-colors ${
+                                      disabled
+                                        ? 'opacity-50 cursor-not-allowed'
+                                        : formVehDriverId === d.id
+                                          ? 'bg-[var(--color-primary-container)]/40'
+                                          : 'hover:bg-[var(--color-surface-container)]'
+                                    }`}
+                                  >
+                                    <span className="flex items-center gap-2 min-w-0">
+                                      <span className="w-6 h-6 rounded-full bg-[var(--color-surface-container-high)] flex items-center justify-center text-[10px] font-bold text-[var(--color-on-surface)] shrink-0">
+                                        {d.name.charAt(0)}
+                                      </span>
+                                      <span className="min-w-0">
+                                        <span className="text-xs font-bold text-[var(--color-on-surface)] block truncate">{d.name}</span>
+                                        <span className="text-[10px] text-[var(--color-on-surface-variant)] block truncate">
+                                          {d.phone}{d.licenseNo ? ` • ${d.licenseNo}` : ''}
+                                        </span>
+                                      </span>
+                                    </span>
+                                    <span className="flex items-center gap-1.5 shrink-0">
+                                      {disabled && (
+                                        <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded-full bg-[var(--color-error-container)] text-[var(--color-on-error-container)] font-mono">
+                                          On {occupant?.vehicleNo}
+                                        </span>
+                                      )}
+                                      <span className={`text-[9px] font-black uppercase px-1.5 py-0.5 rounded-full ${
+                                        d.status === 'active'
+                                          ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
+                                          : 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
+                                      }`}>
+                                        {d.status === 'active' ? 'Active' : 'Inactive'}
+                                      </span>
+                                      {formVehDriverId === d.id && <CheckCircle2 className="h-3.5 w-3.5 text-[var(--color-primary)]" />}
+                                    </span>
+                                  </button>
+                                );
+                              });
+                            })()}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* LOAN & EMI — collapsible accordion; full financing capture.
+                    The EMI auto-debits from the linked account on the due day
+                    (server cron) */}
+                <div className="rounded-2xl border border-[var(--color-outline-variant)] overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setVehLoanOpen(o => !o)}
+                    className="w-full flex items-center justify-between px-4 py-3 bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] transition-colors"
+                  >
+                    <span className="text-[11px] font-extrabold text-[var(--color-on-surface-variant)] uppercase tracking-wider flex items-center gap-1.5">
+                      <Landmark className="h-3.5 w-3.5 text-[var(--color-primary)]" /> Loan & EMI
+                    </span>
+                    <span className="flex items-center gap-2">
+                      {Number(formVehEmiAmount) > 0 && !vehLoanOpen && (
+                        <span className="text-[9px] font-bold text-[var(--color-on-primary-container)] bg-[var(--color-primary-container)] px-2 py-0.5 rounded-full">
+                          {formatCurrency(Number(formVehEmiAmount))}/mo
+                        </span>
+                      )}
+                      {Number(formVehEmiAmount) > 0 && !vehLoanOpen && <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-primary)]"></span>}
+                      <ChevronDown className={`h-4 w-4 text-[var(--color-on-surface-variant)] transition-transform ${vehLoanOpen ? '' : '-rotate-90'}`} />
+                    </span>
+                  </button>
+
+                  {vehLoanOpen && (
+                  <div className="p-4 space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Financier / Bank Name</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. HDFC Bank, Tata Capital"
+                        value={formVehEmiFinancier}
+                        onChange={(e) => setFormVehEmiFinancier(e.target.value)}
+                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Loan Account No</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. LN-CV-89210"
+                        value={formVehEmiLoanAccNo}
+                        onChange={(e) => setFormVehEmiLoanAccNo(e.target.value)}
+                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono focus:outline-none"
+                      />
+                    </div>
                   </div>
-                )}
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Loan Amount (₹)</label>
+                      <input
+                        type="number"
+                        placeholder="e.g. 2400000"
+                        value={formVehEmiTotalLoan}
+                        onChange={(e) => {
+                          setFormVehEmiTotalLoan(e.target.value);
+                          handleEmiLoanParamsChange(e.target.value, formVehEmiTenureMonths);
+                        }}
+                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Tenure (Months)</label>
+                      <input
+                        type="number"
+                        placeholder="e.g. 48"
+                        value={formVehEmiTenureMonths}
+                        onChange={(e) => {
+                          setFormVehEmiTenureMonths(e.target.value);
+                          handleEmiLoanParamsChange(formVehEmiTotalLoan, e.target.value);
+                        }}
+                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Monthly EMI (₹) *</label>
+                      <input
+                        type="number"
+                        placeholder="e.g. 48500"
+                        value={formVehEmiAmount}
+                        onChange={(e) => setFormVehEmiAmount(e.target.value)}
+                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-bold focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">EMI Date (Day of Month)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="31"
+                        placeholder="e.g. 10"
+                        value={formVehEmiDueDay}
+                        onChange={(e) => setFormVehEmiDueDay(e.target.value)}
+                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-bold focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Linked Bank Account *</label>
+                      <select
+                        value={formVehEmiAccountId}
+                        onChange={(e) => setFormVehEmiAccountId(e.target.value)}
+                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                      >
+                        <option value="">-- Account for Auto-Debit --</option>
+                        {accounts.map((a) => (
+                          <option key={a.id} value={a.id}>
+                            {a.name} ({a.type === 'bank' ? a.bankName || 'Bank' : 'Cash'})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Loan Start Date</label>
+                      <input
+                        type="date"
+                        value={formVehEmiStartDate}
+                        onChange={(e) => setFormVehEmiStartDate(e.target.value)}
+                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">EMIs Paid Before System</label>
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="e.g. 6"
+                        value={formVehEmiOpenPaid}
+                        onChange={(e) => setFormVehEmiOpenPaid(e.target.value)}
+                        title="Installments already paid outside this system (opening count) — EMIs left derive from this"
+                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Loan Status</label>
+                      <select
+                        value={formVehEmiStatus}
+                        onChange={(e) => setFormVehEmiStatus(e.target.value as any)}
+                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                      >
+                        <option value="active">Active (Ongoing EMI)</option>
+                        <option value="closed">Closed (Fully Repaid / NOC Received)</option>
+                        <option value="defaulted">Defaulted / Action Required</option>
+                      </select>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Financier / Loan Notes</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Hypothecation in RC book, HDFC branch"
+                        value={formVehEmiNotes}
+                        onChange={(e) => setFormVehEmiNotes(e.target.value)}
+                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {formVehEmiTotalLoan && formVehEmiTenureMonths && Number(formVehEmiTenureMonths) > 0 && (
+                    <p className="text-[10px] font-semibold text-[var(--color-on-surface-variant)]">
+                      EMIs left: {Math.max(0, Number(formVehEmiTenureMonths) - (Number(formVehEmiOpenPaid) || 0))} of {formVehEmiTenureMonths} •
+                      auto-deduct {formVehEmiAccountId ? 'posts from the linked account on the EMI date' : 'needs a linked account to post automatically'}
+                    </p>
+                  )}
+                  <p className="text-[10px] text-[var(--color-on-surface-variant)]">
+                    Leaving the EMI amount blank registers the vehicle as unencumbered (no loan attached).
+                  </p>
+                  </div>
+                  )}
+                </div>
+
+                {/* DOCUMENTS (S3 upload feature): stage while registering; link
+                    immediately when the vehicle already exists */}
+                <EntityDocumentsSection
+                  feature="vehicle"
+                  entityId={editingVehicle?.id}
+                  staged={editingVehicle ? undefined : stagedVehicleDocs}
+                  onStagedChange={editingVehicle ? undefined : setStagedVehicleDocs}
+                />
               </div>
 
               <div className="p-4 bg-[var(--color-surface-container)] border-t border-[var(--color-outline-variant)] flex items-center justify-between">
                 <div className="text-[11px] text-[var(--color-on-surface-variant)]">
-                  {vehicleModalTab === 'general' ? (
-                    <button
-                      type="button"
-                      onClick={() => setVehicleModalTab('emi')}
-                      className="font-bold text-[var(--color-primary)] hover:underline flex items-center gap-1"
-                    >
-                      Next: Loan & EMI Details <ArrowRight className="h-3 w-3" />
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setVehicleModalTab('general')}
-                      className="font-bold text-[var(--color-on-surface-variant)] hover:underline"
-                    >
-                      ← Back to Specifications
-                    </button>
+                  {stagedVehicleDocs.length > 0 && !editingVehicle && (
+                    <span>{stagedVehicleDocs.length} document(s) will attach on save</span>
                   )}
                 </div>
 
@@ -3083,7 +3084,7 @@ export const LogisticsView: React.FC = () => {
                 <div className="text-left space-y-0.5">
                   <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase">Selected Vehicle</p>
                   <p className="font-black text-[var(--color-on-surface)] text-xs">{selectedVehicleForTyres.vehicleNo} ({selectedVehicleForTyres.ownership.toUpperCase()})</p>
-                  <p className="text-[10px] text-[var(--color-on-surface-variant)]">Capacity: {selectedVehicleForTyres.capacityTonnes} MT • Assigned Driver: {selectedVehicleForTyres.currentDriverName || 'None'}</p>
+                  <p className="text-[10px] text-[var(--color-on-surface-variant)]">{selectedVehicleForTyres.capacityTonnes > 0 ? `Capacity: ${selectedVehicleForTyres.capacityTonnes} MT • ` : ''}Assigned Driver: {selectedVehicleForTyres.currentDriverName || 'None'}</p>
                 </div>
                 <div className="px-3 py-1.5 bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)] rounded-full text-xs font-bold text-right">
                   {tyres.filter(t => t.vehicleId === selectedVehicleForTyres.id && t.status === 'mounted').length} / 6 Tyres Mounted
@@ -3254,6 +3255,140 @@ export const LogisticsView: React.FC = () => {
                 Close Inspector
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 7. VEHICLE EMI ENTRY MODAL — record manual / edit automated entries */}
+      {isEmiEntryModalOpen && (
+        <div className="fixed inset-0 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] max-w-md w-full overflow-hidden">
+            <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
+              <div>
+                <h3 className="font-extrabold text-[var(--color-on-surface)] text-sm flex items-center gap-2">
+                  <CheckCircle2 className="h-4.5 w-4.5 text-[var(--color-success)]" />
+                  {editingEmiEntry ? 'Edit EMI Entry' : 'Record EMI Entry'}
+                </h3>
+                <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
+                  {editingEmiEntry
+                    ? 'Editing rebalances the linked account by the difference automatically.'
+                    : 'Manual record of a loan installment (early / missed auto debit).'}
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setIsEmiEntryModalOpen(false);
+                  setEditingEmiEntry(null);
+                }}
+                className="p-1.5 hover:bg-[var(--color-surface-container-high)] rounded-full text-[var(--color-on-surface-variant)] transition"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEmiEntry}>
+              <div className="p-5 space-y-4 text-left">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Vehicle *</label>
+                  <select
+                    value={formEmiVehicleId}
+                    onChange={(e) => {
+                      const vehId = e.target.value;
+                      setFormEmiVehicleId(vehId);
+                      const veh = vehicles.find(v => v.id === vehId);
+                      if (veh?.emiDetails?.emiAccountId) setFormEmiAccountId(veh.emiDetails.emiAccountId);
+                      if (veh?.emiDetails?.monthlyEmiAmount && !(Number(formEmiAmount) > 0)) {
+                        setFormEmiAmount(String(veh.emiDetails.monthlyEmiAmount));
+                      }
+                    }}
+                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-bold focus:outline-none"
+                    required
+                  >
+                    <option value="">-- Choose Financed Vehicle --</option>
+                    {vehicles.filter(v => v.emiDetails?.hasEmi).map(v => (
+                      <option key={v.id} value={v.id}>{v.vehicleNo} ({v.type.toUpperCase()})</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">From Account *</label>
+                    <select
+                      value={formEmiAccountId}
+                      onChange={(e) => setFormEmiAccountId(e.target.value)}
+                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                      required
+                    >
+                      <option value="">-- Choose Account --</option>
+                      {accounts.map(a => (
+                        <option key={a.id} value={a.id}>{a.name} ({a.type === 'bank' ? a.bankName || 'Bank' : 'Cash'})</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">EMI Date *</label>
+                    <input
+                      type="date"
+                      value={formEmiDate}
+                      onChange={(e) => setFormEmiDate(e.target.value)}
+                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">EMI Amount (₹) *</label>
+                    <input
+                      type="number"
+                      placeholder="e.g. 48500"
+                      value={formEmiAmount}
+                      onChange={(e) => setFormEmiAmount(e.target.value)}
+                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-bold focus:outline-none"
+                      required
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Notes</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Actual bank debit landed on 11th"
+                      value={formEmiNotes}
+                      onChange={(e) => setFormEmiNotes(e.target.value)}
+                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="p-3 bg-[var(--color-info-container)]/30 border border-[var(--color-info)]/30 rounded-2xl text-[10px] text-[var(--color-on-surface-variant)]">
+                  Saving debits the selected account's balance immediately and records the entry in the vehicle's EMI ledger.
+                  {editingEmiEntry?.source === 'auto' && ' This is an automated entry — your edit is preserved with the Auto row.'}
+                </div>
+              </div>
+
+              <div className="p-4 bg-[var(--color-surface-container)] border-t border-[var(--color-outline-variant)] flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsEmiEntryModalOpen(false);
+                    setEditingEmiEntry(null);
+                  }}
+                  className="px-4 py-2 border border-[var(--color-outline-variant)] rounded-full text-xs font-bold bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-bold transition shadow-xs"
+                >
+                  {editingEmiEntry ? 'Save & Rebalance' : 'Record Entry'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

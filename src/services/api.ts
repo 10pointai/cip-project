@@ -30,6 +30,7 @@ import {
   AppDocument,
   EvidenceFolder,
   EvidenceFile,
+  VehicleEmiEntry,
 } from '../types';
 
 export interface HealthResponse {
@@ -1010,6 +1011,39 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify({ documentIds }),
     });
+  }
+
+  public async getVehicleDocuments(vehicleId: string): Promise<{ success: boolean; count: number; data: AppDocument[] }> {
+    return this.request(`/documents/vehicle/${vehicleId}`);
+  }
+
+  public async linkVehicleDocuments(vehicleId: string, documentIds: string[]): Promise<{ success: boolean; added: number }> {
+    return this.request(`/documents/vehicle/${vehicleId}/link`, {
+      method: 'POST',
+      body: JSON.stringify({ documentIds }),
+    });
+  }
+
+  public async getVehicleEmiEntries(vehicleId?: string): Promise<{ success: boolean; count: number; data: VehicleEmiEntry[] }> {
+    return this.request(`/logistics/emi-entries${vehicleId ? `?vehicleId=${encodeURIComponent(vehicleId)}` : ''}`);
+  }
+
+  public async createVehicleEmiEntry(entry: Partial<VehicleEmiEntry>): Promise<{ success: boolean; data: VehicleEmiEntry }> {
+    return this.request('/logistics/emi-entries', {
+      method: 'POST',
+      body: JSON.stringify(entry),
+    });
+  }
+
+  public async updateVehicleEmiEntry(id: string, updates: Partial<VehicleEmiEntry>): Promise<{ success: boolean; data: VehicleEmiEntry }> {
+    return this.request(`/logistics/emi-entries/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  }
+
+  public async deleteVehicleEmiEntry(id: string): Promise<{ success: boolean }> {
+    return this.request(`/logistics/emi-entries/${id}`, { method: 'DELETE' });
   }
 
   public async updateEmployeePayment(id: string, updates: Partial<EmployeePayment>): Promise<{ success: boolean; data: EmployeePayment }> {

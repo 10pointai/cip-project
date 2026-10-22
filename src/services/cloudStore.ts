@@ -12,6 +12,7 @@ import {
   Driver,
   TripSlip,
   Tyre,
+  VehicleEmiEntry,
   Employee,
   EmployeeAttendance,
   EmployeeLeave,
@@ -39,7 +40,7 @@ export type CollectionName =
   | 'vehicles' | 'drivers' | 'tripSlips' | 'tyres' | 'employees' | 'attendance'
   | 'leaves' | 'employeePayments' | 'employeeLedgerTransactions' | 'accounts'
   | 'transfers' | 'adjustments'
-  | 'stockAdjustments' | 'evidenceFolders' | 'evidenceFiles';
+  | 'stockAdjustments' | 'evidenceFolders' | 'evidenceFiles' | 'vehicleEmiEntries';
 
 export interface SidebarCounts {
   parties: number;
@@ -58,7 +59,7 @@ export interface SidebarCounts {
 // deliberately NOT here — it is per-feature.
 const BOOT_LOOKUPS: CollectionName[] = [
   'settings', 'parties', 'items', 'categories', 'units', 'locations', 'accounts',
-  'orders', 'vehicles', 'drivers', 'tripSlips', 'tyres',
+  'orders', 'vehicles', 'drivers', 'tripSlips', 'tyres', 'vehicleEmiEntries',
 ];
 
 // Collections touched by a sale/purchase write (they can mint or compensate
@@ -79,7 +80,7 @@ const FEATURE_COLLECTIONS: Record<string, CollectionName[]> = {
   purchases: ['purchases', 'sales', 'transactions', 'accounts'],
   production: ['productionBatches', 'items'],
   // drivers are employees with role 'driver' — loaded via 'employees'.
-  logistics: ['vehicles', 'tripSlips', 'tyres', 'employees'],
+  logistics: ['vehicles', 'tripSlips', 'tyres', 'employees', 'vehicleEmiEntries'],
   // attendance reads are date-scoped (daily sheet / register fetch their own
   // window); the ledger rows carry each employee's virtual account balance,
   // and accounts ride along — recording a bank-linked payout needs them.
@@ -104,6 +105,7 @@ const COLLECTION_FETCHERS: Partial<Record<CollectionName, () => Promise<{ succes
   drivers: () => api.getDrivers(),
   tripSlips: () => api.getTripSlips(),
   tyres: () => api.getTyres(),
+  vehicleEmiEntries: () => api.getVehicleEmiEntries(),
   employees: () => api.getEmployees(),
   attendance: () => api.getAttendance(),
   leaves: () => api.getLeaves(),
@@ -172,6 +174,7 @@ class CloudStore {
   private drivers: Driver[] = [];
   private tripSlips: TripSlip[] = [];
   private tyres: Tyre[] = [];
+  private vehicleEmiEntries: VehicleEmiEntry[] = [];
   private employees: Employee[] = [];
   private attendance: EmployeeAttendance[] = [];
   private leaves: EmployeeLeave[] = [];
@@ -360,6 +363,7 @@ class CloudStore {
       if (loaded.drivers) this.drivers = loaded.drivers as Driver[];
       if (loaded.tripSlips) this.tripSlips = loaded.tripSlips as TripSlip[];
       if (loaded.tyres) this.tyres = loaded.tyres as Tyre[];
+      if (loaded.vehicleEmiEntries) this.vehicleEmiEntries = loaded.vehicleEmiEntries as VehicleEmiEntry[];
       if (loaded.employees) this.employees = loaded.employees as Employee[];
       if (loaded.attendance) this.attendance = loaded.attendance as EmployeeAttendance[];
       if (loaded.leaves) this.leaves = loaded.leaves as EmployeeLeave[];
@@ -499,6 +503,9 @@ class CloudStore {
   public getDrivers(): Driver[] { return [...this.drivers]; }
   public getTripSlips(): TripSlip[] { return [...this.tripSlips]; }
   public getTyres(): Tyre[] { return [...this.tyres]; }
+  public getVehicleEmiEntries(vehicleId?: string): VehicleEmiEntry[] {
+    return vehicleId ? this.vehicleEmiEntries.filter((e) => e.vehicleId === vehicleId) : [...this.vehicleEmiEntries];
+  }
   public getEmployees(): Employee[] { return [...this.employees]; }
   public getAttendance(): EmployeeAttendance[] { return [...this.attendance]; }
   public getLeaves(): EmployeeLeave[] { return [...this.leaves]; }
@@ -1400,15 +1407,19 @@ class CloudStore {
 
   // Logistics: Vehicles, Drivers, Tyres, Trip Slips
   public addVehicle(v: Partial<Vehicle>): Vehicle {
+    // documentIds ride the create payload (staged documents — the server links
+    // them once the authoritative vehicle id is minted) but are NEVER stored
+    // on the optimistic local vehicle row.
+    const { documentIds, ...storedVehData } = v as typeof v & { documentIds?: string[] };
     const newVeh: Vehicle = {
       id: `veh-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-      vehicleNo: v.vehicleNo || (v as any).plateNumber || '',
-      type: v.type || 'tipper',
-      capacityTonnes: v.capacityTonnes || (v as any).capacityTons || 25,
-      ownership: v.ownership || 'owned',
-      status: v.status || 'available',
+      vehicleNo: storedVehData.vehicleNo || (storedVehData as any).plateNumber || '',
+      type: storedVehData.type || 'tipper',
+      capacityTonnes: storedVehData.capacityTonnes || (storedVehData as any).capacityTons || 25,
+      ownership: storedVehData.ownership || 'owned',
+      status: storedVehData.status || 'available',
       createdAt: new Date().toISOString(),
-      ...v,
+      ...storedVehData,
     };
     this.vehicles.unshift(newVeh);
     this.notify();
@@ -1634,6 +1645,159 @@ class CloudStore {
       return true;
     }
     return false;
+  }
+
+  // Vehicle EMI ledger — auto cron rows appear via refresh; 'manual' rows are
+  // recorded (and ANY row edited/removed) by the operator from the EMI tab.
+  // Every mutation also refreshes 'accounts' + 'vehicleEmiEntries' so the
+  // account balances (server rebalances on the entry itself) and the ledger
+  // adopt the server state.
+  public addVehicleEmiEntry(entry: Partial<VehicleEmiEntry>): VehicleEmiEntry {
+    const newEntry: VehicleEmiEntry = {
+      id: `vem-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      vehicleId: entry.vehicleId || '',
+      accountId: entry.accountId || '',
+      date: entry.date || new Date().toISOString().split('T')[0],
+      amount: Number(entry.amount) || 0,
+      source: entry.source || 'manual',
+      notes: entry.notes || undefined,
+      createdAt: new Date().toISOString(),
+      ...entry,
+    } as VehicleEmiEntry;
+    const stored = { ...newEntry } as any;
+    delete stored.vehicleNo;
+    delete stored.accountName;
+    this.vehicleEmiEntries.unshift(newEntry);
+    this.notify();
+    api
+      .createVehicleEmiEntry(stored)
+      .then(async (res) => {
+        if (res?.data?.id) {
+          this.vehicleEmiEntries = this.vehicleEmiEntries.map((e) => (e.id === newEntry.id ? res.data : e));
+          this.notify();
+        }
+        await this.refreshAfter(['vehicleEmiEntries', 'accounts']);
+      })
+      .catch((err) => console.error('[CloudStore] addVehicleEmiEntry cloud error:', err));
+    return newEntry;
+  }
+
+  public updateVehicleEmiEntry(id: string, updates: Partial<VehicleEmiEntry>): VehicleEmiEntry | null {
+    let updated: VehicleEmiEntry | null = null;
+    this.vehicleEmiEntries = this.vehicleEmiEntries.map((e) => {
+      if (e.id === id) {
+        updated = { ...e, ...updates };
+        return updated;
+      }
+      return e;
+    });
+    if (updated) {
+      this.notify();
+      api
+        .updateVehicleEmiEntry(id, updates)
+        .then(async () => {
+          await this.refreshAfter(['vehicleEmiEntries', 'accounts']);
+        })
+        .catch((err) => console.error('[CloudStore] updateVehicleEmiEntry cloud error:', err));
+    }
+    return updated;
+  }
+
+  public deleteVehicleEmiEntry(id: string): boolean {
+    const exists = this.vehicleEmiEntries.some((e) => e.id === id);
+    if (exists) {
+      this.vehicleEmiEntries = this.vehicleEmiEntries.filter((e) => e.id !== id);
+      this.notify();
+      api
+        .deleteVehicleEmiEntry(id)
+        .then(async () => {
+          await this.refreshAfter(['vehicleEmiEntries', 'accounts']);
+        })
+        .catch((err) => console.error('[CloudStore] deleteVehicleEmiEntry cloud error:', err));
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Upcoming/overdue vehicle EMI deductions for the header bell + dashboard
+   * widget. Alert rule (client directive): raise the alert TWO DAYS before
+   * the EMI date — `daysUntil` 0 (today), 1 or 2 — and also flag overdue
+   * deductions whose due date has passed with no ledger entry posted yet
+   * (tenure not exhausted, loan not closed).
+   */
+  public getVehicleEmiAlerts(): Array<{
+    vehicleId: string;
+    vehicleNo: string;
+    accountId: string;
+    accountName: string;
+    amount: number;
+    dueDate: string;
+    /** negative = overdue by |daysUntil| days */
+    daysUntil: number;
+    /** RED alert: the linked account's balance is lower than the EMI amount */
+    shortOfFunds: boolean;
+    accountBalance: number;
+  }> {
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    const todayMs = Date.parse(`${today}T00:00:00Z`);
+    const alerts: Array<{
+      vehicleId: string;
+      vehicleNo: string;
+      accountId: string;
+      accountName: string;
+      amount: number;
+      dueDate: string;
+      daysUntil: number;
+      shortOfFunds: boolean;
+      accountBalance: number;
+    }> = [];
+
+    for (const v of this.vehicles) {
+      const emi = (v as any).emiDetails;
+      if (!emi || !emi.hasEmi || !emi.emiAccountId || !(Number(emi.monthlyEmiAmount) > 0) || emi.status === 'closed') continue;
+      const dueDay = Math.min(31, Math.max(1, Number(emi.emiDueDay) || 10));
+      const account = this.accounts.find((a) => a.id === emi.emiAccountId);
+      // Scan this month and next 2: the first due date on/after today that
+      // either has no posted entry for that month yet (upcoming/overdue) or
+      // that the entry stream hasn't reached — plus any overdue month this
+      // window whose deduction never landed.
+      const candidates: string[] = [];
+      const now = new Date(`${today}T00:00:00Z`);
+      for (let addM = 0; addM <= 2; addM++) {
+        const m0 = now.getUTCMonth() + addM;
+        const y = now.getUTCFullYear() + Math.floor(m0 / 12);
+        const m = m0 % 12;
+        const lastDay = new Date(y, m + 1, 0).getDate();
+        const day = Math.min(dueDay, lastDay);
+        candidates.push(`${y}-${String(m + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`);
+      }
+      const entriesForVehicle = this.vehicleEmiEntries.filter((e) => e.vehicleId === v.id);
+      const postedMonths = new Set(entriesForVehicle.map((e) => String(e.date).slice(0, 7)));
+
+      for (const dueDate of candidates) {
+        const dueMs = Date.parse(`${dueDate}T00:00:00Z`);
+        const daysUntil = Math.round((dueMs - todayMs) / 86_400_000);
+        const monthKey = dueDate.slice(0, 7);
+        if (postedMonths.has(monthKey)) continue;
+        // Only surface within/around the alert window or overdue months
+        if (daysUntil > 2) continue;
+        if (daysUntil < 0 && !account) continue;
+        const accountBalance = Number(account?.currentBalance) || 0;
+        alerts.push({
+          vehicleId: v.id,
+          vehicleNo: v.vehicleNo,
+          accountId: emi.emiAccountId,
+          accountName: account?.name || 'Linked account',
+          amount: Number(emi.monthlyEmiAmount) || 0,
+          dueDate,
+          daysUntil,
+          shortOfFunds: accountBalance < (Number(emi.monthlyEmiAmount) || 0),
+          accountBalance,
+        });
+      }
+    }
+    return alerts.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
   }
 
   // Employees & HR

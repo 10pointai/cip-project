@@ -24,6 +24,7 @@ import { getConnectionStatus, isMysqlConfigured, testMysqlConnection } from './s
 import { runMysqlMigrations } from './server/mysql/migrations';
 import { getStorageStatus } from './server/services/storage';
 import { resolveTokenUser } from './server/middleware/auth';
+import { startEmiScheduler } from './server/services/emiScheduler';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -220,6 +221,10 @@ async function startServer() {
     console.log(`  Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`======================================================\n`);
   });
+
+  // Vehicle EMI auto-debit cron — daily check (hourly ticks, idempotent per
+  // vehicle-month) after MySQL hydration settles.
+  startEmiScheduler();
 }
 
 startServer();

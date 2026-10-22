@@ -44,6 +44,7 @@ import {
   Order,
   EmployeePayment,
   EmployeeLedgerTransaction,
+  VehicleEmiEntry,
 } from '../../types';
 import { formatCurrency, formatDate, formatDateTime } from '../../utils/formatters';
 import { formatLedgerBalance } from '../parties/partyStatement';
@@ -65,6 +66,8 @@ interface CashBankViewProps {
   /** payroll payouts — every payment carries its accountId and shows as money-out */
   employeePayments?: EmployeePayment[];
   employeeLedgerTransactions?: EmployeeLedgerTransaction[];
+  /** auto-posted + manual vehicle loan installments debited from accounts */
+  vehicleEmiEntries?: VehicleEmiEntry[];
   settings: CompanySettings;
   onAddAccount: (acc: Omit<CashBankAccount, 'id' | 'createdAt' | 'updatedAt' | 'currentBalance' | 'isActive'>) => void;
   onUpdateAccount: (id: string, updates: Partial<CashBankAccount>) => void;
@@ -84,6 +87,7 @@ export function CashBankView({
   orders,
   employeePayments,
   employeeLedgerTransactions,
+  vehicleEmiEntries,
   settings,
   onAddAccount,
   onUpdateAccount,
@@ -338,6 +342,27 @@ export function CashBankView({
           moneyIn: 0,
           moneyOut: Number(ep.amount) || 0,
           createdAt: (ep as any).createdAt || ep.date,
+        });
+      });
+
+    // 3.c Vehicle EMI installments — auto cron-posted on the due date and
+    // manual records from the Vehicle EMI ledger (editing/removing an entry
+    // rebalances the account on the server)
+    (vehicleEmiEntries || [])
+      .filter((e) => e.accountId === selectedAccountId)
+      .forEach((e) => {
+        list.push({
+          id: e.id,
+          date: e.date,
+          type: 'payment_out',
+          title: `Vehicle EMI — ${e.vehicleNo || 'Vehicle'} (${e.source === 'auto' ? 'Auto' : 'Manual'})`,
+          description: e.notes || 'Monthly vehicle loan installment debited',
+          referenceNumber: undefined,
+          moneyIn: 0,
+          moneyOut: Number(e.amount) || 0,
+          createdAt: (e as any).createdAt || e.date,
+          // assigned by the registration-order sequencer below
+          runningBalance: 0,
         });
       });
 

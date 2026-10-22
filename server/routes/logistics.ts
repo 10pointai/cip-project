@@ -95,3 +95,40 @@ logisticsRouter.post('/tyres', requirePermission('manage_fleet'), async (req, re
 });
 logisticsRouter.put('/tyres/:id', requirePermission('manage_fleet'), (req, res) => res.json({ success: true, data: serverDb.updateTyre(req.params.id, req.body) }));
 logisticsRouter.delete('/tyres/:id', requirePermission('manage_fleet'), (req, res) => res.json({ success: serverDb.deleteTyre(req.params.id) }));
+
+// --- VEHICLE EMI ENTRIES (auto cron rows + operator-recorded payments) ---
+// Every create/edit/delete rebalances the linked cash/bank account (the
+// entry list is the balance truth — see recalculateAccountBalance stream 6).
+// The READ is auth-only (like GET /logistics/vehicles) — the header EMI bell
+// and dashboard widget consume it for any signed-in operator.
+logisticsRouter.get('/emi-entries', async (req, res) => {
+  try {
+    const data = serverDb.getVehicleEmiEntries(req.query.vehicleId ? String(req.query.vehicleId) : undefined);
+    res.json({ success: true, count: data.length, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+logisticsRouter.post('/emi-entries', requirePermission('manage_fleet'), async (req, res) => {
+  try {
+    const data = serverDb.addVehicleEmiEntry(req.body);
+    res.status(201).json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+logisticsRouter.put('/emi-entries/:id', requirePermission('manage_fleet'), async (req, res) => {
+  try {
+    const data = serverDb.updateVehicleEmiEntry(req.params.id, req.body);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+logisticsRouter.delete('/emi-entries/:id', requirePermission('manage_fleet'), async (req, res) => {
+  try {
+    res.json({ success: serverDb.deleteVehicleEmiEntry(req.params.id) });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});

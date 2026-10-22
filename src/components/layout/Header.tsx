@@ -1,10 +1,11 @@
 import React from 'react';
-import { Menu, Plus, ArrowDownLeft, ArrowUpRight, MapPin, Layers, Scale, Clock, Sun, Moon, Sparkles, Server, Database, CreditCard, Shield, User, KeyRound, LogOut, RefreshCw } from 'lucide-react';
+import { Menu, Plus, ArrowDownLeft, ArrowUpRight, MapPin, Layers, Scale, Clock, Sun, Moon, Sparkles, Server, Database, CreditCard, Shield, User, KeyRound, LogOut, RefreshCw, Bell, Landmark, AlertTriangle } from 'lucide-react';
 import { CompanySettings } from '../../types';
 import { formatDate } from '../../utils/formatters';
 import { NavigationTab } from './Sidebar';
 import { useM3Theme } from '../../design-system';
 import { useAuth } from '../../context/AuthContext';
+import { cloudStore } from '../../services/cloudStore';
 
 interface HeaderProps {
   title: string;
@@ -41,6 +42,16 @@ export function Header({
   const [isUserMenuOpen, setIsUserMenuOpen] = React.useState(false);
   const userMenuRef = React.useRef<HTMLDivElement>(null);
   const today = formatDate(new Date().toISOString(), 'long');
+
+  // EMI alert bell — re-reads the store on any sync so the 2-days-before
+  // due-date alerts follow the data everywhere in the app.
+  const [emiAlerts, setEmiAlerts] = React.useState(() => cloudStore.getVehicleEmiAlerts());
+  const [isEmiBellOpen, setIsEmiBellOpen] = React.useState(false);
+  React.useEffect(() => {
+    setEmiAlerts(cloudStore.getVehicleEmiAlerts());
+    const unsubscribe = cloudStore.subscribe(() => setEmiAlerts(cloudStore.getVehicleEmiAlerts()));
+    return () => unsubscribe();
+  }, []);
 
   // Close user dropdown menu when clicking outside
   React.useEffect(() => {
@@ -100,39 +111,9 @@ export function Header({
         if (!hasPermission('manage_purchases')) return null;
         return null;
       case 'logistics':
-        return (
-          <div className="flex items-center gap-2">
-            {hasPermission('dispatch_trips') && (
-              <button
-                onClick={() => window.dispatchEvent(new CustomEvent('app-header-action', { detail: 'logistics-slip' }))}
-                className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-[var(--color-success-container)] hover:opacity-90 text-[var(--color-on-success-container)] border border-[var(--color-success)]/30 font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-2xs"
-              >
-                <ArrowUpRight className="w-3.5 h-3.5 text-[var(--color-success)]" />
-                <span>Record Trip Slip</span>
-              </button>
-            )}
-            {hasPermission('manage_fleet') && (
-              <>
-                <button
-                  onClick={() => window.dispatchEvent(new CustomEvent('app-header-action', { detail: 'logistics-vehicle' }))}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-2xs"
-                >
-                  <Plus className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-                  <span className="hidden sm:inline">Add Vehicle</span>
-                  <span className="sm:hidden">Vehicle</span>
-                </button>
-                <button
-                  onClick={() => window.dispatchEvent(new CustomEvent('app-header-action', { detail: 'logistics-tyre' }))}
-                  className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-semibold text-xs rounded-full transition-all hover:scale-[1.02] active:scale-95 shadow-xs"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Register Tyre</span>
-                  <span className="sm:hidden">Tyre</span>
-                </button>
-              </>
-            )}
-          </div>
-        );
+        // No header actions — trip slips, vehicles and tyres are created and
+        // managed inside the Logistics & Fleet view itself.
+        return null;
       case 'employees':
         return null;
       default:
@@ -168,6 +149,69 @@ export function Header({
 
       {/* Right Controls */}
       <div className="flex items-center gap-2 shrink-0">
+        {/* Vehicle EMI Alert Bell — raises 2 days before every EMI due date */}
+        {isAuthenticated && emiAlerts.length > 0 && (
+          <div className="relative">
+            <button
+              onClick={() => setIsEmiBellOpen((v) => !v)}
+              className={`relative inline-flex items-center justify-center p-2 rounded-full border transition-all shadow-2xs hover:scale-[1.03] active:scale-95 ${
+                emiAlerts.some((a) => a.shortOfFunds)
+                  ? 'bg-[var(--color-error-container)] border-[var(--color-error)]/30 text-[var(--color-on-error-container)]'
+                  : 'bg-[var(--color-warning-container)] border-[var(--color-warning)]/30 text-[var(--color-on-warning-container)]'
+              }`}
+              title="Vehicle EMI due alerts"
+            >
+              <Bell className="w-4 h-4" />
+              <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-[var(--color-error)] text-[var(--color-on-error)] text-[9px] font-black flex items-center justify-center">
+                {emiAlerts.length}
+              </span>
+            </button>
+
+            {isEmiBellOpen && (
+              <div className="absolute right-0 top-full mt-2 w-72 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xl p-2 z-50 animate-scaleUp">
+                <div className="flex items-center justify-between px-2.5 py-2 border-b border-[var(--color-outline-variant)]">
+                  <p className="text-[10px] font-extrabold uppercase tracking-wider text-[var(--color-on-surface)]">Vehicle EMI Alerts</p>
+                  <button onClick={() => setIsEmiBellOpen(false)} className="text-[9px] font-bold text-[var(--color-on-surface-variant)] hover:underline">Close</button>
+                </div>
+                <div className="max-h-64 overflow-y-auto space-y-1 py-1.5">
+                  {emiAlerts.map((a) => (
+                    <div key={`${a.vehicleId}-${a.dueDate}`} className={`px-2.5 py-2 rounded-xl ${a.shortOfFunds ? 'bg-[var(--color-error-container)]/50' : 'bg-[var(--color-surface-container)]'}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-black font-mono text-[var(--color-on-surface)]">{a.vehicleNo}</span>
+                        <span className={`text-[9px] font-black uppercase px-1.5 py-0.5 rounded-full ${
+                          a.shortOfFunds
+                            ? 'bg-[var(--color-error)] text-[var(--color-on-error)] animate-pulse'
+                            : a.daysUntil <= 1
+                              ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
+                              : 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)]'
+                        }`}>
+                          {a.shortOfFunds
+                            ? '⚠ Account Short of EMI Funds'
+                            : a.daysUntil <= 0 ? `⚠ Overdue ${Math.abs(a.daysUntil)}d` : a.daysUntil === 1 ? 'Due Tomorrow' : 'Due in 2 Days'}
+                        </span>
+                      </div>
+                      {a.shortOfFunds && (
+                        <p className="text-[9px] font-bold text-[var(--color-on-error-container)] mt-1">
+                          {a.accountName} balance {`₹${a.accountBalance.toLocaleString('en-IN')}`} is short of the required {`₹${a.amount.toLocaleString('en-IN')}`}.
+                        </p>
+                      )}
+                      <div className="flex items-center justify-between mt-1">
+                        <span className="text-[10px] text-[var(--color-on-surface-variant)] flex items-center gap-1">
+                          <Landmark className="h-3 w-3" /> {a.accountName}
+                        </span>
+                        <span className="text-[11px] font-bold text-[var(--color-on-surface)]">₹{a.amount.toLocaleString('en-IN')}</span>
+                      </div>
+                      <p className="text-[9px] text-[var(--color-on-surface-variant)] mt-0.5 flex items-center gap-1">
+                        <AlertTriangle className="h-2.5 w-2.5" /> EMI date {a.dueDate}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Feature Refresh Indicator & Manual Refresh Trigger */}
         {onRefreshFeature && (
           <button

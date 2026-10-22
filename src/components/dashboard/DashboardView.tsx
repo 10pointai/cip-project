@@ -27,6 +27,8 @@ import {
 import { Party, Transaction, CompanySettings } from '../../types';
 import { formatCurrency, formatCompactCurrency } from '../../utils/formatters';
 import { useAuth } from '../../context/AuthContext';
+import { cloudStore } from '../../services/cloudStore';
+import { Landmark, Truck, Clock3, AlertTriangle } from 'lucide-react';
 
 interface DashboardViewProps {
   parties: Party[];
@@ -53,6 +55,14 @@ export function DashboardView({
   const canViewFinancials = hasPermission('view_financial_metrics');
   const canManageParties = hasPermission('manage_parties');
   const canRecordPayments = hasPermission('record_payments');
+
+  // Upcoming / overdue vehicle EMI debits raise two days before each due date
+  const [emiAlerts, setEmiAlerts] = React.useState(() => cloudStore.getVehicleEmiAlerts());
+  React.useEffect(() => {
+    setEmiAlerts(cloudStore.getVehicleEmiAlerts());
+    const unsubscribe = cloudStore.subscribe(() => setEmiAlerts(cloudStore.getVehicleEmiAlerts()));
+    return () => unsubscribe();
+  }, []);
 
   // Financial Calculations
   const receivables = parties.reduce((sum, p) => (p.currentBalance > 0 ? sum + p.currentBalance : sum), 0);
@@ -380,6 +390,86 @@ export function DashboardView({
               ))
             )}
           </div>
+        </div>
+      </div>
+
+      {/* Vehicle EMI — Upcoming & Overdue Deductions (raised 2 days before each due date) */}
+      <div className="bg-[var(--color-surface-container-lowest)] p-4 sm:p-6 rounded-[28px] border border-[var(--color-outline-variant)] shadow-2xs space-y-4">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm sm:text-base font-bold text-[var(--color-on-surface)] flex items-center gap-2">
+              <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${emiAlerts.some((a) => a.shortOfFunds) ? 'bg-[var(--color-error)]' : 'bg-[var(--color-warning)]'}`}></span>
+              <span className="truncate">Vehicle EMI — Upcoming Debits</span>
+            </h2>
+            <p className="text-[11px] sm:text-xs text-[var(--color-on-surface-variant)] line-clamp-1">
+              Auto-deducted from the linked bank account on the due date (alert fires 2 days early)
+            </p>
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          {emiAlerts.length === 0 ? (
+            <div className="py-8 text-center space-y-1.5 bg-[var(--color-surface-container)] rounded-2xl border border-[var(--color-outline-variant)] px-4">
+              <Landmark className="w-6 h-6 mx-auto text-[var(--color-outline)]" />
+              <p className="text-xs font-bold text-[var(--color-on-surface)]">No EMI Deductions This Window</p>
+              <p className="text-[11px] text-[var(--color-on-surface-variant)]">
+                Next vehicle EMI alert will appear here 2 days before its due date.
+              </p>
+            </div>
+          ) : (
+            emiAlerts.map((a) => (
+              <div
+                key={`${a.vehicleId}-${a.dueDate}`}
+                className={`p-3.5 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition-colors ${
+                  a.shortOfFunds
+                    ? 'bg-[var(--color-error-container)]/40 border-[var(--color-error)]/25'
+                    : a.daysUntil <= 0
+                      ? 'bg-[var(--color-warning-container)]/25 border-[var(--color-warning)]/25'
+                      : 'bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] border-[var(--color-outline-variant)]'
+                }`}
+              >
+                <div className="space-y-0.5 min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Truck className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
+                    <span className="text-xs font-black font-mono text-[var(--color-on-surface)]">{a.vehicleNo}</span>
+                    <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
+                      a.shortOfFunds
+                        ? 'bg-[var(--color-error)] text-[var(--color-on-error)] animate-pulse'
+                        : a.daysUntil <= 1
+                          ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
+                          : 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)]'
+                    }`}>
+                      {a.shortOfFunds
+                        ? '⚠ Account Short of EMI Funds'
+                        : a.daysUntil <= 0 ? `Overdue ${Math.abs(a.daysUntil)} day(s)` : a.daysUntil === 1 ? 'Due Tomorrow' : 'Due in 2 Days'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-[var(--color-on-surface-variant)] truncate flex items-center gap-1">
+                    <Landmark className="w-3 h-3 shrink-0" />
+                    {a.accountName} • EMI date {a.dueDate}
+                  </p>
+                  {a.shortOfFunds && (
+                    <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)]">
+                    ⚠ {a.accountName} balance ₹{a.accountBalance.toLocaleString('en-IN')} is short of the ₹{a.amount.toLocaleString('en-IN')} EMI required.
+                    </p>
+                  )}
+                </div>
+
+                <div className="text-left sm:text-right pt-1.5 sm:pt-0 border-t border-[var(--color-outline-variant)]/60 sm:border-0">
+                  <p className="text-xs font-black text-[var(--color-on-surface)]">₹{a.amount.toLocaleString('en-IN')}</p>
+                  {a.shortOfFunds ? (
+                    <span className="text-[10px] font-black text-[var(--color-on-surface-variant)] bg-[var(--color-error-container)] px-2 py-0.5 rounded-full inline-flex items-center gap-1">
+                      <AlertTriangle className="w-2.5 h-2.5" /> Cannot deduct — top up account
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-semibold text-[var(--color-on-warning-container)] bg-[var(--color-warning-container)] px-2 py-0.5 rounded-full inline-flex items-center gap-1">
+                      <Clock3 className="w-2.5 h-2.5" /> Auto-deduct scheduled
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
         </div>
       </div>
     </div>
