@@ -9,6 +9,7 @@ import { ItemsView } from './components/items/ItemsView';
 import { ProductionView } from './components/production/ProductionView';
 import { OrdersView } from './components/orders/OrdersView';
 import { LogisticsView } from './components/logistics/LogisticsView';
+import { TyreManagementView } from './components/logistics/TyreManagementView';
 import { EmployeesView } from './components/employees/EmployeesView';
 import { CashBankView } from './components/accounts/CashBankView';
 import { EvidenceManager } from './components/evidence/EvidenceManager';
@@ -67,6 +68,9 @@ function AppContent() {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isSignOutModalOpen, setIsSignOutModalOpen] = useState(false);
   const [isFeatureRefreshing, setIsFeatureRefreshing] = useState(false);
+  // Cross-feature focus — a driver clicked in the Fleet Drivers tab lands on
+  // his profile page in the Employees feature
+  const [focusEmployeeId, setFocusEmployeeId] = useState<string | null>(null);
 
   // PER-FEATURE DATA LOADING
   // Boot tier — once per sign-in, the small lookup tables that global modals,
@@ -113,6 +117,12 @@ function AppContent() {
     };
   }, [activeTab, isAuthenticated, loadFeature]);
 
+  // An unconsumed driver focus must not fire on a LATER employees visit —
+  // drop it whenever the user navigates away
+  React.useEffect(() => {
+    if (activeTab !== 'employees' && focusEmployeeId) setFocusEmployeeId(null);
+  }, [activeTab, focusEmployeeId]);
+
   const checkTabPermission = (tab: NavigationTab): boolean => {
     if (!currentUser) return false;
     if (currentUser.role === 'super_admin') return true;
@@ -125,6 +135,7 @@ function AppContent() {
       case 'purchases': return hasPermission('manage_purchases');
       case 'production': return hasPermission('manage_production');
       case 'logistics': return hasPermission('manage_fleet');
+      case 'tyre-management': return hasPermission('manage_tyres');
       case 'employees': return hasPermission('manage_employees');
       case 'evidence': return hasPermission('manage_evidence');
       case 'users': return hasPermission('manage_users');
@@ -138,7 +149,7 @@ function AppContent() {
     if (!checkTabPermission(activeTab)) {
       const allowedTabs: NavigationTab[] = [
         'dashboard', 'parties', 'cash-bank', 'items', 'sales', 'purchases',
-        'production', 'logistics', 'employees', 'evidence', 'users', 'settings'
+        'production', 'logistics', 'tyre-management', 'employees', 'evidence', 'users', 'settings'
       ];
       const firstAllowed = allowedTabs.find(t => checkTabPermission(t));
       if (firstAllowed) {
@@ -371,6 +382,11 @@ function AppContent() {
       case 'logistics':
         return {
           title: 'Fleet Management',
+          subtitle: '',
+        };
+      case 'tyre-management':
+        return {
+          title: 'Tyre Management',
           subtitle: '',
         };
       case 'sales':
@@ -617,11 +633,29 @@ function AppContent() {
           )}
 
           {activeTab === 'logistics' && hasPermission('manage_fleet') && (
-            <LogisticsView />
+            <LogisticsView
+              // Driver names open the full profile in Employees (only when the
+              // viewer may reach that feature)
+              onOpenDriverProfile={
+                hasPermission('manage_employees')
+                  ? (employeeId: string) => {
+                      setFocusEmployeeId(employeeId);
+                      setActiveTab('employees');
+                    }
+                  : undefined
+              }
+            />
+          )}
+
+          {activeTab === 'tyre-management' && hasPermission('manage_tyres') && (
+            <TyreManagementView />
           )}
 
           {activeTab === 'employees' && hasPermission('manage_employees') && (
-            <EmployeesView />
+            <EmployeesView
+              focusEmployeeId={focusEmployeeId}
+              onFocusHandled={() => setFocusEmployeeId(null)}
+            />
           )}
 
           {activeTab === 'evidence' && hasPermission('manage_evidence') && (
@@ -645,6 +679,7 @@ function AppContent() {
             activeTab !== 'production' &&
             activeTab !== 'settings' &&
             activeTab !== 'logistics' &&
+            activeTab !== 'tyre-management' &&
             activeTab !== 'employees' &&
             activeTab !== 'evidence' &&
             activeTab !== 'users' &&

@@ -22,6 +22,7 @@ import {
   Contact,
   Sparkles,
   Landmark,
+  Disc,
   FolderOpen,
   LogOut,
   KeyRound,
@@ -53,6 +54,7 @@ export type NavigationTab =
   | 'evidence'
   | 'settings'
   | 'logistics'
+  | 'tyre-management'
   | 'sales'
   | 'purchases'
   | 'production'
@@ -160,6 +162,13 @@ export function Sidebar({
       icon: Truck,
       badge: null,
       permissionCheck: (has) => has('manage_fleet'),
+    },
+    {
+      id: 'tyre-management',
+      label: 'Tyre Management',
+      icon: Disc,
+      badge: null,
+      permissionCheck: (has) => has('manage_tyres'),
     },
     {
       id: 'employees',

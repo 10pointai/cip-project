@@ -1475,8 +1475,9 @@ class ServerLocalDatabase {
 
   private computeStageTotals(
     lines: Array<{ quantity: number; rate: number; gstRate?: number }>,
-    transportCharges = 0
-  ): { subtotal: number; taxAmount: number; totalAmount: number; taxRateGst: number } {
+    transportCharges = 0,
+    freightGstRate = 0
+  ): { subtotal: number; taxAmount: number; totalAmount: number; taxRateGst: number; freightGstAmount: number } {
     let subtotal = 0;
     let taxAmount = 0;
     for (const li of lines) {
@@ -1489,7 +1490,16 @@ class ServerLocalDatabase {
     const r2 = (n: number) => Math.round(n * 100) / 100;
     const subtotal2 = r2(subtotal);
     const taxAmount2 = r2(taxAmount);
-    return { subtotal: subtotal2, taxAmount: taxAmount2, totalAmount: r2(subtotal2 + taxAmount2 + (Number(transportCharges) || 0)), taxRateGst };
+    // Fleet-cost row: transportCharges carries its OWN GST slab (its own doc
+    // row, separate from the item-line tax)
+    const freightGstAmount = r2(((Number(transportCharges) || 0) * (Number(freightGstRate) || 0)) / 100);
+    return {
+      subtotal: subtotal2,
+      taxAmount: taxAmount2,
+      totalAmount: r2(subtotal2 + taxAmount2 + (Number(transportCharges) || 0) + freightGstAmount),
+      taxRateGst,
+      freightGstAmount,
+    };
   }
 
   /** Received-based stage totals — the goods-receipt document bills the
@@ -1968,6 +1978,24 @@ class ServerLocalDatabase {
       partyName: party ? (party.tradeName || party.name) : undefined,
       items,
       stages,
+      // Dispatch attachment hydration (Golden Rule §2): vehicle number + the
+      // truck's CURRENT driver join from the fleet/employees masters at read.
+      vehicleNo: sale.vehicleId
+        ? this.data.vehicles.find((v) => v.id === sale.vehicleId)?.vehicleNo || sale.vehicleNo
+        : sale.vehicleNo,
+      driverName: sale.vehicleId
+        ? (() => {
+            const veh = this.data.vehicles.find((v) => v.id === sale.vehicleId);
+            return veh?.currentDriverId
+              ? this.data.employees.find((e) => e.id === veh.currentDriverId)?.name || undefined
+              : undefined;
+          })()
+        : sale.driverName,
+      // Load weight — the persisted ORDER-LEVEL (one common) value is the
+      // authority; legacy per-line rows fall back to their line-weight sum.
+      weightTonnes: sale.weightTonnes !== undefined
+        ? sale.weightTonnes
+        : items.reduce((sum, li) => sum + (Number((li as any).weightTonnes) || 0), 0) || undefined,
       // Legacy derive: pre-flow rows have no settlementType — a settlement
       // voucher means the account flow was applied (mirrors the MySQL backfill).
       settlementType: sale.settlementType ?? (sale.settlementVoucherId ? 'account' : undefined),
@@ -2051,6 +2079,7 @@ class ServerLocalDatabase {
           unitId: master?.unitId || this.resolveUnitIdFromCode(master?.unit),
           quantity,
           rate,
+          weightTonnes: Number((li as any).weightTonnes) > 0 ? Number((li as any).weightTonnes) : undefined,
           amount: quantity * rate,
           gstRate: li.gstRate ?? master?.taxRateGst ?? 0,
           locationId,
@@ -2298,7 +2327,7 @@ class ServerLocalDatabase {
     // sales_order / invoice — a new sale may start at any of the three).
     const firstStageId = `sos-${saleId}-${Math.random().toString(36).slice(2, 8)}`;
     const items = this.normalizeSaleItemLines(saleId, data.items || [], firstStageId);
-    const total = this.computeStageTotals(items, transportCharges);
+    const total = this.computeStageTotals(items, transportCharges, data.freightGstRate || 0);
     const firstStage: SalesOrderStage = {
       id: firstStageId,
       saleId,
@@ -2320,9 +2349,22 @@ class ServerLocalDatabase {
       date: data.date || now.split('T')[0],
       status: 'pending',
       notes: data.notes,
+      // Dispatch attachment (FK authority — vehicleNo/driverName are legacy
+      // string snapshots hydrated at read; see hydrateSale)
+      vehicleId: data.vehicleId || undefined,
+      siteAddress: data.siteAddress || undefined,
+      distanceKm: data.distanceKm !== undefined && data.distanceKm !== null && Number(data.distanceKm) > 0
+        ? Number(data.distanceKm)
+        : undefined,
+      // ONE load weight for the whole order (all items) — the trip slip's load
+      weightTonnes: Number(data.weightTonnes) > 0 ? Number(data.weightTonnes) : undefined,
       vehicleNo: data.vehicleNo,
       driverName: data.driverName,
       transportCharges,
+      // Fleet cost (priced PER SALE, never per vehicle): the checkbox rate is
+      // ₹ per tonne per KM; transportCharges = weight × distance × rate
+      freightRatePerTonne: Number(data.freightRatePerTonne) > 0 ? Number(data.freightRatePerTonne) : undefined,
+      freightGstRate: Number((data as any).freightGstRate) > 0 ? Number((data as any).freightGstRate) : undefined,
       inventoryApplied: false,
       cashApplied: false,
       items,
@@ -2362,6 +2404,9 @@ class ServerLocalDatabase {
     this.logAudit('CREATE', 'SALE', saleId, `Registered sale ${sale.saleNumber} (stage ${firstStage.stageType})`);
     this.save();
     this.syncSaleToMysql(sale);
+    // Auto-derive the dispatch trip slip (sale ⇢ trip_slips via saleId; a
+    // created sale always carries a vehicle — the UI enforces it)
+    this.syncSaleTripSlip(sale);
     const createDocIds = this.extractDocumentIds(data);
     if (createDocIds.length > 0) this.linkOrderDocuments('sale', saleId, createDocIds);
     return this.hydrateSale(sale);
@@ -2405,11 +2450,29 @@ class ServerLocalDatabase {
       latestStage.date = updates.date;
     }
     existing.notes = updates.notes ?? existing.notes;
+    // Dispatch attachment: the vehicle FK is the authority — number/driver
+    // snapshot strings hydrate from the fleet master at read (hydrateSale).
+    existing.vehicleId = updates.vehicleId !== undefined ? (updates.vehicleId || undefined) : existing.vehicleId;
+    existing.siteAddress = updates.siteAddress !== undefined ? (updates.siteAddress || undefined) : existing.siteAddress;
+    existing.distanceKm = updates.distanceKm !== undefined
+      ? (Number(updates.distanceKm) > 0 ? Number(updates.distanceKm) : undefined)
+      : existing.distanceKm;
+    // Order-level load weight (one common value for all items)
+    existing.weightTonnes = updates.weightTonnes !== undefined
+      ? (Number(updates.weightTonnes) > 0 ? Number(updates.weightTonnes) : undefined)
+      : existing.weightTonnes;
     existing.vehicleNo = updates.vehicleNo ?? existing.vehicleNo;
     existing.driverName = updates.driverName ?? existing.driverName;
     existing.transportCharges = updates.transportCharges !== undefined
       ? Number(updates.transportCharges) || 0
       : existing.transportCharges;
+    // Fleet-cost rate + slab always ride explicitly ('' from an unchecked box → 0)
+    existing.freightRatePerTonne = (updates as any).freightRatePerTonne !== undefined
+      ? (Number((updates as any).freightRatePerTonne) > 0 ? Number((updates as any).freightRatePerTonne) : undefined)
+      : existing.freightRatePerTonne;
+    existing.freightGstRate = (updates as any).freightGstRate !== undefined
+      ? (Number((updates as any).freightGstRate) > 0 ? Number((updates as any).freightGstRate) : undefined)
+      : existing.freightGstRate;
     existing.updatedAt = new Date().toISOString();
 
     // Master items replaced → the edit applies ONLY to the CURRENT (latest)
@@ -2435,7 +2498,7 @@ class ServerLocalDatabase {
       // Refresh the EDITED stage's document totals from the new prices/GST —
       // other stages keep their own (stage-scoped) figures.
       if (latestStage) {
-        const refreshed = this.computeStageTotals(existing.items, Number(existing.transportCharges) || 0);
+        const refreshed = this.computeStageTotals(existing.items, Number(existing.transportCharges) || 0, existing.freightGstRate || 0);
         latestStage.subtotal = refreshed.subtotal;
         latestStage.taxAmount = refreshed.taxAmount;
         latestStage.totalAmount = refreshed.totalAmount;
@@ -2444,7 +2507,7 @@ class ServerLocalDatabase {
       // the posted sale_invoice journal (party receivable leg) AND the payment
       // receipt (Cash/Bank leg, when settled) both resize to the edited total.
       if (!identical) {
-        const refreshed = this.computeStageTotals(existing.items, Number(existing.transportCharges) || 0);
+        const refreshed = this.computeStageTotals(existing.items, Number(existing.transportCharges) || 0, existing.freightGstRate || 0);
         this.resizeVoucherAmounts(existing, refreshed.totalAmount, `Sale ${existing.saleNumber} edit`, 'SALE_CASH');
       }
     }
@@ -2498,6 +2561,9 @@ class ServerLocalDatabase {
     if (!opts.skipMysqlSync) {
       this.syncSaleToMysql(existing);
     }
+    // Keep the auto-derived trip slip in step (also on stage-issue composite
+    // saves: the slip mirrors the effective stage's lines → weight sum)
+    this.syncSaleTripSlip(existing);
     // Document links ride on the master-edit payload when present (idempotent)
     const editDocIds = this.extractDocumentIds(updates);
     if (editDocIds.length > 0) this.linkOrderDocuments('sale', id, editDocIds);
@@ -2549,9 +2615,10 @@ class ServerLocalDatabase {
             gstRate: li.gstRate,
             locationId: li.locationId,
             itemNotes: li.itemNotes,
+            weightTonnes: (li as any).weightTonnes,
           }));
     const items = this.normalizeSaleItemLines(id, seedInput, stageId);
-    const total = this.computeStageTotals(items, Number(sale.transportCharges) || 0);
+    const total = this.computeStageTotals(items, Number(sale.transportCharges) || 0, sale.freightGstRate || 0);
 
     const stage: SalesOrderStage = {
       id: stageId,
@@ -2596,6 +2663,9 @@ class ServerLocalDatabase {
     this.logAudit('UPDATE', 'SALE_STAGE', id, `Issued stage ${stage.stageType} ${stage.stageNumber} on sale ${sale.saleNumber}`);
     this.save();
     this.syncSaleToMysql(sale);
+    // The new stage may carry re-edited line weights — keep the derived slip
+    // on the effective stage's line sum
+    this.syncSaleTripSlip(sale);
     const stageDocIds = this.extractDocumentIds(stageInput);
     if (stageDocIds.length > 0) this.linkOrderDocuments('sale', id, stageDocIds);
     return this.hydrateSale(sale);
@@ -2619,6 +2689,13 @@ class ServerLocalDatabase {
       this.deleteLinkedVouchers(sale, `Deletion reversal for sale ${sale.saleNumber}`);
     }
     this.data.sales.splice(index, 1);
+    // The dispatch trip slip was sale-derived — remove it with the sale
+    // (operator progress on it is lost with the sale's own data).
+    const linkedSlip = (this.data.tripSlips || []).find((t) => t.saleId === id);
+    if (linkedSlip) {
+      this.deleteTripSlip(linkedSlip.id);
+      this.logAudit('DELETE', 'SALE', id, `Deleted trip slip ${linkedSlip.slipNumber} (sale ${sale.saleNumber} deleted)`);
+    }
     this.detachSaleDocuments(id); // drop mappings, soft-delete orphaned docs
     this.logAudit('DELETE', 'SALE', id, `Deleted sale ${sale.saleNumber}`);
     this.save();
@@ -3142,6 +3219,137 @@ class ServerLocalDatabase {
     return this.data.tripSlips;
   }
 
+  /**
+   * FK-only display hydration (Golden Rule §2): driver / party / material are
+   * NEVER persisted display copies on the slip — the driver name joins the
+   * employees master by driverId, the party name the parties master by
+   * partyId, and a sale-derived slip resolves its material from the sale's
+   * effective (latest) stage items. Manual (non-order) slips keep the
+   * operator-entered material text.
+   */
+  private hydrateTripSlip(t: TripSlip): TripSlip {
+    const driver = t.driverId
+      ? (this.data.employees || []).find((e) => e.id === t.driverId)
+      : undefined;
+    const party = t.partyId
+      ? (this.data.parties || []).find((p) => p.id === t.partyId)
+      : undefined;
+    let materialName: string | undefined = t.materialName || undefined;
+    if (t.saleId) {
+      const sale = (this.data.sales || []).find((s) => s.id === t.saleId);
+      for (const li of sale?.items || []) {
+        const master = this.findItemRaw(li.itemId);
+        if (master?.name) {
+          materialName = master.name;
+          break;
+        }
+      }
+    }
+    return {
+      ...t,
+      driverName: driver?.name || undefined,
+      partyName: party ? (party.tradeName || party.name) : undefined,
+      materialName,
+    };
+  }
+
+  /** Hydrated trip slips — for the API read paths and internal consumers. */
+  public getHydratedTripSlips(): TripSlip[] {
+    return (this.data.tripSlips || []).map((t) => this.hydrateTripSlip(t));
+  }
+
+  // --- SALE → TRIP SLIP (auto-derived dispatch trips) ---
+
+  /** Collision-safe serial: highest TS-<year>-#### in use + 1 (min 0101). */
+  private nextSlipNumber(): string {
+    const year = new Date().getFullYear();
+    const prefix = `TS-${year}-`;
+    let max = 100;
+    for (const t of this.data.tripSlips || []) {
+      if (!t.slipNumber?.startsWith(prefix)) continue;
+      const n = parseInt(t.slipNumber.slice(prefix.length), 10);
+      if (Number.isFinite(n) && n > max) max = n;
+    }
+    return `${prefix}${String(max + 1).padStart(4, '0')}`;
+  }
+
+  /** Plant timezone (IST) HH:mm — the slip dispatch time of the day. */
+  private istHHmm(): string {
+    return new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(new Date());
+  }
+
+  /**
+   * Auto-derive/upsert the dispatch trip slip for a sale. Every sale carries
+   * a vehicle (compulsory in the Sales form): CREATE posts the slip as
+   * 'loading' in the Trip Slips Log; EDIT updates the linked slip IN PLACE,
+   * keyed on slip.saleId — a vehicle change moves the slip to the new truck,
+   * the load weight (order-level master value), distance and site address
+   * mirror the sale, and the operator-managed fields (status, time, fuel
+   * issue, advance) are never clobbered. Nothing but FKs + operational trip
+   * data is persisted: driver/party/material resolve from the masters at
+   * read (hydrateTripSlip). A slip whose sale no longer carries a vehicle
+   * is removed.
+   */
+  private syncSaleTripSlip(sale: Sale): void {
+    const linked = (this.data.tripSlips || []).find((t) => t.saleId === sale.id);
+    // No attachment at all → no trip. Two attachment modes:
+    //   own fleet  — vehicleId FK (trip slip carries the FK + the assigned driver)
+    //   outsourced — typed vehicleNo, no fleet FK (slip has an unassigned driver)
+    const isOutsourced = !sale.vehicleId && !!sale.vehicleNo;
+    if (!sale.vehicleId && !isOutsourced) {
+      if (linked) this.deleteTripSlip(linked.id);
+      return;
+    }
+    const vehicle = sale.vehicleId
+      ? this.data.vehicles.find((v) => v.id === sale.vehicleId)
+      : undefined;
+    const driverId = vehicle?.currentDriverId || '';
+    const party = this.data.parties.find((p) => p.id === sale.partyId);
+    const lines = sale.items || [];
+    // FK-only storage (Golden Rule §2): no persisted display copies — the
+    // driver/party names resolve from the masters at read, the material from
+    // the sale's items (the load weight is ONE common order-level value)
+    const weightSum = Math.round((sale.weightTonnes !== undefined
+      ? Number(sale.weightTonnes)
+      : lines.reduce((sum, li) => sum + (Number(li.weightTonnes) || 0), 0)) * 1000) / 1000;
+    const fields: Partial<TripSlip> = {
+      date: sale.date,
+      // Outsourced slips carry no fleet FK — the typed plate is the vehicle
+      vehicleId: sale.vehicleId || '',
+      vehicleNo: vehicle?.vehicleNo || sale.vehicleNo || '—',
+      driverId,
+      tripType: 'outward',
+      saleId: sale.id, // upsert key — in-place updates match on this
+      orderId: sale.id,
+      orderNumber: sale.saleNumber,
+      partyId: sale.partyId,
+      netWeightTonnes: weightSum,
+      destination: sale.siteAddress || (party ? party.tradeName || party.name : 'Site delivery'),
+      distanceKm: sale.distanceKm,
+      notes: sale.notes,
+    };
+    if (linked) {
+      // In-place upsert — status/time/advances stay the operator's
+      this.updateTripSlip(linked.id, fields);
+    } else {
+      this.createTripSlip({
+        slipNumber: this.nextSlipNumber(),
+        time: this.istHHmm(),
+        status: 'loading',
+        fuelIssuedLiters: 0,
+        cashAdvanceRupees: 0,
+        ...fields,
+      } as Omit<TripSlip, 'id' | 'createdAt'>);
+      this.logAudit('CREATE', 'TRIP_SLIP', `sale-${sale.id}`,
+        `Auto-derived dispatch trip for sale ${sale.saleNumber} (${fields.vehicleNo} → ${fields.destination})`);
+    }
+  }
+
   public createTripSlip(data: Omit<TripSlip, 'id' | 'createdAt'>): TripSlip {
     const newSlip: TripSlip = { ...data, id: `ts-${Date.now()}`, createdAt: new Date().toISOString() };
     this.data.tripSlips.unshift(newSlip);
@@ -3265,9 +3473,62 @@ class ServerLocalDatabase {
     const emp = this.data.employees[idx];
     this.data.employees.splice(idx, 1);
     this.detachEmployeeDocuments(id);
+    // The employee's vehicles lose their driver (FK released, not deleted)
+    this.data.vehicles.forEach((v, i) => {
+      if (v.currentDriverId === id) {
+        this.data.vehicles[i] = { ...v, currentDriverId: undefined };
+        liveSyncVehicle(this.data.vehicles[i]);
+      }
+    });
     this.save();
     liveSyncEmployee(emp, true);
     return true;
+  }
+
+  /**
+   * Driver ↔ vehicle assignment (the driver-side write surface). The FK
+   * lives on the vehicle row (currentDriverId) — NEVER an assigned-vehicle
+   * copy on the employee. `vehicleId` CLAIMS that vehicle for the driver
+   * (reassigning it from a previous driver — fleet = one active driver per
+   * vehicle) and releases every other vehicle the driver held;
+   * `releaseVehicleId` frees ONE vehicle the driver holds.
+   */
+  public assignEmployeeVehicle(
+    empId: string,
+    opts: { vehicleId?: string; releaseVehicleId?: string }
+  ): Vehicle[] {
+    const emp = this.data.employees.find((e) => e.id === empId);
+    if (!emp) throw new Error(`Employee ${empId} not found.`);
+    if (opts.vehicleId && !this.data.vehicles.some((v) => v.id === opts.vehicleId)) {
+      throw new Error(`Vehicle ${opts.vehicleId} not found.`);
+    }
+    const touched: Vehicle[] = [];
+    const release = (idx: number) => {
+      this.data.vehicles[idx] = { ...this.data.vehicles[idx], currentDriverId: undefined };
+      liveSyncVehicle(this.data.vehicles[idx]);
+      touched.push(this.data.vehicles[idx]);
+    };
+    if (opts.releaseVehicleId) {
+      const idx = this.data.vehicles.findIndex(
+        (v) => v.id === opts.releaseVehicleId && v.currentDriverId === empId
+      );
+      if (idx !== -1) release(idx);
+    } else {
+      // Release the driver's other vehicles, then claim the chosen one
+      this.data.vehicles.forEach((v, i) => {
+        if (v.currentDriverId === empId && v.id !== opts.vehicleId) release(i);
+      });
+      if (opts.vehicleId) {
+        const idx = this.data.vehicles.findIndex((v) => v.id === opts.vehicleId);
+        if (this.data.vehicles[idx].currentDriverId !== empId) {
+          this.data.vehicles[idx] = { ...this.data.vehicles[idx], currentDriverId: empId };
+          liveSyncVehicle(this.data.vehicles[idx]);
+          touched.push(this.data.vehicles[idx]);
+        }
+      }
+    }
+    if (touched.length > 0) this.save();
+    return touched;
   }
 
   public getAttendance(): EmployeeAttendance[] {

@@ -304,6 +304,7 @@ export interface OrderItem {
   amount: number;
   gstRate?: number; // GST slab % for this line (each item can carry its own slab)
   location?: string; // Location dispatched from (Sales) or received into (Purchase)
+  weightTonnes?: number; // Line load weight in tonnes (sales dispatch planning)
   receivedQuantity?: number; // Actual received quantity in goods receipt
   shortageQuantity?: number; // Discrepancy (quantity - receivedQuantity)
   overageQuantity?: number; // Excess quantity if received > ordered
@@ -361,8 +362,17 @@ export interface Order {
   taxAmount: number;
   totalAmount: number;
   notes?: string;
+  /** Dispatch trip details (sales view) — FK + hydrated vehicle/driver + plan */
+  vehicleId?: string;
+  siteAddress?: string;
+  distanceKm?: number;
   vehicleNo?: string;
   driverName?: string;
+  /** Fleet cost (transportation) — ₹ rate per TONNE per KM priced PER SALE
+   *  (never per vehicle); transportCharges = weightTonnes × distanceKm × rate.
+   *  Renders as its own row on the document with its own GST slab. */
+  freightRatePerTonne?: number;
+  freightGstRate?: number;
   transportCharges?: number;
   paymentMode: PaymentMode;
   accountId: string; // Account where money is added (Sales) or deducted (Purchase)
@@ -562,15 +572,26 @@ export interface TripSlip {
   time: string;
   vehicleId: string;
   vehicleNo: string;
-  driverId: string;
-  driverName: string;
+  driverId: string; // FK employees — the driver display name JOINs at read
+  /** Hydrated read-time (JOIN employees by driverId — never persisted) */
+  driverName?: string;
   tripType: 'outward' | 'inward' | 'internal';
   orderId?: string;
   orderNumber?: string;
+  /** FK parties — the sale's party; the display name JOINs the parties master at read */
+  partyId?: string;
+  /** Hydrated read-time (JOIN parties by partyId — never persisted) */
   partyName?: string;
-  materialName: string;
+  /** FK sales_orders — set when the slip was auto-derived from a sales order;
+   *  sale edits upsert the slip fields in place against this key. */
+  saleId?: string;
+  /** Manual (non-order) slips capture it; sale-derived slips resolve their
+   *  material from the sale's items (order weight is ONE common value). */
+  materialName?: string;
   netWeightTonnes: number;
   destination: string;
+  /** Travel distance (km) carried over from the sale's dispatch plan */
+  distanceKm?: number;
   status: 'loading' | 'transit' | 'delivered' | 'closed';
   fuelIssuedLiters: number;
   cashAdvanceRupees: number;
@@ -818,6 +839,9 @@ export interface UserPermissions {
   manage_sales: boolean;
   manage_purchases: boolean;
   manage_fleet: boolean;
+  /** Tyre Management is now its OWN feature (split from Fleet, 2026-10-23):
+   *  tyre fleet + transit view live under this gate. */
+  manage_tyres: boolean;
   manage_emi: boolean;
   dispatch_trips: boolean;
   manage_employees: boolean;
@@ -879,6 +903,9 @@ export interface SalesOrderItem {
   gstRate?: number; // GST slab % for this line
   locationId?: string; // FK item_locations — dispatched from
   itemNotes?: string;
+  /** Load weight of THIS line in metric tonnes — summing across the sale's
+   *  lines gives the trip-load weight carried on the dispatch trip slip. */
+  weightTonnes?: number;
 }
 
 export interface SalesOrderStage {
@@ -906,8 +933,25 @@ export interface Sale {
   date: string; // YYYY-MM-DD (master creation date)
   status: OrderStatus; // computed server-side from stage history + flags
   notes?: string;
+  /** FK vehicles — the fleet truck attached at creation (COMPULSORY; every sale
+   *  carries its own dispatch trip). Multiple sales may share one truck. */
+  vehicleId?: string;
+  /** Drop / unloading site address for this sale's trip */
+  siteAddress?: string;
+  /** Travel distance the vehicle is expected to cover (km) */
+  distanceKm?: number;
+  /** Load weight of the whole order — ONE common value for ALL items
+   *  (persisted; legacy rows fall back to per-line weight sums at read) */
+  weightTonnes?: number;
+  // Hydrated read-time (JOIN vehicles + employees via vehicleId): the truck's
+  // number and its CURRENT assigned driver resolve at read — renames propagate.
   vehicleNo?: string;
   driverName?: string;
+  /** Fleet cost (transportation) — ₹ rate per TONNE per KM priced PER SALE
+   *  (never per vehicle); transportCharges = weightTonnes × distanceKm × rate.
+   *  Renders as its own row on the document with its own GST slab. */
+  freightRatePerTonne?: number;
+  freightGstRate?: number;
   transportCharges?: number;
   // One-shot application flags — stock / cash may post at most ONCE per sale;
   // the user decides WHERE (which stage save) via the toggle in the UI.
@@ -1052,6 +1096,8 @@ export interface SalesOrderItemInput {
   locationName?: string;
   locationId?: string;
   itemNotes?: string;
+  /** Line load weight in metric tonnes (dispatch trip planning) */
+  weightTonnes?: number;
 }
 
 export interface PurchaseOrderItemInput extends SalesOrderItemInput {

@@ -507,6 +507,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
             gstRate: li.gst_rate !== null && li.gst_rate !== undefined ? numOr(li.gst_rate) : undefined,
             locationId: li.location_id || undefined,
             itemNotes: li.item_notes || undefined,
+            weightTonnes: li.weight_tonnes !== null && li.weight_tonnes !== undefined ? numOr(li.weight_tonnes) : undefined,
           });
           saleItemsByBucket.set(key, list);
         }
@@ -538,6 +539,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
           // stage linkage fall back to the master bucket.
           const latestWithRows = [...stages].reverse().find((st) => (st.items || []).length > 0);
           const items = latestWithRows ? (latestWithRows.items as SalesOrderItem[]) : saleBucket(so.id);
+          // Load weight = the persisted ORDER-LEVEL value (one common weight
+          // for the whole order); legacy rows fall back to per-line sums
+          const lineWeightSum = items.reduce((sum, li) => sum + (numOr(li.weightTonnes)), 0);
           return {
             id: so.id,
             saleNumber: so.sale_number,
@@ -546,9 +550,15 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
             date: so.date,
             status: so.status || 'pending',
             notes: so.notes || undefined,
+            vehicleId: so.vehicle_id || undefined,
+            siteAddress: so.site_address || undefined,
+            distanceKm: so.distance_km !== null && so.distance_km !== undefined ? numOr(so.distance_km) : undefined,
+            weightTonnes: so.weight_tonnes !== null && so.weight_tonnes !== undefined ? numOr(so.weight_tonnes) : (lineWeightSum > 0 ? lineWeightSum : undefined),
             vehicleNo: so.vehicle_no || undefined,
             driverName: so.driver_name || undefined,
             transportCharges: numOr(so.transport_charges),
+            freightRatePerTonne: so.freight_rate_per_tonne !== null && so.freight_rate_per_tonne !== undefined ? numOr(so.freight_rate_per_tonne) : undefined,
+            freightGstRate: so.freight_gst_rate !== null && so.freight_gst_rate !== undefined ? numOr(so.freight_gst_rate) : undefined,
             inventoryApplied: Boolean(so.inventory_applied),
             cashApplied: Boolean(so.cash_applied),
             settlementType: so.settlement_type || (so.settlement_voucher_id ? 'account' : undefined),
@@ -734,21 +744,46 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
       }));
 
       // 10. Trip Slips & Tyres
+      // Sale master snapshot lookup — sale-derived slips re-hydrate their
+      // order link (orderId/orderNumber) from the sale master (trip_slips
+      // keeps ONLY the sale_id FK). Driver/party/material are FK-only (§2):
+      // driver_name/party_name are not stored — the driver name joins the
+      // employees master (hydrated after section 11 loads it), the party name
+      // the parties master (loaded in section 3), and a sale-derived slip's
+      // material resolves from the sale's items (order weight is ONE value).
+      const saleNumberById = new Map(sales.map((s) => [s.id, s.saleNumber]));
+      const partyNameById = new Map(parties.map((pt) => [pt.id, pt.tradeName || pt.name]));
+      // First material per sale — from the ASSEMBLED sales array (each sale's
+      // items are already its effective/latest stage's hydrated rows; reaching
+      // into the 8b bucket maps from here would be out of scope)
+      const firstMaterialBySaleId = new Map<string, string>();
+      for (const s of sales) {
+        const first = (s.items || []).find((li) => li.itemName);
+        if (first?.itemName) firstMaterialBySaleId.set(s.id, first.itemName);
+      }
       const [tripRows]: [any[], any] = await conn.query('SELECT * FROM trip_slips ORDER BY date DESC, created_at DESC');
       const tripSlips: TripSlip[] = tripRows.map((ts) => ({
         id: ts.id,
         slipNumber: ts.slip_number,
         date: ts.date,
         time: ts.time || '10:00',
-        vehicleId: ts.vehicle_id,
+        vehicleId: ts.vehicle_id || '',
         vehicleNo: ts.vehicle_number,
+        saleId: ts.sale_id || undefined,
+        // Sale-derived slips surface their sale order link from the FK;
+        // legacy/other linkages come from the persisted order columns
+        orderId: ts.order_id || ts.sale_id || undefined,
+        orderNumber: ts.order_number || (ts.sale_id && saleNumberById.get(ts.sale_id)) || undefined,
         driverId: ts.driver_id,
-        driverName: ts.driver_name,
         tripType: (ts.trip_type as any) || 'outward',
-        partyName: ts.party_name,
+        partyId: ts.party_id || undefined,
+        partyName: (ts.party_id && partyNameById.get(ts.party_id)) || undefined,
         destination: ts.destination,
-        materialName: ts.material_name,
+        // Sale-derived slips resolve their material from the sale items;
+        // manual slips keep the operator-entered text
+        materialName: (ts.sale_id && firstMaterialBySaleId.get(ts.sale_id)) || ts.material_name || undefined,
         netWeightTonnes: parseNum(ts.net_weight_tonnes),
+        distanceKm: ts.distance_km ? parseNum(ts.distance_km) : undefined,
         status: (ts.status as any) || 'transit',
         fuelIssuedLiters: parseNum(ts.fuel_issued_litres),
         cashAdvanceRupees: parseNum(ts.driver_advance),
@@ -799,6 +834,11 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
       // employee_name resolved from the just-fetched employees list (the
       // attendance table no longer stores it)
       const empNameById = new Map(employees.map((e) => [e.id, e.name]));
+      // Trip slip driver names (FK-only — driver_name is not a column):
+      // resolved here now that the employees master has loaded
+      for (const ts of tripSlips) {
+        if (ts.driverId) ts.driverName = empNameById.get(ts.driverId) || undefined;
+      }
       const attendance: EmployeeAttendance[] = attRows.map((a) => ({
         id: a.id,
         employeeId: a.employee_id,
@@ -1393,8 +1433,8 @@ export async function liveSyncSale(sale: Sale, isDelete = false) {
   if (!pool) return;
   try {
     await pool.query(
-      `REPLACE INTO sales_orders (id, sale_number, party_id, date, status, notes, vehicle_no, driver_name, transport_charges, inventory_applied, cash_applied, settlement_type, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `REPLACE INTO sales_orders (id, sale_number, party_id, date, status, notes, vehicle_id, site_address, distance_km, weight_tonnes, vehicle_no, driver_name, transport_charges, freight_rate_per_tonne, freight_gst_rate, inventory_applied, cash_applied, settlement_type, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sale.id,
         sale.saleNumber,
@@ -1402,9 +1442,15 @@ export async function liveSyncSale(sale: Sale, isDelete = false) {
         sale.date,
         sale.status || 'pending',
         sale.notes || null,
+        sale.vehicleId || null,
+        sale.siteAddress || null,
+        sale.distanceKm !== undefined && sale.distanceKm !== null ? sale.distanceKm : null,
+        sale.weightTonnes !== undefined && sale.weightTonnes !== null ? sale.weightTonnes : null,
         sale.vehicleNo || null,
         sale.driverName || null,
         numOr(sale.transportCharges),
+        (sale as any).freightRatePerTonne !== undefined && (sale as any).freightRatePerTonne !== null ? (sale as any).freightRatePerTonne : null,
+        (sale as any).freightGstRate !== undefined && (sale as any).freightGstRate !== null ? (sale as any).freightGstRate : null,
         sale.inventoryApplied ? 1 : 0,
         sale.cashApplied ? 1 : 0,
         (sale as any).settlementType || null,
@@ -1447,8 +1493,8 @@ export async function liveSyncSaleItems(saleId: string, items: SalesOrderItem[],
     }
     for (const li of items || []) {
       await pool.query(
-        `REPLACE INTO sales_order_items (id, sale_id, sales_order_stage_id, item_id, unit_id, quantity, rate, gst_rate, location_id, item_notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `REPLACE INTO sales_order_items (id, sale_id, sales_order_stage_id, item_id, unit_id, quantity, rate, gst_rate, location_id, item_notes, weight_tonnes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           li.id,
           saleId,
@@ -1460,6 +1506,7 @@ export async function liveSyncSaleItems(saleId: string, items: SalesOrderItem[],
           li.gstRate ?? null,
           li.locationId || null,
           li.itemNotes || null,
+          li.weightTonnes !== undefined && li.weightTonnes !== null ? numOr(li.weightTonnes) : null,
         ]
       );
     }
@@ -1777,28 +1824,36 @@ export async function liveSyncTripSlip(ts: TripSlip, isDelete = false) {
       await pool.query('DELETE FROM trip_slips WHERE id = ?', [ts.id]);
     } else {
       await pool.query(
-        `REPLACE INTO trip_slips (id, slip_number, date, vehicle_id, vehicle_number, driver_id, driver_name, party_id, party_name, destination, material_item_id, material_name, gross_weight_kg, tare_weight_kg, net_weight_kg, net_weight_tonnes, start_odometer, end_odometer, distance_km, fuel_issued_litres, driver_advance, toll_charges, freight_rate_per_tonne, total_freight_amount, status, weighbridge_slip_number, notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `REPLACE INTO trip_slips (id, slip_number, date, time, vehicle_id, vehicle_number, sale_id, order_id, order_number, driver_id, trip_type, party_id, destination, material_item_id, material_name, gross_weight_kg, tare_weight_kg, net_weight_kg, net_weight_tonnes, start_odometer, end_odometer, distance_km, fuel_issued_litres, driver_advance, toll_charges, freight_rate_per_tonne, total_freight_amount, status, weighbridge_slip_number, notes, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           ts.id,
           ts.slipNumber,
           ts.date,
-          ts.vehicleId,
+          ts.time || null,
+          ts.vehicleId || null, // FK — NULL for outsourced (typed-plate) slips
           ts.vehicleNo,
-          ts.driverId,
-          ts.driverName,
+          ts.saleId || null,
           ts.orderId || null,
-          ts.partyName || null,
+          ts.orderNumber || null,
+          ts.driverId || null,
+          ts.tripType || 'outward',
+          ts.partyId || null,
           ts.destination,
-          ts.orderId || 'item-mat',
-          ts.materialName,
+          null, // material_item_id — slips track the material name only
+          // Manual (non-order) slips keep their material text; sale-derived
+          // slips resolve their material from the sale items at read — never a
+          // persisted copy of a display name
+          ts.saleId ? null : (ts.materialName || null),
           (ts.netWeightTonnes || 0) * 1000,
           0,
           (ts.netWeightTonnes || 0) * 1000,
           ts.netWeightTonnes || 0,
           0,
           0,
-          0,
+          // Planned travel distance (the sale's plan, mirrored by the
+          // slip-derivation) — was hardcoded 0 here, zeroing every reload
+          ts.distanceKm !== undefined && ts.distanceKm !== null ? ts.distanceKm : 0,
           ts.fuelIssuedLiters || 0,
           ts.cashAdvanceRupees || 0,
           0,

@@ -736,6 +736,19 @@ class ApiClient {
     });
   }
 
+  /** Driver ↔ vehicle assignment from the employee's profile — server-side
+   *  claim/release on vehicles.currentDriverId. `{ vehicleId }` claims it
+   *  for the driver; `{ releaseVehicleId }` frees one held vehicle. */
+  public async assignEmployeeVehicle(
+    empId: string,
+    opts: { vehicleId?: string; releaseVehicleId?: string }
+  ): Promise<{ success: boolean; data: Vehicle[] }> {
+    return this.request<{ success: boolean; data: Vehicle[] }>(`/employees/staff/${empId}/assigned-vehicle`, {
+      method: 'PUT',
+      body: JSON.stringify(opts),
+    });
+  }
+
   public async getAttendance(
     params?: { date?: string; employeeId?: string; from?: string; to?: string }
   ): Promise<{ success: boolean; data: EmployeeAttendance[] }> {

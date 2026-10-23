@@ -160,9 +160,28 @@ export function OrdersView({
   const [formNotes, setFormNotes] = useState('');
   const [formOrderNumber, setFormOrderNumber] = useState('');
   const [formStage, setFormStage] = useState<SalesStage>('sales_order');
-  const [formVehicleNo, setFormVehicleNo] = useState('');
-  const [formDriverName, setFormDriverName] = useState('');
-  const [formTransportCharges, setFormTransportCharges] = useState('0');
+  // Dispatch & Trip Details (sales): the vehicle is COMPULSORY (every sale
+  // carries its own dispatch trip slip, auto-kept in step by the server on
+  // every save); the load weight is ONE common value for all items; distance
+  // + drop site address plan the trip.
+  const [formVehicleId, setFormVehicleId] = useState('');
+  const [vehPickerOpen, setVehPickerOpen] = useState(false);
+  const [vehPickerQuery, setVehPickerQuery] = useState('');
+  const vehPickerRef = React.useRef<HTMLDivElement | null>(null);
+  // Outsourced (market) vehicle: operator types the plate instead of picking
+  // a registered fleet vehicle — still auto-derives its trip slip (no FK)
+  const [vehOutsourced, setVehOutsourced] = useState(false);
+  const [formOutsourcedNo, setFormOutsourcedNo] = useState('');
+  const [formWeightTonnes, setFormWeightTonnes] = useState('');
+  const [formDistanceKm, setFormDistanceKm] = useState('');
+  const [formSiteAddress, setFormSiteAddress] = useState('');
+  // Fleet cost (priced PER SALE): rate ₹/tonne-km + GST slab are ALWAYS
+  // captured (saved with the sale); the INCLUDE TRANSPORT COST toggle gates
+  // whether the computed cost is added to the document. Outsourced vehicle
+  // disables all three (0 rate / 0 GST / toggle locked off).
+  const [includeTransportCost, setIncludeTransportCost] = useState(false);
+  const [formFreightRate, setFormFreightRate] = useState('');
+  const [formFreightGst, setFormFreightGst] = useState('0');
   const [formPaymentMode, setFormPaymentMode] = useState<any>('bank_transfer');
   const [formAccountId, setFormAccountId] = useState<string>('');
 
@@ -176,13 +195,23 @@ export function OrdersView({
   // on credit (party ledger only, no cash); 'account' = full flow (journal +
   // payment voucher into formAccountId). Once applied the section locks ON.
   const [formSettlementType, setFormSettlementType] = useState<'none' | 'credit' | 'account'>('none');
-  const [includeLogistics, setIncludeLogistics] = useState<boolean>(false);
 
-  // Fetch available accounts, vehicles, drivers & storage locations for dropdown selection
+  // Fetch available accounts, vehicles & storage locations for dropdown selection
   const accounts = useMemo(() => localDb.getAccounts(), [isFormOpen]);
   const registeredVehicles = useMemo(() => localDb.getVehicles(), [isFormOpen]);
-  const registeredDrivers = useMemo(() => localDb.getDrivers(), [isFormOpen]);
   const availableLocations = useMemo(() => localDb.getLocations(), [isFormOpen]);
+
+  // Close the vehicle picker popover when clicking outside it
+  React.useEffect(() => {
+    if (!vehPickerOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (vehPickerRef.current && !vehPickerRef.current.contains(e.target as Node)) {
+        setVehPickerOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [vehPickerOpen]);
 
   // Preview modal states
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
@@ -286,10 +315,14 @@ export function OrdersView({
     setFormPartyId(order.partyId === 'unassigned' ? '' : (order.partyId || ''));
     setFormOrderNumber(suggestStageNumber('sales', stageType));
     setFormNotes('');
-    setFormVehicleNo(order.vehicleNo || '');
-    setFormDriverName(order.driverName || '');
-    setFormTransportCharges(String(order.transportCharges || 0));
-    setIncludeLogistics(Number(order.transportCharges) > 0 || Boolean(order.vehicleNo || order.driverName));
+    // Stage-issue form: fleet-cost states are MASTER-level — reset so leftover
+    // values from a previous open can't paint phantom rows into the summary
+    setIncludeTransportCost(false);
+    setFormFreightRate('');
+    setFormFreightGst('0');
+    setFormWeightTonnes('');
+    setFormDistanceKm('');
+    setFormSiteAddress('');
     // Payment flow: once applied, the section locks ON and every later save
     // echoes the stored flow verbatim (never 'none' — the final-stage journal
     // voucher must keep upserting). A payment flow is COMPULSORY at the
@@ -462,9 +495,19 @@ export function OrdersView({
     setFormItems([{ itemId: '', quantity: '', rate: '', location: '', gstRate: '' }]);
     setFormNotes('');
     setFormStage(stage || 'quotation');
-    setFormVehicleNo('');
-    setFormDriverName('');
-    setFormTransportCharges('0');
+    // Dispatch & Trip Details reset (sales): vehicle is picked per sale;
+    // the drop site pre-fills from the party once one is selected
+    setFormVehicleId('');
+    setVehPickerOpen(false);
+    setVehPickerQuery('');
+    setVehOutsourced(false);
+    setFormOutsourcedNo('');
+    setFormWeightTonnes('');
+    setFormDistanceKm('');
+    setFormSiteAddress('');
+    setIncludeTransportCost(false);
+    setFormFreightRate('');
+    setFormFreightGst('0');
     setUpdateInventory(false);
     setUpdateCash(false);
     // A payment flow is COMPULSORY at the invoice stage — a sale created
@@ -570,13 +613,38 @@ export function OrdersView({
     setFormDate(order.date);
     setFormPartyId(order.partyId);
     setFormNotes(order.notes || '');
+    // Dispatch & Trip Details prefill — the vehicle picker shows the CURRENT
+    // attachment (its own row stays selectable even when another sale uses it);
+    // a sale with a typed plate and no FK is in OUTSOURCED mode
+    setFormVehicleId(order.vehicleId || '');
+    setVehPickerOpen(false);
+    setVehPickerQuery('');
+    setVehOutsourced(!order.vehicleId && Boolean(order.vehicleNo));
+    setFormOutsourcedNo(order.vehicleNo || '');
+    setFormWeightTonnes(order.weightTonnes !== undefined ? String(order.weightTonnes) : '');
+    setFormDistanceKm(order.distanceKm !== undefined ? String(order.distanceKm) : '');
+    setFormSiteAddress(order.siteAddress || '');
+    // Fleet-cost prefill: a sale carrying transport charges (or a saved rate)
+    // opens with the checkbox ON and the stored rate/slab. Legacy rows without
+    // a stored rate back-compute it from their charge ÷ (weight × distance).
+    // NOTE: freight fields can arrive as null on the wire — String(null) would
+    // poison the numeric states into "NaN", so coerce through toNumStr.
+    const toNumStr = (v: any): string => {
+      const n = Number(v);
+      return v === undefined || v === null || !Number.isFinite(n) ? '' : String(n);
+    };
+    const lcW = Number(order.weightTonnes) || 0;
+    const lcD = Number(order.distanceKm) || 0;
+    const lcRate = toNumStr(order.freightRatePerTonne);
+    setIncludeTransportCost(Number(order.transportCharges) > 0 || lcRate !== '');
+    setFormFreightRate(lcRate || (Number(order.transportCharges) > 0 && lcW > 0 && lcD > 0
+      ? String(Math.round(Number(order.transportCharges) / (lcW * lcD) * 100) / 100)
+      : ''));
+    setFormFreightGst(toNumStr(order.freightGstRate) || '0');
     // Prefill with the CURRENT stage's document number (sales-order number
     // at SO stage, quotation number at quotation stage) — number is immutable
     setFormOrderNumber((order.stageNumbers || [])[((order.stageNumbers || []).length) - 1]?.number || order.orderNumber);
     setFormStage((order.stage || 'sales_order') as SalesStage);
-    setFormVehicleNo(order.vehicleNo || '');
-    setFormDriverName(order.driverName || '');
-    setFormTransportCharges(String(order.transportCharges || 0));
     // Inventory switch defaults OFF on create AND edit (user rule) — the
     // user enables it when they want the one-shot dispatch/inward to post.
     setUpdateInventory(false);
@@ -674,17 +742,33 @@ export function OrdersView({
       taxAmount += (lineTotal * gstRate) / 100;
     });
 
-    const transportCharges = includeLogistics ? (Number(formTransportCharges) || 0) : 0;
+    // Legacy rows may already carry transport charges — an edit keeps them
+    // verbatim ONLY when the fleet-cost switch is off; with it on, the freight
+    // is recomputed from weight × distance × rate (priced PER SALE).
+    // toNum never lets a null/garbage state produce NaN anywhere downstream
+    // (the wire can carry null freight fields — string states must sanitize).
+    const toNum = (v: any): number => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+    const roundCost = (n: number) => Math.round(n * 100) / 100;
+    const fleetCost = includeTransportCost && !vehOutsourced
+      ? roundCost(toNum(formWeightTonnes) * toNum(formDistanceKm) * toNum(formFreightRate))
+      : 0;
+    // Fleet-cost row carries its OWN GST slab (its own document row)
+    const freightGstAmount = includeTransportCost && !vehOutsourced
+      ? roundCost(fleetCost * toNum(formFreightGst) / 100)
+      : 0;
     // Weighted-average slab kept on the order row for single-rate consumers
     // (detail view / print); individual slabs live on each item row.
     // All figures are approximated to 2 decimal places (paise).
     const subtotal2 = round2(subtotal);
     const taxAmount2 = round2(taxAmount);
     const blendedGstRate = subtotal2 > 0 ? Math.round((taxAmount2 / subtotal2) * 10000) / 100 : 0;
-    const totalAmount = round2(subtotal2 + taxAmount2 + transportCharges);
+    const totalAmount = round2(subtotal2 + taxAmount2 + fleetCost + freightGstAmount);
 
-    return { subtotal: subtotal2, taxAmount: taxAmount2, totalAmount, transportCharges, blendedGstRate };
-  }, [formItems, formTransportCharges, includeLogistics]);
+    return { subtotal: subtotal2, taxAmount: taxAmount2, totalAmount, transportCharges: fleetCost, blendedGstRate, fleetGstAmount: freightGstAmount, fleetCost };
+  }, [formItems, includeTransportCost, vehOutsourced, formWeightTonnes, formDistanceKm, formFreightRate, formFreightGst, editingOrder?.transportCharges]);
 
   // Save/Submit order form (SALES — create master+first stage, or master edit)
   const handleSubmitOrder = (e: React.FormEvent) => {
@@ -714,6 +798,34 @@ export function OrdersView({
     if (validRows.length === 0) {
       setFormError('Please add at least one valid item with a quantity greater than zero.');
       return;
+    }
+
+    // Dispatch & trip details (sales): every sale carries a dispatch trip —
+    // an own fleet vehicle (FK) or an OUTSOURCED one (typed plate).
+    // (Stage-issue saves leave the master untouched — no vehicle requirement.)
+    if (formType === 'sales' && !stageIssueCtx) {
+      if (vehOutsourced) {
+        if (!formOutsourcedNo.trim()) {
+          setFormError('Please enter the outsourced vehicle number.');
+          return;
+        }
+      } else if (!formVehicleId || !registeredVehicles.some((v) => v.id === formVehicleId)) {
+        setVehPickerOpen(true);
+        setFormError('Please attach a fleet vehicle or switch to an outsourced vehicle — sales orders always carry a dispatch trip.');
+        return;
+      }
+    }
+
+    // Fleet cost needs its computation basis: load weight, distance and rate
+    if (formType === 'sales' && !stageIssueCtx && includeTransportCost && !vehOutsourced) {
+      if (!(Number(formWeightTonnes) > 0) || !(Number(formDistanceKm) > 0)) {
+        setFormError('Fleet Cost needs the load weight (MT) and trip distance (km) to compute weight × distance × rate.');
+        return;
+      }
+      if (!(Number(formFreightRate) > 0)) {
+        setFormError('Please enter the Fleet Cost rate per tonne per KM.');
+        return;
+      }
     }
 
     const party = parties.find((p) => p.id === formPartyId);
@@ -786,9 +898,21 @@ export function OrdersView({
         partyId: formPartyId,
         date: formDate,
         notes: formNotes.trim(),
-        vehicleNo: includeLogistics && formVehicleNo.trim() ? formVehicleNo.trim() : undefined,
-        driverName: includeLogistics && formDriverName.trim() ? formDriverName.trim() : undefined,
-        transportCharges: includeLogistics ? (Number(formTransportCharges) || 0) : 0,
+        // Dispatch attachment (FK authority): the server re-derives the trip
+        // slip from this — vehicle change moves the slip, weight/distance/
+        // site mirror the sale. An OUTSOURCED sale clears the FK and stores
+        // the typed plate instead (vehicleNo).
+        vehicleId: vehOutsourced ? '' : formVehicleId,
+        vehicleNo: vehOutsourced ? formOutsourcedNo.trim().toUpperCase() : '',
+        siteAddress: formSiteAddress.trim() || undefined,
+        distanceKm: Number(formDistanceKm) || undefined,
+        // ONE common load weight for the whole order (rides the sale master)
+        weightTonnes: Number(formWeightTonnes) || undefined,
+        // Fleet cost (per-sale): computed as weight × distance × rate; the
+        // cost row carries its own GST slab on the document
+        transportCharges: formCalculations.transportCharges,
+        freightRatePerTonne: vehOutsourced ? 0 : (Number(formFreightRate) || undefined),
+        freightGstRate: vehOutsourced ? 0 : (Number(formFreightGst) >= 0 ? Number(formFreightGst) : undefined),
         items: itemsList,
         subtotal: formCalculations.subtotal,
         taxAmount,
@@ -805,9 +929,18 @@ export function OrdersView({
         partyId: formPartyId,
         date: formDate,
         notes: formNotes.trim(),
-        vehicleNo: includeLogistics && formVehicleNo.trim() ? formVehicleNo.trim() : undefined,
-        driverName: includeLogistics && formDriverName.trim() ? formDriverName.trim() : undefined,
-        transportCharges: includeLogistics ? (Number(formTransportCharges) || 0) : 0,
+        // Dispatch attachment — own fleet (FK) or OUTSOURCED (typed plate)
+        vehicleId: vehOutsourced ? '' : formVehicleId,
+        vehicleNo: vehOutsourced ? formOutsourcedNo.trim().toUpperCase() : '',
+        siteAddress: formSiteAddress.trim() || undefined,
+        distanceKm: Number(formDistanceKm) || undefined,
+        // ONE common load weight for the whole order (rides the sale master)
+        weightTonnes: Number(formWeightTonnes) || undefined,
+        // Fleet cost (per-sale): computed as weight × distance × rate; the
+        // cost row carries its own GST slab on the document
+        transportCharges: formCalculations.transportCharges,
+        freightRatePerTonne: vehOutsourced ? 0 : (Number(formFreightRate) || undefined),
+        freightGstRate: vehOutsourced ? 0 : (Number(formFreightGst) >= 0 ? Number(formFreightGst) : undefined),
         items: itemsList,
         subtotal: formCalculations.subtotal,
         taxAmount,
@@ -1660,7 +1793,20 @@ export function OrdersView({
                   disabled={Boolean(editingOrder) || Boolean(stageIssueCtx)}
                   title={(editingOrder || stageIssueCtx) ? 'Party is locked once the sale is created against it' : undefined}
                   value={formPartyId}
-                  onChange={(e) => setFormPartyId(e.target.value)}
+                  onChange={(e) => {
+                    setFormPartyId(e.target.value);
+                    // Pre-fill the drop site from the party's address once,
+                    // leaving the operator free to edit it per sale
+                    if (formType === 'sales' && !formSiteAddress.trim() && ! editingOrder) {
+                      const sel = parties.find((p) => p.id === e.target.value);
+                      if (sel?.address) {
+                        setFormSiteAddress(
+                          [sel.address.street, sel.address.city, `${sel.address.state} ${sel.address.pincode}`.trim()]
+                            .filter(Boolean).join(', ')
+                        );
+                      }
+                    }
+                  }}
                   className={`w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${
                     (editingOrder || stageIssueCtx) ? 'opacity-60 cursor-not-allowed' : ''
                   }`}
@@ -2179,127 +2325,300 @@ export function OrdersView({
                 </div>
               )}
 
-              {/* Transport & Logistics Section (Optional Switch for Sales) */}
-              {formType === 'sales' && (
-                <div className="hidden bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3">
+              {/* Dispatch & Trip Details (sales) — a fleet vehicle is
+                  COMPULSORY: every sale carries its own dispatch trip slip,
+                  auto-derived in the Trip Slips Log and updated in place on
+                  every save. ONE common load weight for all items; distance +
+                  drop site plan the trip. Hidden in stage-issue mode (the
+                  master is untouched there). */}
+              {formType === 'sales' && !stageIssueCtx && (
+                <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3">
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <div className="flex items-center gap-2">
-                      <div className={`p-2 rounded-xl transition-colors ${includeLogistics ? 'bg-[var(--color-primary-container)] text-[var(--color-primary)]' : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'}`}>
+                      <div className="p-2 rounded-xl bg-[var(--color-primary-container)] text-[var(--color-primary)]">
                         <Truck className="w-4 h-4" />
                       </div>
                       <div>
                         <h4 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
-                          Transportation & Dispatch Logistics
+                          Dispatch & Trip Details
                         </h4>
                         <p className="text-[10px] text-[var(--color-on-surface-variant)]">
-                          {includeLogistics
-                            ? 'Assign registered driver, fleet vehicle, and freight charges to adjust invoice totals'
-                            : 'No logistics assigned (direct yard pickup / contractor transport)'}
+                          Attach the fleet vehicle — its trip slip is derived in the Trip Slips Log automatically
                         </p>
                       </div>
                     </div>
+                    {Number(formDistanceKm) > 0 && (
+                      <span className="text-[10px] font-bold text-[var(--color-on-surface-variant)]">
+                        {(Number(formWeightTonnes) || 0).toFixed(2)} MT load • {formDistanceKm} km
+                      </span>
+                    )}
+                  </div>
 
-                    {/* Toggle Switch (disabled for now — logistics coming soon) */}
-                    <label className="inline-flex items-center gap-2.5 select-none opacity-60">
-                      <span className="text-xs font-bold text-[var(--color-on-surface)]">
-                        {includeLogistics ? 'Logistics Added' : 'No Transport'}
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4 pt-1 border-t border-[var(--color-outline-variant)]/60" ref={vehPickerRef}>
+                    {/* Vehicle — searchable picker (one truck may carry many open sales),
+                        with an OUTSOURCED mode where the operator types the plate */}
+                    <div className="relative">
+                      <label className="block text-[11px] font-bold text-[var(--color-on-surface-variant)] mb-1">Fleet Vehicle *</label>
+                      {vehOutsourced ? (
+                        <div className="space-y-1">
+                          <input
+                            type="text"
+                            autoFocus
+                            placeholder="e.g. RJ-14-AB-9012 (outsourced)"
+                            value={formOutsourcedNo}
+                            onChange={(e) => setFormOutsourcedNo(e.target.value.toUpperCase())}
+                            className="w-full px-3 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-primary)] rounded-lg text-xs font-mono font-bold text-[var(--color-on-surface)] focus:outline-none"
+                            title="Outsourced / market vehicle — trip slip derives from this typed plate"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setVehOutsourced(false);
+                              setFormOutsourcedNo('');
+                              setVehPickerOpen(true);
+                            }}
+                            className="text-[10px] font-bold text-[var(--color-primary)] hover:opacity-80"
+                          >
+                            Use a registered fleet vehicle instead
+                          </button>
+                        </div>
+                      ) : vehPickerOpen ? (
+                        <input
+                          type="text"
+                          autoFocus
+                          placeholder="Search vehicle number, type or driver…"
+                          value={vehPickerQuery}
+                          onChange={(e) => setVehPickerQuery(e.target.value)}
+                          className="w-full px-3 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-primary)] rounded-lg text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => { setVehPickerOpen(true); setVehPickerQuery(''); }}
+                          className="w-full px-3 py-2 border border-[var(--color-outline-variant)] rounded-lg text-xs text-left flex items-center justify-between gap-2 bg-[var(--color-surface-container-lowest)] transition-colors"
+                        >
+                          {(() => {
+                            const sel = registeredVehicles.find((v) => v.id === formVehicleId);
+                            return sel ? (
+                              <span className="min-w-0">
+                                <span className="font-mono font-black text-[var(--color-primary)] truncate">{sel.vehicleNo}</span>
+                                <span className="text-[10px] text-[var(--color-on-surface-variant)] ml-1.5">{sel.type.toUpperCase()}</span>
+                              </span>
+                            ) : (
+                              <span className="text-[var(--color-on-surface-variant)] font-medium">Search & attach a vehicle…</span>
+                            );
+                          })()}
+                          <Truck className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
+                        </button>
+                      )}
+                      {vehPickerOpen && (
+                        <div
+                          className="absolute left-0 right-0 top-full z-30 max-h-48 overflow-y-auto rounded-lg border border-[var(--color-outline-variant)] bg-[var(--color-surface-container-lowest)] divide-y divide-[var(--color-outline-variant)] shadow-lg"
+                        >
+                          {(() => {
+                            const q = vehPickerQuery.trim().toLowerCase();
+                            const matches = registeredVehicles
+                              .filter((v) =>
+                                !q ||
+                                v.vehicleNo.toLowerCase().includes(q) ||
+                                v.type.toLowerCase().includes(q) ||
+                                (v.currentDriverName || '').toLowerCase().includes(q))
+                              .sort((a, b) => (a.currentDriverName ? 0 : 1) - (b.currentDriverName ? 0 : 1));
+                            if (matches.length === 0 && !/out|market|hire|ext|third/.test(q)) {
+                              return (
+                                <div className="p-4 text-center">
+                                  <p className="text-xs font-bold text-[var(--color-on-surface)]">No vehicles found</p>
+                                  <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
+                                    Register one under Logistics → Vehicles & Machinery, or choose the Outsourced option.
+                                  </p>
+                                </div>
+                              );
+                            }
+                            return (
+                              <>
+                              {/* OUTSOURCED — operator types the plate instead of
+                                  picking a registered fleet vehicle */}
+                              {(!q || /out|market|hire|ext|third/.test(q)) && (
+                                <button
+                                  key="__outsourced__"
+                                  type="button"
+                                  onClick={() => {
+                                    setVehOutsourced(true);
+                                    setFormVehicleId('');
+                                    setFormOutsourcedNo('');
+                                    setVehPickerOpen(false);
+                                    setVehPickerQuery('');
+                                  }}
+                                  className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left border-t border-[var(--color-outline-variant)]/50 first:border-t-0 bg-[var(--color-secondary-container)]/40 hover:bg-[var(--color-secondary-container)]/60 transition-colors"
+                                >
+                                  <span className="min-w-0">
+                                    <span className="text-xs font-black text-[var(--color-on-surface)] block">Outsourced / Market Vehicle</span>
+                                    <span className="text-[10px] text-[var(--color-on-surface-variant)] block">
+                                      Type the vehicle number yourself — no fleet vehicle attached
+                                    </span>
+                                  </span>
+                                  <Truck className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
+                                </button>
+                              )}
+                              {matches.map((v) => (
+                              <button
+                                key={v.id}
+                                type="button"
+                                onClick={() => {
+                                  setFormVehicleId(v.id);
+                                  setVehPickerOpen(false);
+                                  setVehPickerQuery('');
+                                }}
+                                className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-left transition-colors ${
+                                  formVehicleId === v.id ? 'bg-[var(--color-primary-container)]/40' : 'hover:bg-[var(--color-surface-container)]'
+                                }`}
+                              >
+                                <span className="min-w-0">
+                                  <span className="font-mono text-xs font-black text-[var(--color-primary)] block truncate">{v.vehicleNo}</span>
+                                  <span className="text-[10px] text-[var(--color-on-surface-variant)] block truncate">
+                                    {v.type.toUpperCase()}{v.costPerKm !== undefined ? ` • ₹${v.costPerKm}/km` : ''}{v.notes ? ` • ${v.notes}` : ''}
+                                  </span>
+                                </span>
+                                <span className="text-[9px] font-bold text-[var(--color-on-surface-variant)] shrink-0 truncate max-w-[120px]">
+                                  {v.currentDriverName || 'No driver'}
+                                </span>
+                              </button>
+                            ))}
+                              </>
+                            );
+                          })()}
+                        </div>
+                      )}
+                      {/* Outsourced tip when no fleet vehicles are registered */}
+                      {registeredVehicles.length === 0 && (
+                        <p className="text-[10px] text-[var(--color-error)] mt-1">
+                          No fleet vehicles registered yet — open the picker and choose the Outsourced option to type a vehicle number, or add one under Logistics → Vehicles & Machinery.
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Trip plan: ONE common load weight + distance + drop site (pre-filled from the party) */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-[var(--color-on-surface-variant)] mb-1">Load Weight (MT)</label>
+                      <input
+                        type="number"
+                        step="any"
+                        placeholder="e.g. 24.50"
+                        value={formWeightTonnes}
+                        onChange={(e) => setFormWeightTonnes(e.target.value)}
+                        className="w-full px-3 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                        title="Total load weight of this order in metric tonnes — ONE value for all its items; rides the dispatch trip slip"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-[var(--color-on-surface-variant)] mb-1">Distance (km)</label>
+                      <input
+                        type="number"
+                        step="any"
+                        placeholder="e.g. 42"
+                        value={formDistanceKm}
+                        onChange={(e) => setFormDistanceKm(e.target.value)}
+                        className="w-full px-3 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-[var(--color-on-surface-variant)] mb-1">Site / Drop Address</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. NH-48 Expressway Site, Km 42"
+                        value={formSiteAddress}
+                        onChange={(e) => setFormSiteAddress(e.target.value)}
+                        className="w-full px-3 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                  </div>
+
+                  {/* FLEET COST (priced PER SALE): rate + GST are ALWAYS
+                      captured (and saved with the sale); the Include Transport
+                      Cost toggle adds the computed cost to the document. For an
+                      OUTSOURCED vehicle the inputs lock to 0 and the toggle
+                      locks off. */}
+                  <div className="flex items-center justify-between flex-wrap gap-2 pt-2 border-t border-[var(--color-outline-variant)]/60">
+                    <span className="text-[10px] font-medium text-[var(--color-on-surface-variant)]">
+                      Transportation cost = load weight × distance × rate — shown as its own row with its own GST on the sale document
+                      {vehOutsourced && <span className="text-[var(--color-error)] font-bold"> • Outsourced vehicle: transport cost not applied</span>}
+                    </span>
+                    <label className={`inline-flex items-center gap-2.5 select-none ${vehOutsourced ? 'opacity-60' : 'cursor-pointer'}`}>
+                      <span className="text-[11px] font-extrabold text-[var(--color-on-surface)] uppercase tracking-wide">
+                        Include Transport Cost
                       </span>
                       <button
                         type="button"
                         role="switch"
-                        aria-checked={includeLogistics}
-                        disabled
-                        title="Logistics assignment coming soon"
-                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-not-allowed rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                          includeLogistics ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-surface-container-highest)]'
-                        }`}
+                        aria-checked={includeTransportCost}
+                        disabled={vehOutsourced}
+                        title={vehOutsourced ? 'Outsourced vehicle — transport cost not applied' : (includeTransportCost ? 'Transport cost included in the total' : 'Transport cost not added (rate/GST still saved)')}
+                        onClick={() => { if (!vehOutsourced) setIncludeTransportCost(!includeTransportCost); }}
+                        className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${vehOutsourced ? 'bg-[var(--color-surface-container-highest)] cursor-not-allowed' : includeTransportCost ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-surface-container-highest)]'}`}
                       >
                         <span
                           className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
-                            includeLogistics ? 'translate-x-5' : 'translate-x-0'
+                            includeTransportCost && !vehOutsourced ? 'translate-x-5' : 'translate-x-0'
                           }`}
                         />
                       </button>
                     </label>
                   </div>
 
-                  {includeLogistics && (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1 border-t border-[var(--color-outline-variant)]/60 animate-in fade-in duration-200">
-                      {/* Vehicle */}
-                      <div className="bg-[var(--color-surface-container-lowest)] p-3 rounded-xl border border-[var(--color-outline-variant)]/60 space-y-3">
-                        <div>
-                          <label className="block text-[11px] font-bold text-[var(--color-on-surface-variant)] mb-1">Select Registered Fleet Vehicle</label>
-                          <select
-                            value={registeredVehicles.some(v => v.vehicleNo === formVehicleNo) ? formVehicleNo : ''}
-                            onChange={(e) => {
-                              const selectedPlate = e.target.value;
-                              setFormVehicleNo(selectedPlate);
-                              const matchedVeh = registeredVehicles.find(v => v.vehicleNo === selectedPlate);
-                              if (matchedVeh && matchedVeh.currentDriverName) {
-                                setFormDriverName(matchedVeh.currentDriverName);
-                              }
-                            }}
-                            className="w-full px-3 py-1.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                          >
-                            <option value="">-- Choose Fleet Vehicle --</option>
-                            {registeredVehicles.map(v => (
-                              <option key={v.id} value={v.vehicleNo}>{v.vehicleNo} [{v.type.toUpperCase()}] ({v.status})</option>
-                            ))}
-                          </select>
-                        </div>
-                        <div>
-                          <label className="block text-[11px] font-bold text-[var(--color-on-surface-variant)] mb-1">Or Custom / Market Vehicle Plate No</label>
-                          <input
-                            type="text"
-                            placeholder="e.g. MH-12-PQ-9876"
-                            value={formVehicleNo}
-                            onChange={(e) => setFormVehicleNo(e.target.value.toUpperCase())}
-                            className="w-full px-3 py-1.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                          />
-                        </div>
-                      </div>
-
-                      {/* Driver & Charges */}
-                      <div className="bg-[var(--color-surface-container-lowest)] p-3 rounded-xl border border-[var(--color-outline-variant)]/60 space-y-3">
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          <div>
-                            <label className="block text-[11px] font-bold text-[var(--color-on-surface-variant)] mb-1">Fleet Driver</label>
-                            <select
-                              value={registeredDrivers.some(d => d.name === formDriverName) ? formDriverName : ''}
-                              onChange={(e) => setFormDriverName(e.target.value)}
-                              className="w-full px-3 py-1.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
-                            >
-                              <option value="">-- Fleet Driver --</option>
-                              {registeredDrivers.map(d => (
-                                <option key={d.id} value={d.name}>{d.name} ({d.status})</option>
-                              ))}
-                            </select>
-                          </div>
-                          <div>
-                            <label className="block text-[11px] font-bold text-[var(--color-on-surface-variant)] mb-1">Custom Driver</label>
-                            <input
-                              type="text"
-                              placeholder="Driver Name"
-                              value={formDriverName}
-                              onChange={(e) => setFormDriverName(e.target.value)}
-                              className="w-full px-3 py-1.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
-                            />
-                          </div>
-                        </div>
-
-                        <div>
-                          <label className="block text-[11px] font-bold text-[var(--color-on-surface-variant)] mb-1">Transport / Freight Charges ({settings.currency?.symbol || '₹'})</label>
-                          <input
-                            type="number"
-                            placeholder="0"
-                            value={formTransportCharges}
-                            onChange={(e) => setFormTransportCharges(e.target.value)}
-                            className="w-full px-3 py-1.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                          />
-                        </div>
-                      </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end bg-[var(--color-primary-container)]/20 p-3 rounded-2xl border border-[var(--color-outline-variant)]">
+                    <div>
+                      <label className="block text-[11px] font-bold text-[var(--color-on-surface-variant)] mb-1">Rate per Tonne per KM (₹)</label>
+                      <input
+                        type="number"
+                        step="any"
+                        placeholder="e.g. 18"
+                        disabled={vehOutsourced}
+                        value={vehOutsourced ? '0' : formFreightRate}
+                        onChange={(e) => setFormFreightRate(e.target.value)}
+                        className={`w-full px-3 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-mono font-bold text-[var(--color-on-surface)] focus:outline-none ${vehOutsourced ? 'text-[var(--color-outline)] cursor-not-allowed' : 'focus:ring-2 focus:ring-[var(--color-primary)]'}`}
+                      />
                     </div>
-                  )}
+                    <div>
+                      <label className="block text-[11px] font-bold text-[var(--color-on-surface-variant)] mb-1">GST on Transportation</label>
+                      <select
+                        disabled={vehOutsourced}
+                        value={vehOutsourced ? '0' : formFreightGst}
+                        onChange={(e) => setFormFreightGst(e.target.value)}
+                        className={`w-full px-3 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-bold text-[var(--color-on-surface)] focus:outline-none ${vehOutsourced ? 'text-[var(--color-outline)] cursor-not-allowed' : 'focus:ring-2 focus:ring-[var(--color-primary)]'}`}
+                      >
+                        <option value="0">0% (Exempt / RCM)</option>
+                        <option value="5">5%</option>
+                        <option value="12">12%</option>
+                        <option value="18">18%</option>
+                        <option value="28">28%</option>
+                      </select>
+                    </div>
+                    <div className="text-right">
+                      {/* Calculations show ONLY when the include toggle is ON
+                          — never a zero / "(excluded)" line otherwise */}
+                      {includeTransportCost && !vehOutsourced && (
+                        <>
+                          <p className="text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase">Computed Fleet Cost</p>
+                          <p className="text-sm font-black text-[var(--color-primary)]">
+                            {Number(formWeightTonnes) > 0 && Number(formDistanceKm) > 0 && Number(formFreightRate) > 0
+                              ? `${(Number(formWeightTonnes) * Number(formDistanceKm) * Number(formFreightRate) || 0).toFixed(2)}`
+                              : '—'}
+                            {' '}{settings.currency?.symbol || '₹'}
+                          </p>
+                          {Number(formFreightGst) > 0 && Number(formWeightTonnes) > 0 && Number(formDistanceKm) > 0 && Number(formFreightRate) > 0 && (
+                            <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)]">
+                              + {formFreightGst}% GST = {(((Number(formWeightTonnes) || 0) * (Number(formDistanceKm) || 0) * (Number(formFreightRate) || 0) * (Number(formFreightGst) || 0)) / 100 || 0).toFixed(2)}
+                            </p>
+                          )}
+                          {!(Number(formWeightTonnes) > 0 && Number(formDistanceKm) > 0) && (
+                            <p className="text-[9px] font-bold text-[var(--color-error)] mt-0.5">
+                              Needs Load Weight & Distance above
+                            </p>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -2323,15 +2642,25 @@ export function OrdersView({
                     <span className="font-bold text-[var(--color-on-surface)]">{formatCurrency2(formCalculations.subtotal)}</span>
                   </div>
 
+                  {formCalculations.transportCharges > 0 && (
+                    <div className="flex justify-between font-medium text-[var(--color-on-surface-variant)]">
+                      <span>Fleet Cost ({(Number(formWeightTonnes) || 0)} MT × {(Number(formDistanceKm) || 0)} km @ {Number(formFreightRate) || 0}/T-km):</span>
+                      <span className="font-bold text-[var(--color-on-surface)]">{formatCurrency2(formCalculations.transportCharges)}</span>
+                    </div>
+                  )}
+
                   <div className="flex justify-between font-medium text-[var(--color-on-surface-variant)]">
                     <span>Total GST (per-item slabs):</span>
                     <span className="font-bold text-[var(--color-on-surface)]">{formatCurrency2(formCalculations.taxAmount)}</span>
                   </div>
 
-                  {formCalculations.transportCharges > 0 && (
+                  {/* Fleet GST only applies while the fleet-cost switch is ON —
+                      when OFF the amount would otherwise show a frozen ₹0.00
+                      next to a stale slab (the checkbox gates the computation) */}
+                  {formCalculations.fleetCost > 0 && (Number(formFreightGst) || 0) > 0 && (
                     <div className="flex justify-between font-medium text-[var(--color-on-surface-variant)]">
-                      <span>Transport Charges:</span>
-                      <span className="font-bold text-[var(--color-on-surface)]">{formatCurrency2(formCalculations.transportCharges)}</span>
+                      <span>GST on Transport ({Number(formFreightGst) || 0}%):</span>
+                      <span className="font-bold text-[var(--color-on-surface)]">{formatCurrency2(formCalculations.fleetGstAmount || 0)}</span>
                     </div>
                   )}
 

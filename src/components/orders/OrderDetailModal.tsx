@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { X, Ban, Edit3, Boxes, Landmark } from 'lucide-react';
+import { X, Ban, Edit3, Boxes, Landmark, Truck } from 'lucide-react';
 import { Item, Party, CompanySettings, SalesStage, PurchaseStage } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import {
@@ -75,10 +75,18 @@ export function OrderDetailModal({
     }
   }, [isOpen]);
 
+  // Linked dispatch trip slip (sales) — the auto-derived trip mirrors this
+  // sale: server keys slips on saleId (falls back to the number/identity link
+  // for older rows)
   const linkedTripSlip = useMemo(() => {
-    if (!previewOrder) return null;
-    return localDb.getTripSlips().find((s) => s.orderId === previewOrder.id || s.orderNumber === previewOrder.orderNumber);
-  }, [previewOrder, isPreviewOpen]);
+    if (!selectedOrder || selectedOrder.type !== 'sales') return null;
+    const slips = localDb.getTripSlips();
+    return slips.find(
+      (s) => s.saleId === selectedOrder.id ||
+        s.orderId === selectedOrder.id ||
+        s.orderNumber === selectedOrder.orderNumber
+    ) || null;
+  }, [selectedOrder, isOpen]);
 
   if (!isOpen || !selectedOrder) return null;
 
@@ -171,6 +179,52 @@ export function OrderDetailModal({
               ) : null;
             })()}
           </div>
+
+          {/* Dispatch & Trip (sales) — the auto-derived trip slip mirrors the
+              sale; the card shows the current attachment + trip plan */}
+          {selectedOrder.type === 'sales' &&
+            (linkedTripSlip || selectedOrder.vehicleId || selectedOrder.siteAddress || selectedOrder.distanceKm !== undefined) && (
+            <div className="rounded-2xl border border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] p-4 space-y-2.5">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <h4 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-1.5">
+                  <Truck className="w-3.5 h-3.5 text-[var(--color-primary)]" /> Dispatch Trip
+                </h4>
+                {linkedTripSlip && (
+                  <span className="text-[9px] font-extrabold uppercase px-2.5 py-0.5 rounded-full bg-[var(--color-info-container)] text-[var(--color-on-info-container)]">
+                    Slip {linkedTripSlip.slipNumber} • {linkedTripSlip.status}
+                  </span>
+                )}
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+                <div>
+                  <p className="text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase">Vehicle</p>
+                  <p className="font-mono font-black text-[var(--color-primary)]">{linkedTripSlip?.vehicleNo || selectedOrder.vehicleNo || '—'}</p>
+                </div>
+                <div>
+                  <p className="text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase">Driver</p>
+                  <p className="font-bold text-[var(--color-on-surface)]">{linkedTripSlip?.driverName || selectedOrder.driverName || '—'}</p>
+                </div>
+                <div>
+                  <p className="text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase">Load</p>
+                  <p className="font-bold text-[var(--color-on-surface)]">
+                    {(selectedOrder.weightTonnes ?? (linkedTripSlip?.netWeightTonnes || 0)) ? Number(selectedOrder.weightTonnes ?? linkedTripSlip?.netWeightTonnes ?? 0).toFixed(2) : '—'} MT
+                  </p>
+                </div>
+                <div className="sm:col-span-2">
+                  <p className="text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase">Site / Drop Address</p>
+                  <p className="font-medium text-[var(--color-on-surface)] truncate" title={selectedOrder.siteAddress || linkedTripSlip?.destination}>
+                    {selectedOrder.siteAddress || linkedTripSlip?.destination || '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase">Distance</p>
+                  <p className="font-bold text-[var(--color-on-surface)]">
+                    {(selectedOrder.distanceKm ?? linkedTripSlip?.distanceKm) !== undefined ? `${selectedOrder.distanceKm ?? linkedTripSlip?.distanceKm} km` : '—'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* SALES — every issued stage document (values in its own format) + create buttons */}
           {selectedOrder.type === 'sales' && (

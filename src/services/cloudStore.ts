@@ -64,7 +64,9 @@ const BOOT_LOOKUPS: CollectionName[] = [
 
 // Collections touched by a sale/purchase write (they can mint or compensate
 // journal + settlement vouchers, move party/account balances and stock).
-const SALE_TOUCH: CollectionName[] = ['sales', 'transactions', 'parties', 'accounts', 'items'];
+// 'tripSlips' rides with the sale touch list: the server auto-derives /
+// updates the dispatch trip slip on every sale create/edit
+const SALE_TOUCH: CollectionName[] = ['sales', 'transactions', 'parties', 'accounts', 'items', 'tripSlips'];
 const PURCHASE_TOUCH: CollectionName[] = ['purchases', 'transactions', 'parties', 'accounts', 'items'];
 
 // Sidebar tab → the heavy collections fetched on EVERY visit to that tab
@@ -80,7 +82,12 @@ const FEATURE_COLLECTIONS: Record<string, CollectionName[]> = {
   purchases: ['purchases', 'sales', 'transactions', 'accounts'],
   production: ['productionBatches', 'items'],
   // drivers are employees with role 'driver' — loaded via 'employees'.
-  logistics: ['vehicles', 'tripSlips', 'tyres', 'employees', 'vehicleEmiEntries'],
+  logistics: [
+    'vehicles', 'tripSlips', 'tyres', 'employees', 'vehicleEmiEntries',
+    // The Trips table's SALE ORDER column + transport figures resolve from
+    // the sales master (slip.saleId) — the fleet feature must carry it
+    'sales',
+  ],
   // attendance reads are date-scoped (daily sheet / register fetch their own
   // window); the ledger rows carry each employee's virtual account balance,
   // and accounts ride along — recording a bank-linked payout needs them.
@@ -1101,9 +1108,14 @@ class CloudStore {
       date: payload.date || now.split('T')[0],
       status: 'pending',
       notes: payload.notes,
+      vehicleId: payload.vehicleId,
+      siteAddress: payload.siteAddress,
+      distanceKm: payload.distanceKm,
       vehicleNo: payload.vehicleNo,
       driverName: payload.driverName,
       transportCharges: Number(payload.transportCharges) || 0,
+      freightRatePerTonne: (payload as any).freightRatePerTonne,
+      freightGstRate: (payload as any).freightGstRate,
       inventoryApplied: Boolean(stage?.updateInventory),
       cashApplied: Boolean(stage?.updateCash),
       settlementType: stage?.settlementType && stage.settlementType !== 'none' ? stage.settlementType : undefined,
@@ -1864,6 +1876,41 @@ class CloudStore {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Driver → vehicle assignment from the employee's profile. Optimistically
+   * mirrors the server's rule in the vehicle cache (claim the chosen vehicle
+   * / release the freed one — the FK lives on the vehicle row), then the
+   * server call re-fetches the authoritative vehicle set.
+   */
+  public assignEmployeeVehicle(
+    empId: string,
+    opts: { vehicleId?: string; releaseVehicleId?: string }
+  ): void {
+    let next = this.vehicles.map((v) => {
+      if (opts.vehicleId && v.id === opts.vehicleId && v.currentDriverId !== empId) {
+        return { ...v, currentDriverId: empId };
+      }
+      // Release: the freed vehicle only leaves the driver's list server-side
+      // (claim releases the driver's OTHER vehicles implicitly)
+      if (!opts.vehicleId && opts.releaseVehicleId && v.id === opts.releaseVehicleId && v.currentDriverId === empId) {
+        return { ...v, currentDriverId: undefined };
+      }
+      return v;
+    });
+    if (opts.vehicleId) {
+      // Claiming releases the driver's other vehicles too
+      next = next.map((v) =>
+        v.currentDriverId === empId && v.id !== opts.vehicleId ? { ...v, currentDriverId: undefined } : v
+      );
+    }
+    this.vehicles = next;
+    this.notify();
+    api
+      .assignEmployeeVehicle(empId, opts)
+      .then(() => this.refreshAfter(['vehicles']))
+      .catch((err) => console.error('[CloudStore] assignEmployeeVehicle cloud error:', err));
   }
 
   public async bulkAddAttendance(records: any[]): Promise<void> {

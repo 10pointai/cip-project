@@ -48,6 +48,11 @@ salesRouter.post('/', requirePermission('manage_sales'), async (req: Request, re
     if (!data.partyId || !Array.isArray(data.items) || data.items.length === 0) {
       return res.status(400).json({ success: false, error: 'partyId and items are required' });
     }
+    if (!data.vehicleId && !data.vehicleNo) {
+      // Client directive: every sale carries a dispatch trip — either an own
+      // fleet vehicle (vehicleId FK) or an OUTSOURCED one (typed vehicleNo)
+      return res.status(400).json({ success: false, error: 'Attach a fleet vehicle or enter an outsourced vehicle number' });
+    }
     if (data.stage?.updateInventory && !data.stage.stageNumber && !data.saleNumber) {
       return res.status(400).json({ success: false, error: 'stageNumber or saleNumber is required to update inventory' });
     }

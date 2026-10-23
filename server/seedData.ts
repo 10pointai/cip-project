@@ -121,6 +121,7 @@ export const FULL_ADMIN_PERMISSIONS: UserPermissions = {
   manage_sales: true,
   manage_purchases: true,
   manage_fleet: true,
+  manage_tyres: true,
   manage_emi: true,
   dispatch_trips: true,
   manage_employees: true,

@@ -3,7 +3,7 @@ import { isMysqlConfigured } from './connection';
 import { Item, ItemCategory, ItemUnit, ItemLocation, ProductionBatchRun, Vehicle, Driver, TripSlip, Tyre, ItemStockAdjustment, StockMovementLog, Sale, Purchase } from '../../src/types';
 import { serverDb } from '../db';
 import { computeItemValuation } from '../inventoryValuation';
-import { resolveUnitIdByCode } from './azureSync';
+import { resolveUnitIdByCode, liveSyncTripSlip } from './azureSync';
 
 function parseJsonField<T>(field: any, fallback: T): T {
   if (!field) return fallback;
@@ -489,25 +489,48 @@ export async function fetchDriversDirect(): Promise<Driver[]> {
 
 export async function fetchTripSlipsDirect(): Promise<TripSlip[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getTripSlips();
+    // Sandbox read — same FK-only hydration as the MySQL path
+    return serverDb.getHydratedTripSlips();
   }
-  const rows = await executeMysqlQuery('SELECT * FROM trip_slips ORDER BY date DESC, created_at DESC');
+  // FK-only storage (Golden Rule §2): driver/party display names JOIN their
+  // masters; a sale-derived slip's material resolves from the SALE's items
+  // (the load weight is ONE common order-level value — no persisted copies).
+  const rows = await executeMysqlQuery(`
+    SELECT ts.*,
+           e.name AS driver_display,
+           p.name AS party_display,
+           (SELECT i.name
+              FROM sales_order_items soi
+              JOIN items i ON i.id = soi.item_id
+             WHERE ts.sale_id IS NOT NULL AND soi.sale_id = ts.sale_id
+             ORDER BY soi.sales_order_stage_id IS NULL, soi.sales_order_stage_id,
+                      soi.id ASC
+             LIMIT 1) AS sale_material
+    FROM trip_slips ts
+    LEFT JOIN employees e ON e.id = ts.driver_id
+    LEFT JOIN parties p ON p.id = ts.party_id
+    ORDER BY ts.date DESC, ts.created_at DESC
+  `);
   return rows.map((ts: any) => ({
     id: ts.id,
     slipNumber: ts.slip_number,
     date: ts.date,
     time: ts.time || '10:00',
-    vehicleId: ts.vehicle_id,
+    vehicleId: ts.vehicle_id || '',
     vehicleNo: ts.vehicle_number || ts.vehicleNo || '',
     driverId: ts.driver_id,
-    driverName: ts.driver_name,
+    // Hydrated display names (§2) — never stored on the row
+    driverName: ts.driver_display || undefined,
     tripType: (ts.trip_type as any) || (ts.tripType as any) || 'outward',
+    saleId: ts.sale_id || undefined,
     orderId: ts.order_id || undefined,
     orderNumber: ts.order_number || undefined,
-    partyName: ts.party_name || undefined,
-    materialName: ts.material_name,
+    partyId: ts.party_id || undefined,
+    partyName: ts.party_display || undefined,
+    materialName: ts.sale_material || ts.material_name || undefined,
     netWeightTonnes: parseNum(ts.net_weight_tonnes),
     destination: ts.destination,
+    distanceKm: ts.distance_km ? parseNum(ts.distance_km) : undefined,
     status: (ts.status as any) || 'delivered',
     fuelIssuedLiters: parseNum(ts.fuel_issued_litres || ts.fuelIssuedLiters),
     cashAdvanceRupees: parseNum(ts.driver_advance || ts.cashAdvanceRupees),
@@ -854,41 +877,11 @@ export async function createDriverDirect(driverData: any): Promise<Driver> {
 export async function createTripSlipDirect(slipData: any): Promise<TripSlip> {
   const slip = serverDb.createTripSlip(slipData);
   if (!isMysqlConfigured()) return slip;
-
-  await executeMysqlQuery(
-    `INSERT INTO trip_slips (
-      id, slip_number, date, time, vehicle_id, vehicle_number, driver_id,
-      driver_name, trip_type, order_id, order_number, party_name, material_name,
-      net_weight_tonnes, destination, status, fuel_issued_litres, driver_advance,
-      notes, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      slip_number=VALUES(slip_number), date=VALUES(date), status=VALUES(status),
-      net_weight_tonnes=VALUES(net_weight_tonnes), fuel_issued_litres=VALUES(fuel_issued_litres),
-      driver_advance=VALUES(driver_advance), notes=VALUES(notes)`,
-    [
-      slip.id,
-      slip.slipNumber,
-      slip.date,
-      slip.time || '10:00',
-      slip.vehicleId,
-      slip.vehicleNo,
-      slip.driverId,
-      slip.driverName,
-      slip.tripType || 'outward',
-      slip.orderId || null,
-      slip.orderNumber || null,
-      slip.partyName || null,
-      slip.materialName,
-      slip.netWeightTonnes || 0,
-      slip.destination,
-      slip.status || 'delivered',
-      slip.fuelIssuedLiters || 0,
-      slip.cashAdvanceRupees || 0,
-      slip.notes || null,
-      slip.createdAt || new Date().toISOString(),
-    ]
-  );
+  // Single writer: the liveSync carries the authoritative column set
+  // (incl. sale_id/order_id/time/trip_type) — this function duplicates
+  // nothing, so schema drift here is impossible (was a P0 bug: the inline
+  // INSERT referenced columns that didn't exist and slip creation returned 500).
+  await liveSyncTripSlip(slip);
   return slip;
 }
 

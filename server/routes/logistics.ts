@@ -76,7 +76,7 @@ logisticsRouter.post('/trip-slips', requireEitherPermission('dispatch_trips', 'm
 logisticsRouter.put('/trip-slips/:id', requireEitherPermission('dispatch_trips', 'manage_fleet'), (req, res) => res.json({ success: true, data: serverDb.updateTripSlip(req.params.id, req.body) }));
 logisticsRouter.delete('/trip-slips/:id', requireEitherPermission('dispatch_trips', 'manage_fleet'), (req, res) => res.json({ success: serverDb.deleteTripSlip(req.params.id) }));
 
-// --- TYRES ---
+// --- TYRES (Tyre Management is its own feature — manage_tyres) ---
 logisticsRouter.get('/tyres', async (req, res) => {
   try {
     const data = await fetchTyresDirect();
@@ -85,7 +85,7 @@ logisticsRouter.get('/tyres', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-logisticsRouter.post('/tyres', requirePermission('manage_fleet'), async (req, res) => {
+logisticsRouter.post('/tyres', requirePermission('manage_tyres'), async (req, res) => {
   try {
     const data = await createTyreDirect(req.body);
     res.status(201).json({ success: true, data });
@@ -93,8 +93,8 @@ logisticsRouter.post('/tyres', requirePermission('manage_fleet'), async (req, re
     res.status(500).json({ success: false, error: err.message });
   }
 });
-logisticsRouter.put('/tyres/:id', requirePermission('manage_fleet'), (req, res) => res.json({ success: true, data: serverDb.updateTyre(req.params.id, req.body) }));
-logisticsRouter.delete('/tyres/:id', requirePermission('manage_fleet'), (req, res) => res.json({ success: serverDb.deleteTyre(req.params.id) }));
+logisticsRouter.put('/tyres/:id', requirePermission('manage_tyres'), (req, res) => res.json({ success: true, data: serverDb.updateTyre(req.params.id, req.body) }));
+logisticsRouter.delete('/tyres/:id', requirePermission('manage_tyres'), (req, res) => res.json({ success: serverDb.deleteTyre(req.params.id) }));
 
 // --- VEHICLE EMI ENTRIES (auto cron rows + operator-recorded payments) ---
 // Every create/edit/delete rebalances the linked cash/bank account (the

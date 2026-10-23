@@ -684,6 +684,12 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           await conn.query('ALTER TABLE vehicles DROP COLUMN assigned_driver_name');
           console.log('[MySQL Migration] Dropped vehicles.assigned_driver_name (driver names now JOIN from employees).');
         }
+        // cost_per_km moved OFF the vehicle (client directive 2026-10-23):
+        // freight is priced per SALE (weight × distance × rate), not per truck
+        if (vehColNames.includes('cost_per_km')) {
+          await conn.query('ALTER TABLE vehicles DROP COLUMN cost_per_km');
+          console.log('[MySQL Migration] Dropped vehicles.cost_per_km (freight rate moved to sales_orders).');
+        }
         if (!vehColNames.includes('emi_has_emi')) {
           console.log('[MySQL Migration] Added EMI financing columns to vehicles table.');
         }
@@ -716,14 +722,18 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           id VARCHAR(64) PRIMARY KEY,
           slip_number VARCHAR(64) NOT NULL UNIQUE,
           date VARCHAR(32) NOT NULL,
-          vehicle_id VARCHAR(64) NOT NULL,
+          time VARCHAR(8),
+          vehicle_id VARCHAR(64) NULL COMMENT 'FK vehicles — NULL for outsourced (typed-plate) slips',
           vehicle_number VARCHAR(64) NOT NULL,
-          driver_id VARCHAR(64) NOT NULL,
-          driver_name VARCHAR(128) NOT NULL,
-          party_id VARCHAR(64) NOT NULL,
-          party_name VARCHAR(255) NOT NULL,
+          sale_id VARCHAR(64) COMMENT 'FK sales_orders — set when the slip is auto-derived from a sales order (upsert key)',
+          order_id VARCHAR(64) COMMENT 'legacy orders link',
+          order_number VARCHAR(64) COMMENT 'linked document number snapshot',
+          driver_id VARCHAR(64) NOT NULL COMMENT 'FK employees — driver display name JOINs from the employees master (never persisted)',
+          trip_type VARCHAR(16) COMMENT 'outward | inward | internal',
+          party_id VARCHAR(64) NULL COMMENT 'FK parties — party display name JOINs from the parties master (never persisted)',
+          material_item_id VARCHAR(64) NULL COMMENT 'FK items — resolved when the slip comes from an order',
           destination VARCHAR(255) NOT NULL,
-          material_name VARCHAR(128) NOT NULL,
+          material_name VARCHAR(128) NULL COMMENT 'manual (non-order) slips only — sale-derived slips resolve their material from the sale items',
           gross_weight_kg DECIMAL(12,2) DEFAULT 0.00,
           tare_weight_kg DECIMAL(12,2) DEFAULT 0.00,
           net_weight_kg DECIMAL(12,2) DEFAULT 0.00,
@@ -743,6 +753,7 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           updated_at VARCHAR(64),
           INDEX idx_trip_date (date),
           INDEX idx_trip_vehicle (vehicle_id),
+          INDEX idx_trip_sale (sale_id),
           INDEX idx_trip_party (party_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
@@ -1583,9 +1594,15 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           date VARCHAR(32) NOT NULL,
           status VARCHAR(32) DEFAULT 'pending',
           notes TEXT,
+          vehicle_id VARCHAR(64) COMMENT 'FK vehicles — dispatch trip is auto-derived from the attachment',
+          site_address VARCHAR(255) COMMENT 'drop / unloading site address of the trip',
+          distance_km DECIMAL(10,2) COMMENT 'planned travel distance (km)',
+          weight_tonnes DECIMAL(12,3) COMMENT 'load weight of the whole order (MT) — ONE value for all items; feeds the trip slip',
           vehicle_no VARCHAR(64),
           driver_name VARCHAR(128),
           transport_charges DECIMAL(12,2) DEFAULT 0.00,
+          freight_rate_per_tonne DECIMAL(10,2) COMMENT 'fleet-cost rate ₹/tonne-km — priced PER SALE',
+          freight_gst_rate DECIMAL(5,2) COMMENT 'GST slab on the fleet-cost row',
           inventory_applied BOOLEAN DEFAULT FALSE,
           cash_applied BOOLEAN DEFAULT FALSE,
           settlement_type VARCHAR(16) COMMENT 'credit | account | NULL = payment flow not applied',
@@ -1614,6 +1631,7 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           gst_rate DECIMAL(5,2) DEFAULT NULL,
           location_id VARCHAR(64) COMMENT 'FK item_locations — dispatched from',
           item_notes TEXT,
+          weight_tonnes DECIMAL(12,3) COMMENT 'line load weight (MT) — sums into the trip slip load',
           INDEX idx_soi_sale (sale_id),
           INDEX idx_soi_item (item_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -1919,6 +1937,156 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         console.warn('[MySQL Migration] settlement_type backfill notice:', stBackfillErr.message);
       }
 
+      // 16d. SALE → TRIP SLIP dispatch attachment: sales_orders.vehicle_id /
+      // site_address / distance_km, sales_order_items.weight_tonnes and the
+      // trip_slips.sale_id back-link (Slip ⇢ sale master — auto-derived slips
+      // upsert against it on every sale edit).
+      try {
+        const [msoCols]: any = await conn.query('SHOW COLUMNS FROM sales_orders');
+        const mso = (msoCols || []).map((c: any) => c.Field);
+        if (mso.length > 0) {
+          if (!mso.includes('vehicle_id')) {
+            await conn.query("ALTER TABLE sales_orders ADD COLUMN vehicle_id VARCHAR(64) NULL COMMENT 'FK vehicles — dispatch trip is auto-derived from the attachment' AFTER notes");
+            console.log('[MySQL Migration] Added sales_orders.vehicle_id column.');
+          }
+          if (!mso.includes('site_address')) {
+            await conn.query("ALTER TABLE sales_orders ADD COLUMN site_address VARCHAR(255) NULL AFTER vehicle_id");
+            console.log('[MySQL Migration] Added sales_orders.site_address column.');
+          }
+          if (!mso.includes('distance_km')) {
+            await conn.query('ALTER TABLE sales_orders ADD COLUMN distance_km DECIMAL(10,2) NULL AFTER site_address');
+            console.log('[MySQL Migration] Added sales_orders.distance_km column.');
+          }
+          if (!mso.includes('weight_tonnes')) {
+            await conn.query('ALTER TABLE sales_orders ADD COLUMN weight_tonnes DECIMAL(12,3) NULL AFTER distance_km');
+            console.log('[MySQL Migration] Added sales_orders.weight_tonnes column.');
+          }
+          if (!mso.includes('freight_rate_per_tonne')) {
+            await conn.query("ALTER TABLE sales_orders ADD COLUMN freight_rate_per_tonne DECIMAL(10,2) NULL COMMENT 'fleet-cost rate ₹/tonne-km — priced PER SALE' AFTER transport_charges");
+            console.log('[MySQL Migration] Added sales_orders.freight_rate_per_tonne column.');
+          }
+          if (!mso.includes('freight_gst_rate')) {
+            await conn.query("ALTER TABLE sales_orders ADD COLUMN freight_gst_rate DECIMAL(5,2) NULL AFTER freight_rate_per_tonne");
+            console.log('[MySQL Migration] Added sales_orders.freight_gst_rate column.');
+          }
+        }
+        const [msiCols]: any = await conn.query('SHOW COLUMNS FROM sales_order_items');
+        const msi = (msiCols || []).map((c: any) => c.Field);
+        if (msi.length > 0 && !msi.includes('weight_tonnes')) {
+          await conn.query('ALTER TABLE sales_order_items ADD COLUMN weight_tonnes DECIMAL(12,3) NULL AFTER item_notes');
+          console.log('[MySQL Migration] Added sales_order_items.weight_tonnes column.');
+        }
+        const [mtsCols]: any = await conn.query('SHOW COLUMNS FROM trip_slips');
+        const mts = (mtsCols || []).map((c: any) => c.Field);
+        if (mts.length > 0) {
+          if (!mts.includes('sale_id')) {
+            await conn.query('ALTER TABLE trip_slips ADD COLUMN sale_id VARCHAR(64) NULL AFTER vehicle_number');
+            console.log('[MySQL Migration] Added trip_slips.sale_id column.');
+          }
+          if (!mts.includes('time')) {
+            // Schema drift: the TS TripSlip carries HH:mm but MySQL never
+            // stored it — REPLACE wipes without the column, so slip times
+            // came back as a fixed '10:00' fallback after every reload.
+            await conn.query("ALTER TABLE trip_slips ADD COLUMN time VARCHAR(8) NULL AFTER date");
+            console.log('[MySQL Migration] Added trip_slips.time column.');
+          }
+          if (!mts.includes('trip_type')) {
+            await conn.query("ALTER TABLE trip_slips ADD COLUMN trip_type VARCHAR(16) NULL AFTER driver_name");
+            console.log('[MySQL Migration] Added trip_slips.trip_type column.');
+          }
+          // order_id / order_number / material_item_id: written by BOTH the
+          // liveSync and createTripSlipDirect but never created — every slip
+          // INSERT/REPLACE failed wholesale (P0: slips persisted nowhere).
+          // party_id (NOT NULL with no slip semantics) becomes nullable: the
+          // order link used to be smuggled into it.
+          if (!mts.includes('order_id')) {
+            await conn.query('ALTER TABLE trip_slips ADD COLUMN order_id VARCHAR(64) NULL AFTER sale_id');
+            console.log('[MySQL Migration] Added trip_slips.order_id column.');
+          }
+          if (!mts.includes('order_number')) {
+            await conn.query('ALTER TABLE trip_slips ADD COLUMN order_number VARCHAR(64) NULL AFTER order_id');
+            console.log('[MySQL Migration] Added trip_slips.order_number column.');
+          }
+          if (!mts.includes('material_item_id')) {
+            await conn.query('ALTER TABLE trip_slips ADD COLUMN material_item_id VARCHAR(64) NULL AFTER party_name');
+            console.log('[MySQL Migration] Added trip_slips.material_item_id column.');
+          }
+          if (mts.includes('party_id')) {
+            await conn.query('ALTER TABLE trip_slips MODIFY party_id VARCHAR(64) NULL');
+          }
+          // Outsourced (typed-plate) slips carry no fleet vehicle FK
+          if (mts.includes('vehicle_id')) {
+            await conn.query('ALTER TABLE trip_slips MODIFY vehicle_id VARCHAR(64) NULL');
+          }
+          // Backfill: sale-derived slips created before the saleId key landed
+          // carry only order_id — adopt it so sale edits update IN PLACE
+          // instead of minting duplicate slips per save.
+          const [bfRes]: any = await conn.query(
+            'UPDATE trip_slips SET sale_id = order_id WHERE sale_id IS NULL AND order_id IS NOT NULL'
+          );
+          if (bfRes.affectedRows > 0) {
+            console.log(`[MySQL Migration] Backfilled sale_id on ${bfRes.affectedRows} sale-derived trip slip(s).`);
+          }
+          // Distance backfill: liveSyncTripSlip used to persist a hardcoded 0
+          // into distance_km — adopt the sale's planned distance (slips keep
+          // only the sale FK; the sale master holds the trip plan).
+          const [dbRes]: any = await conn.query(
+            `UPDATE trip_slips ts
+               JOIN sales_orders so ON so.id = COALESCE(ts.sale_id, ts.order_id)
+               SET ts.distance_km = so.distance_km
+             WHERE (ts.distance_km = 0 OR ts.distance_km IS NULL) AND so.distance_km > 0`
+          );
+          if (dbRes.affectedRows > 0) {
+            console.log(`[MySQL Migration] Backfilled distance_km on ${dbRes.affectedRows} trip slip(s) from their sales orders.`);
+          }
+          // FK-only storage (Golden Rule §2): driver/party display names are
+          // NOT persisted — they JOIN from the employees/parties masters at
+          // read. Sale-derived slips resolve their material from the sale
+          // items; only manual (non-order) slips keep a material text.
+          if (mts.includes('driver_name')) {
+            await conn.query('ALTER TABLE trip_slips DROP COLUMN driver_name');
+            console.log('[MySQL Migration] Dropped trip_slips.driver_name (resolved by JOIN employees on driver_id).');
+          }
+          if (mts.includes('party_name')) {
+            await conn.query('ALTER TABLE trip_slips DROP COLUMN party_name');
+            console.log('[MySQL Migration] Dropped trip_slips.party_name (resolved by JOIN parties on party_id).');
+          }
+          if (mts.includes('material_name')) {
+            await conn.query('ALTER TABLE trip_slips MODIFY material_name VARCHAR(128) NULL COMMENT \'manual (non-order) slips only — sale-derived slips resolve their material from the sale items\'');
+          }
+          const [idxRows]: any = await conn.query('SHOW INDEX FROM trip_slips WHERE Key_name = "idx_trip_sale"');
+          if (!idxRows || idxRows.length === 0) {
+            await conn.query('ALTER TABLE trip_slips ADD INDEX idx_trip_sale (sale_id)');
+            console.log('[MySQL Migration] Added trip_slips idx_trip_sale index.');
+          }
+        }
+      } catch (dispErr: any) {
+        console.warn('[MySQL Migration] sale dispatch columns notice:', dispErr.message);
+      }
+
+      // 16e. TYRE FEATURE SPLIT: manage_tyres became its own feature-control
+      // key (2026-10-23 — Tyre Management moved out of Fleet into a dedicated
+      // sidebar feature). Grant it to every account whose manage_fleet flag is
+      // on so nobody loses tyre access; admins revoke via User Management.
+      try {
+        const [tyreUsers]: any = await conn.query(
+          `SELECT id FROM users
+             WHERE JSON_EXTRACT(permissions, '$.manage_fleet') = TRUE
+               AND JSON_EXTRACT(permissions, '$.manage_tyres') IS NULL`
+        );
+        for (const u of tyreUsers || []) {
+          await conn.query(
+            `UPDATE users SET permissions = JSON_SET(permissions, '$.manage_tyres', TRUE) WHERE id = ?`,
+            [u.id]
+          );
+        }
+        if ((tyreUsers || []).length > 0) {
+          console.log(`[MySQL Migration] Granted manage_tyres to ${tyreUsers.length} fleet user(s) (feature split).`);
+        }
+      } catch (tyrePermErr: any) {
+        console.warn('[MySQL Migration] tyre permission grant notice:', tyrePermErr.message);
+      }
+
       console.log('[MySQL Migration] All tables verified successfully.');
       return { success: true, message: 'All MySQL schema tables created or verified.' };
     } finally {
@@ -2219,24 +2387,29 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
         );
       }
 
-      // Seed trip slips
+      // Seed trip slips (column set mirrors liveSyncTripSlip — FK-only: the
+      // driver/party display names JOIN from the masters at read; sale-derived
+      // slips resolve their material from the sale items)
       for (const ts of (snapshot.tripSlips || []) as any[]) {
         await conn.query(
-          `REPLACE INTO trip_slips (id, slip_number, date, vehicle_id, vehicle_number, driver_id, driver_name, party_id, party_name, destination, material_item_id, material_name, gross_weight_kg, tare_weight_kg, net_weight_kg, net_weight_tonnes, start_odometer, end_odometer, distance_km, fuel_issued_litres, driver_advance, toll_charges, freight_rate_per_tonne, total_freight_amount, status, weighbridge_slip_number, notes, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `REPLACE INTO trip_slips (id, slip_number, date, time, vehicle_id, vehicle_number, sale_id, order_id, order_number, driver_id, trip_type, party_id, destination, material_item_id, material_name, gross_weight_kg, tare_weight_kg, net_weight_kg, net_weight_tonnes, start_odometer, end_odometer, distance_km, fuel_issued_litres, driver_advance, toll_charges, freight_rate_per_tonne, total_freight_amount, status, weighbridge_slip_number, notes, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             ts.id,
             ts.slipNumber,
             ts.date || '2026-08-08',
+            ts.time || null,
             ts.vehicleId || 'veh-1',
             ts.vehicleNumber || (ts as any).vehicleNo || 'MH-12-RN-8822',
+            (ts as any).saleId || null,
+            ts.orderId || null,
+            ts.orderNumber || null,
             ts.driverId || 'dr-1',
-            ts.driverName || 'Satnam Singh',
-            ts.partyId || 'pty-nhai',
-            ts.partyName || 'National Highways Authority of India (NHAI)',
+            ts.tripType || 'outward',
+            ts.partyId || null,
             ts.destination || 'Site',
-            (ts as any).materialItemId || 'item-dbm',
-            ts.materialName || 'Dense Bituminous Macadam',
+            (ts as any).materialItemId || null,
+            (ts as any).saleId ? null : (ts.materialName || 'Dense Bituminous Macadam'),
             ts.grossWeightKg || 0,
             ts.tareWeightKg || 0,
             ts.netWeightKg || 0,

@@ -72,7 +72,7 @@ export function OrderDocumentPreviewModal({
   }, [previewOrder, isOpen]);
 
   const previewCalculations = useMemo(() => {
-    if (!previewOrder) return { subtotal: 0, taxAmount: 0, transportCharges: 0, grandTotal: 0 };
+    if (!previewOrder) return { subtotal: 0, taxAmount: 0, transportCharges: 0, freightGst: 0, freightGstRate: 0, grandTotal: 0 };
     const grnPreview = previewOrder.type === 'purchase' && previewOrder.purchaseStage === 'goods_receipt';
     const subtotal = previewOrder.items.reduce((sum, item) => {
       return sum + (grnPreview && item.receivedQuantity !== undefined && item.receivedQuantity !== null
@@ -80,8 +80,11 @@ export function OrderDocumentPreviewModal({
         : item.quantity * item.rate);
     }, 0);
     const transportCharges = previewOrder.transportCharges || 0;
+    const freightGstRate = (previewOrder as any).freightGstRate || 0;
+    // The fleet-cost row carries its OWN GST slab (displayed separately, like the item lines)
+    const freightGst = Math.round(((transportCharges * freightGstRate) / 100) * 100) / 100;
     const taxAmount = (subtotal * (previewOrder.taxRateGst || 0)) / 100;
-    return { subtotal, taxAmount, transportCharges, grandTotal: subtotal + taxAmount + transportCharges };
+    return { subtotal, taxAmount, transportCharges, freightGst, freightGstRate, grandTotal: subtotal + taxAmount + transportCharges + freightGst };
   }, [previewOrder]);
 
   if (!isOpen || !previewOrder) return null;
@@ -260,7 +263,7 @@ export function OrderDocumentPreviewModal({
                 <div className="text-left">
                   <span className="font-bold text-[#1c1b1f]">Unloading Site / Destination:</span>
                   <p className="mt-0.5 leading-relaxed text-[#1c1b1f] text-left">
-                    {linkedTripSlip?.destination || (previewOrder.notes?.toLowerCase().includes('site')
+                    {previewOrder.siteAddress || linkedTripSlip?.destination || (previewOrder.notes?.toLowerCase().includes('site')
                       ? previewOrder.notes
                       : 'As per approved designated highway job-site.')}
                   </p>
@@ -270,6 +273,9 @@ export function OrderDocumentPreviewModal({
                   <div className="mt-1 space-y-0.5 text-[#1c1b1f] font-semibold text-left">
                     <p className="text-left">Vehicle No: <span className="font-mono text-xs font-black bg-[var(--color-surface-container)] px-1.5 py-0.5 rounded border border-[var(--color-outline-variant)] text-[var(--color-on-surface)]">{previewOrder.vehicleNo || linkedTripSlip?.vehicleNo || 'Multi-axle Tipper / Yard Fleet'}</span></p>
                     <p className="text-left">Driver Assigned: <span className="font-bold">{previewOrder.driverName || linkedTripSlip?.driverName || 'Regular Operations Carrier'}</span></p>
+                    {previewOrder.distanceKm !== undefined && (
+                      <p className="text-left">Planned Distance: <span className="font-bold">{previewOrder.distanceKm} km</span></p>
+                    )}
                     {linkedTripSlip && (
                       <p className="text-[9px] text-[#2e7d32] font-black flex items-center gap-1 mt-1 text-left">
                         <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
@@ -351,6 +357,29 @@ export function OrderDocumentPreviewModal({
                   </tr>
                   );
                 })}
+                {/* Fleet cost row — priced PER SALE (weight × distance × ₹/T-km);
+                    sits in the document just like an item line */}
+                {previewOrder.type === 'sales' && previewOrder.transportCharges && previewOrder.transportCharges > 0 && (
+                  <tr className="bg-[#f3f3fa]/60 font-medium text-[11px] text-[#1c1b1f]">
+                    <td className="py-3 px-3 border-r border-[#e1e2ec] text-center">{previewOrder.items.length + 1}</td>
+                    <td className="py-3 px-3 border-r border-[#e1e2ec]">
+                      <p className="font-bold text-[#1c1b1f]">Transport / Fleet Charges</p>
+                      <p className="text-[10px] font-semibold text-[#006a6a] mt-0.5">
+                        Fleet freight — {(previewOrder.weightTonnes ?? 0).toLocaleString('en-IN')} MT × {(previewOrder.distanceKm ?? 0).toLocaleString('en-IN')} km
+                        {(previewOrder as any).freightRatePerTonne ? ` @ ₹${(previewOrder as any).freightRatePerTonne}/tonne-km` : ''}
+                        {(previewOrder as any).freightGstRate ? ` • ${(previewOrder as any).freightGstRate}% GST` : ''}
+                      </p>
+                      <p className="text-[9px] text-[#74777f] mt-0.5">SAC Code: <span className="font-mono font-bold">9965/9988</span></p>
+                    </td>
+                    <td className="py-3 px-3 border-r border-[#e1e2ec] text-right font-bold">1 Job</td>
+                    <td className="py-3 px-3 border-r border-[#e1e2ec] text-right font-bold text-[#44474e]">
+                      {(previewOrder as any).freightRatePerTonne ? `₹${(previewOrder as any).freightRatePerTonne}/T-km` : '—'}
+                    </td>
+                    <td className="py-3 px-3 text-right font-black text-[#1c1b1f]">
+                      {formatCurrency(previewOrder.transportCharges)}
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -425,7 +454,7 @@ export function OrderDocumentPreviewModal({
 
               {previewCalculations.transportCharges > 0 && (
                 <div className="flex justify-between text-[#44474e] font-bold">
-                  <span>Transport / Freight Charges:</span>
+                  <span>Fleet / Transport Charges:</span>
                   <span className="text-[#1c1b1f]">{formatCurrency(previewCalculations.transportCharges)}</span>
                 </div>
               )}
@@ -439,6 +468,20 @@ export function OrderDocumentPreviewModal({
                 <span>State GST (SGST) ({previewOrder.taxRateGst / 2}%):</span>
                 <span className="text-[#1c1b1f]">{formatCurrency(previewCalculations.taxAmount / 2)}</span>
               </div>
+
+              {/* Fleet-cost GST — displayed like the item GST, separately */}
+              {previewCalculations.transportCharges > 0 && previewCalculations.freightGstRate > 0 && (
+                <>
+                  <div className="flex justify-between text-[#44474e] font-bold">
+                    <span>GST on Fleet Cost — CGST ({(previewCalculations.freightGstRate || 0) / 2}%):</span>
+                    <span className="text-[#1c1b1f]">{formatCurrency(previewCalculations.freightGst / 2)}</span>
+                  </div>
+                  <div className="flex justify-between text-[#44474e] font-bold">
+                    <span>GST on Fleet Cost — SGST ({(previewCalculations.freightGstRate || 0) / 2}%):</span>
+                    <span className="text-[#1c1b1f]">{formatCurrency(previewCalculations.freightGst / 2)}</span>
+                  </div>
+                </>
+              )}
 
               <div className="h-px bg-[#e1e2ec]" />
 

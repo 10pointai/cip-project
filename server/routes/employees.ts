@@ -49,6 +49,27 @@ employeesRouter.put('/staff/:id', requirePermission('manage_employees'), async (
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// Driver ↔ vehicle assignment from the employee's profile — the FK lives on
+// the vehicle (currentDriverId), so this is a vehicle-side write surfaced on
+// the driver; either permission holder may manage it. Body:
+// { vehicleId } claim for the driver (reassigns from a previous holder) ·
+// { releaseVehicleId } free one vehicle the driver holds.
+employeesRouter.put('/staff/:id/assigned-vehicle', requireEitherPermission('manage_employees', 'manage_fleet'), (req, res) => {
+  try {
+    const opts = {
+      vehicleId: typeof req.body?.vehicleId === 'string' ? req.body.vehicleId : undefined,
+      releaseVehicleId: typeof req.body?.releaseVehicleId === 'string' ? req.body.releaseVehicleId : undefined,
+    };
+    if (!opts.vehicleId && !opts.releaseVehicleId) {
+      return res.status(400).json({ success: false, error: 'Provide vehicleId or releaseVehicleId.' });
+    }
+    const touched = serverDb.assignEmployeeVehicle(req.params.id, opts);
+    return res.json({ success: true, data: touched });
+  } catch (err: any) {
+    return res.status(400).json({ success: false, error: err.message });
+  }
+});
 employeesRouter.delete('/staff/:id', requirePermission('manage_employees'), async (req, res) => {
   try {
     const success = await deleteEmployeeDirect(req.params.id);

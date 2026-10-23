@@ -27,7 +27,15 @@ import { AttendanceInOutView } from './AttendanceInOutView';
 import { EntityDocumentsSection, StagedDocument } from '../common/EntityDocumentsSection';
 import { EmployeeDetailView } from './EmployeeDetailView';
 
-export function EmployeesView() {
+interface EmployeesViewProps {
+  /** Cross-feature open (e.g. from the Fleet Drivers tab) — pre-opens this
+   *  employee's detail page once they exist in the loaded roster */
+  focusEmployeeId?: string | null;
+  /** Cleared once the focus is handled, so the same driver can re-open */
+  onFocusHandled?: () => void;
+}
+
+export function EmployeesView({ focusEmployeeId, onFocusHandled }: EmployeesViewProps) {
   const {
     employees,
     employeeLedgerTransactions,
@@ -88,6 +96,18 @@ export function EmployeesView() {
   // Staged documents (create mode) — document ids ride the create payload and
   // the server links them once the employee id is minted (same as parties).
   const [stagedEmpDocs, setStagedEmpDocs] = useState<StagedDocument[]>([]);
+
+  // Cross-feature focus — open the requested driver's profile page (the Fleet
+  // Drivers tab lands here); handled once the roster carries the employee
+  React.useEffect(() => {
+    if (!focusEmployeeId) return;
+    const emp = employees.find((e) => e.id === focusEmployeeId);
+    if (emp) {
+      setActiveTab('directory');
+      setDetailEmployee(emp);
+      onFocusHandled?.();
+    }
+  }, [focusEmployeeId, employees]);
 
   React.useEffect(() => {
     const handleHeaderAction = (e: Event) => {

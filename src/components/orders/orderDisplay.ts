@@ -64,6 +64,8 @@ export interface StageDocDisplay {
 export interface OrderDisplay extends Order {
   inventoryApplied: boolean;
   cashApplied: boolean;
+  /** Total line weight in tonnes (sales dispatch planning — hydrated sum) */
+  weightTonnes?: number;
   // Which payment flow was applied: 'credit' (party ledger, no cash) /
   // 'account' (Cash/Bank); undefined = never applied.
   settlementType?: 'credit' | 'account';
@@ -101,6 +103,7 @@ export function saleToDisplay(s: Sale): OrderDisplay {
     amount: (li.amount ?? li.quantity * li.rate),
     gstRate: li.gstRate,
     location: li.location,
+    weightTonnes: (li as any).weightTonnes,
   }));
   const subtotal = items.reduce((sum, i) => sum + i.quantity * i.rate, 0);
   const taxAmount = items.reduce((sum, i) => sum + (i.quantity * i.rate * (i.gstRate || 0)) / 100, 0);
@@ -124,6 +127,7 @@ export function saleToDisplay(s: Sale): OrderDisplay {
       amount: li.amount ?? li.quantity * li.rate,
       gstRate: li.gstRate,
       location: li.location,
+      weightTonnes: (li as any).weightTonnes,
     }) as OrderItem),
   }));
   return {
@@ -141,9 +145,16 @@ export function saleToDisplay(s: Sale): OrderDisplay {
     taxAmount: latestStage?.taxAmount ?? taxAmount,
     totalAmount: latestStage?.totalAmount ?? subtotal + taxAmount + transportCharges,
     notes: s.notes,
+    vehicleId: (s as any).vehicleId,
+    siteAddress: (s as any).siteAddress,
+    distanceKm: (s as any).distanceKm,
     vehicleNo: s.vehicleNo,
     driverName: s.driverName,
     transportCharges,
+    freightRatePerTonne: (s as any).freightRatePerTonne,
+    freightGstRate: (s as any).freightGstRate,
+    // Order-level load weight (ONE common value; persisted on the sale master)
+    ...(s.weightTonnes !== undefined ? { weightTonnes: s.weightTonnes } : {}),
     inventoryApplied: s.inventoryApplied,
     cashApplied: s.cashApplied,
     settlementType: (s as any).settlementType || undefined,
