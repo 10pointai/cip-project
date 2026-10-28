@@ -1,6 +1,6 @@
 import { executeMysqlQuery, executeMysqlOne } from './queryClient';
 import { isMysqlConfigured } from './connection';
-import { Item, ItemCategory, ItemUnit, ItemLocation, ProductionBatchRun, Vehicle, Driver, TripSlip, Tyre, ItemStockAdjustment, StockMovementLog, Sale, Purchase } from '../../src/types';
+import { Item, ItemCategory, ItemUnit, ItemLocation, ProductionBatchRun, Vehicle, Driver, TripSlip, Tyre, VehicleExpenseEntry, ItemStockAdjustment, StockMovementLog, Sale, Purchase, SaleInvoice } from '../../src/types';
 import { serverDb } from '../db';
 import { computeItemValuation } from '../inventoryValuation';
 import { resolveUnitIdByCode, liveSyncTripSlip } from './azureSync';
@@ -381,6 +381,31 @@ export async function deleteSaleDirect(id: string): Promise<boolean> {
   return serverDb.deleteSale(id);
 }
 
+/** Next RST serial for the Add-Sale form's prefill (server-minted authority). */
+export async function fetchNextRstDirect(): Promise<{ nextRst: string }> {
+  return { nextRst: serverDb.peekNextRstNumber() };
+}
+
+// ==========================================
+// CONSOLIDATED SALES INVOICES (one invoice = N sales orders)
+// ==========================================
+
+export async function fetchSaleInvoicesDirect(): Promise<SaleInvoice[]> {
+  return serverDb.getSaleInvoices();
+}
+
+export async function fetchSaleInvoiceByIdDirect(id: string): Promise<SaleInvoice | null> {
+  return serverDb.getSaleInvoiceById(id) || null;
+}
+
+export async function createSaleInvoiceDirect(data: any): Promise<SaleInvoice> {
+  return serverDb.createSaleInvoice(data);
+}
+
+export async function deleteSaleInvoiceDirect(id: string): Promise<boolean> {
+  return serverDb.deleteSaleInvoice(id);
+}
+
 export async function fetchPurchasesDirect(): Promise<Purchase[]> {
   return serverDb.getPurchases();
 }
@@ -493,12 +518,16 @@ export async function fetchTripSlipsDirect(): Promise<TripSlip[]> {
     return serverDb.getHydratedTripSlips();
   }
   // FK-only storage (Golden Rule §2): driver/party display names JOIN their
-  // masters; a sale-derived slip's material resolves from the SALE's items
+  // masters; the VEHICLE NUMBER likewise JOINs the vehicles master by the
+  // slip's vehicle_id FK — the persisted vehicle_number column now lives only
+  // on OURSOURCED slips (typed plate, no fleet row to join; COALESCE covers it).
+  // A sale-derived slip's material resolves from the SALE's items
   // (the load weight is ONE common order-level value — no persisted copies).
   const rows = await executeMysqlQuery(`
     SELECT ts.*,
            e.name AS driver_display,
            p.name AS party_display,
+           v.registration_number AS vehicle_display,
            (SELECT i.name
               FROM sales_order_items soi
               JOIN items i ON i.id = soi.item_id
@@ -509,6 +538,7 @@ export async function fetchTripSlipsDirect(): Promise<TripSlip[]> {
     FROM trip_slips ts
     LEFT JOIN employees e ON e.id = ts.driver_id
     LEFT JOIN parties p ON p.id = ts.party_id
+    LEFT JOIN vehicles v ON v.id = ts.vehicle_id
     ORDER BY ts.date DESC, ts.created_at DESC
   `);
   return rows.map((ts: any) => ({
@@ -517,7 +547,9 @@ export async function fetchTripSlipsDirect(): Promise<TripSlip[]> {
     date: ts.date,
     time: ts.time || '10:00',
     vehicleId: ts.vehicle_id || '',
-    vehicleNo: ts.vehicle_number || ts.vehicleNo || '',
+    // The master row is authoritative for own-fleet slips; the typed plate
+    // (persisted on outsourced slips only) is the fallback
+    vehicleNo: ts.vehicle_display || ts.vehicle_number || '',
     driverId: ts.driver_id,
     // Hydrated display names (§2) — never stored on the row
     driverName: ts.driver_display || undefined,
@@ -558,6 +590,47 @@ export async function fetchTyresDirect(): Promise<Tyre[]> {
     notes: tyr.notes || undefined,
     createdAt: tyr.created_at || new Date().toISOString(),
   }));
+}
+
+export async function fetchVehicleExpensesDirect(vehicleId?: string): Promise<VehicleExpenseEntry[]> {
+  if (!isMysqlConfigured()) {
+    // Sandbox read — identical hydration contract as the MySQL path
+    return serverDb.getVehicleExpenseEntries(vehicleId);
+  }
+  // FK-only storage (Golden Rule §2): the vehicle number and account name JOIN
+  // their masters — renames in Fleet / Cash & Bank propagate to every row.
+  const rows = await executeMysqlQuery(
+    `SELECT xe.*, v.registration_number AS vehicle_display, ca.name AS account_display
+     FROM vehicle_expense_entries xe
+     LEFT JOIN vehicles v ON v.id = xe.vehicle_id
+     LEFT JOIN cash_bank_accounts ca ON ca.id = xe.account_id
+     ${vehicleId ? 'WHERE xe.vehicle_id = ?' : ''}
+     ORDER BY xe.date DESC, xe.created_at DESC`,
+    vehicleId ? [vehicleId] : undefined
+  );
+  return rows.map((e: any) => ({
+    id: e.id,
+    entryType: (e.entry_type as any) || 'expense',
+    vehicleId: e.vehicle_id,
+    accountId: e.account_id,
+    date: e.date,
+    expenseType: e.expense_type || undefined,
+    litres: e.litres !== null && e.litres !== undefined ? parseNum(e.litres) : undefined,
+    ratePerLitre: e.rate_per_litre !== null && e.rate_per_litre !== undefined ? parseNum(e.rate_per_litre) : undefined,
+    amount: parseNum(e.amount),
+    notes: e.notes || undefined,
+    // Hydrated display names (§2) — never stored on the row
+    vehicleNo: e.vehicle_display || e.vehicleNo || undefined,
+    accountName: e.account_display || e.accountName || undefined,
+    createdAt: e.created_at,
+  }));
+}
+
+export async function createVehicleExpenseDirect(slipData: any): Promise<VehicleExpenseEntry> {
+  // Single writer: serverDb.addVehicleExpenseEntry owns the balance recalc,
+  // the audit row, the liveSync AND the create-time document linking — this
+  // function duplicates nothing (same shape as createTripSlipDirect).
+  return serverDb.addVehicleExpenseEntry(slipData);
 }
 
 async function syncItemLocationMappings(itemId: string, locations: any[]) {

@@ -286,7 +286,8 @@ export function OrderDetailModal({
                       })}
                       {isSaleLocked(selectedOrder) && (
                         <span className="flex items-center gap-1.5 px-3 py-2 rounded-full text-[10px] font-bold text-[var(--color-error)] bg-[var(--color-error-container)]/25 border border-[var(--color-error)]/30">
-                          <Ban className="w-3 h-3" /> Sale locked — invoice issued
+                          <Ban className="w-3 h-3" />{' '}
+                          {selectedOrder.isInvoiced ? 'Sale locked — included in a consolidated invoice' : 'Sale locked — invoice issued'}
                         </span>
                       )}
                     </div>

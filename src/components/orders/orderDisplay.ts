@@ -64,6 +64,8 @@ export interface StageDocDisplay {
 export interface OrderDisplay extends Order {
   inventoryApplied: boolean;
   cashApplied: boolean;
+  /** Member of a consolidated sales invoice (locked + completed) */
+  isInvoiced?: boolean;
   /** Total line weight in tonnes (sales dispatch planning — hydrated sum) */
   weightTonnes?: number;
   // Which payment flow was applied: 'credit' (party ledger, no cash) /
@@ -157,6 +159,7 @@ export function saleToDisplay(s: Sale): OrderDisplay {
     ...(s.weightTonnes !== undefined ? { weightTonnes: s.weightTonnes } : {}),
     inventoryApplied: s.inventoryApplied,
     cashApplied: s.cashApplied,
+    isInvoiced: Boolean((s as any).isInvoiced),
     settlementType: (s as any).settlementType || undefined,
     settlementAccountId: (s as any).settlementAccountId || undefined,
     settlementAccountName: (s as any).settlementAccountName || undefined,
@@ -238,28 +241,26 @@ export function purchaseToDisplay(p: Purchase): OrderDisplay {
 // party statement's order details modal) ---
 
 /**
- * Sales stage hierarchy for the ⋮ popover + issue buttons. The current
- * (latest issued) stage gates what can still be issued — the user can NEVER
- * create same-or-lower documents:
- *   quotation     -> Sales Order, Invoice direct
- *   sales_order   -> Invoice; "View Proforma" shows the SO as a proforma doc
- *   sales_invoice -> sale LOCKED: no edit, no further stages, no cancel/delete
+ * Sales stage issue menu for the ⋮ popover + detail modal (2026-10-28: the
+ * invoice left the ladder — GST invoices are consolidated from N sales orders
+ * via the Create Invoice action, so no stage can ever issue one).
+ *   quotation   -> Create Sales Order
+ *   sales_order -> ladder done (invoice via Create Invoice; "View Proforma"
+ *                  shows the SO as a proforma doc)
  */
 export const salesStageActionMenu = (order: OrderDisplay): Array<{ stageType: SalesStage; label: string; icon: any }> => {
   const current = order.stage || 'sales_order';
   const menu: Array<{ stageType: SalesStage; label: string; icon: any }> = [];
-  if (current === 'sales_invoice') return menu; // locked
+  // Legacy invoiced rows + consolidated-invoice members are locked
+  if (current === 'sales_invoice' || order.isInvoiced) return menu;
   if (current === 'quotation') {
     menu.push({ stageType: 'sales_order', label: 'Create Sales Order', icon: Layers });
-    menu.push({ stageType: 'sales_invoice', label: 'Issue GST Tax Invoice', icon: FileText });
-  } else {
-    // sales_order (and legacy proforma/delivery_note rows)
-    menu.push({ stageType: 'sales_invoice', label: 'Issue GST Tax Invoice', icon: FileText });
   }
   return menu;
 };
 
-export const isSaleLocked = (order: OrderDisplay) => (order.stage || 'sales_order') === 'sales_invoice';
+export const isSaleLocked = (order: OrderDisplay) =>
+  (order.stage || 'sales_order') === 'sales_invoice' || Boolean(order.isInvoiced);
 export const editLabelFor = (order: OrderDisplay) =>
   (order.stage || 'sales_order') === 'quotation' ? 'Edit Quotation' : 'Edit Sales Order';
 

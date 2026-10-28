@@ -26,6 +26,7 @@ import { Employee, AppDocument, Vehicle } from '../../types';
 import { api } from '../../services/api';
 import { useDatabase } from '../../hooks/useDatabase';
 import { formatCurrency } from '../../utils/formatters';
+import { SearchableSelect } from '../orders/SearchableSelect';
 import { EmployeeLedgerView, employeeLedgerBalance, LedgerTxnModal } from './EmployeeLedgerView';
 import { EmployeeMonthlyTimesheetView } from './EmployeeMonthlyTimesheetModal';
 
@@ -59,11 +60,15 @@ export function EmployeeDetailView({
     db,
   } = useDatabase();
 
-  // Assign / change vehicle state (drivers only)
-  const [assignVehicleId, setAssignVehicleId] = useState('');
+  // Assign / change vehicle state (drivers only).
+  // 2026-10-28 SIMPLIFIED UX: assigning is ONE interaction — pick a vehicle in
+  // the searchable picker and it assigns IMMEDIATELY. Only a vehicle whose
+  // slot is held by ANOTHER driver asks first (inline bar, no window.confirm);
+  // removing is the ✕ on the held-vehicle chips.
+  const [pendingOccupied, setPendingOccupied] = useState<Vehicle | null>(null);
 
   useEffect(() => {
-    setAssignVehicleId('');
+    setPendingOccupied(null);
   }, [employee?.id]);
 
   /** The vehicles this driver currently holds (FK lives on the vehicle —
@@ -75,23 +80,32 @@ export function EmployeeDetailView({
 
   const employeeNameById = useMemo(() => new Map(employees.map((e) => [e.id, e.name])), [employees]);
 
-  /** Assign the picked vehicle, confirming first when the fleet slot is
-   *  taken by another driver (the move reassigns that vehicle). */
-  const applyVehicleAssignment = (vehicleId: string) => {
-    if (!employee) return;
-    const occupant = vehicles.find((v) => v.id === vehicleId)?.currentDriverId;
-    if (occupant && occupant !== employee.id) {
-      const ok = window.confirm(
-        `This vehicle is currently assigned to ${employeeNameById.get(occupant) || 'another driver'}. Reassign it to ${employee.name}?`
-      );
-      if (!ok) return;
+  /** The assignable choices: every vehicle NOT already held by this driver
+   *  (held ones show as chips above — assigning them again is a no-op). */
+  const assignableVehicles = useMemo(
+    () => vehicles.filter((v) => v.currentDriverId !== employee?.id),
+    [vehicles, employee?.id]
+  );
+
+  /** Pick-to-assign: free vehicles move instantly; occupied ones pause for
+   *  an inline confirmation (the move reassigns that vehicle). */
+  const handlePickVehicle = (vehicleId: string) => {
+    setPendingOccupied(null);
+    if (!employee || !vehicleId) return;
+    const veh = vehicles.find((v) => v.id === vehicleId);
+    if (!veh) return;
+    if (veh.currentDriverId && veh.currentDriverId !== employee.id) {
+      setPendingOccupied(veh);
+      return;
     }
     db.assignEmployeeVehicle(employee.id, { vehicleId });
-    setAssignVehicleId('');
   };
 
   const releaseAssignedVehicle = (vehicleId: string) => {
-    if (employee) db.assignEmployeeVehicle(employee.id, { releaseVehicleId: vehicleId });
+    if (employee) {
+      setPendingOccupied(null);
+      db.assignEmployeeVehicle(employee.id, { releaseVehicleId: vehicleId });
+    }
   };
 
   // Details master card (default) | Ledger | Attendance
@@ -402,13 +416,17 @@ export function EmployeeDetailView({
             </div>
           </div>
 
-          {/* Assigned fleet vehicle(s) — drivers only. The FK lives on the
-              vehicle (currentDriverId); the picker claims / the chips release */}
+          {/* Assigned fleet vehicle(s) — drivers only. SIMPLIFIED (2026-10-28):
+              held vehicles as chips with an explicit Remove; assigning is ONE
+              interaction (pick in the searchable picker — free trucks assign
+              instantly; one held by another driver asks inline before moving). */}
           {employee.role === 'driver' && (
             <div className="p-4 rounded-2xl border border-[var(--color-outline-variant)] bg-[var(--color-surface-container-low)]">
               <h4 className="text-[10px] font-black text-[var(--color-secondary)] uppercase tracking-wider mb-3 flex items-center gap-1.5">
                 <Truck className="w-3.5 h-3.5" /> Assigned Fleet Vehicle{heldVehicles.length === 1 ? '' : 's'}
               </h4>
+
+              {/* Currently held — one clear, removable chip per vehicle */}
               {heldVehicles.length === 0 ? (
                 <p className="text-xs text-[var(--color-on-surface-variant)] mb-3">No vehicle assigned to this driver yet.</p>
               ) : (
@@ -423,8 +441,9 @@ export function EmployeeDetailView({
                       <button
                         type="button"
                         onClick={() => releaseAssignedVehicle(v.id)}
-                        className="p-1 rounded-full hover:bg-[var(--color-surface-container-highest)] text-[var(--color-on-surface-variant)] transition-colors"
-                        title={`Unassign ${v.vehicleNo}`}
+                        className="p-1 rounded-full hover:bg-[var(--color-surface-container-highest)] text-[var(--color-on-surface-variant)] hover:text-[var(--color-error)] transition-colors"
+                        title={`Remove ${v.vehicleNo} from this driver`}
+                        aria-label={`Remove ${v.vehicleNo}`}
                       >
                         <X className="w-3 h-3" />
                       </button>
@@ -432,36 +451,50 @@ export function EmployeeDetailView({
                   ))}
                 </div>
               )}
-              <div className="flex flex-wrap items-center gap-2">
-                <select
-                  value={assignVehicleId}
-                  onChange={(e) => setAssignVehicleId(e.target.value)}
-                  className="flex-1 min-w-[220px] max-w-xs text-xs p-2.5 bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] rounded-lg border border-[var(--color-outline-variant)] focus:border-[var(--color-primary)] outline-hidden font-medium"
-                >
-                  <option value="">-- Choose a vehicle to assign --</option>
-                  {vehicles.map((v) => {
-                    const occupant = v.currentDriverId === employee.id
-                      ? null
-                      : employeeNameById.get(v.currentDriverId || '') || null;
-                    return (
-                      <option key={v.id} value={v.id}>
-                        {v.vehicleNo} · {v.type}{v.status === 'on_trip' ? ' · ON TRIP' : ''}{occupant ? ` — currently ${occupant}` : ''}
-                      </option>
-                    );
-                  })}
-                </select>
-                <button
-                  type="button"
-                  disabled={!assignVehicleId}
-                  onClick={() => applyVehicleAssignment(assignVehicleId)}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-secondary)] text-[var(--color-on-secondary)] rounded-full text-[11px] font-bold transition-all hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  <Plus className="w-3.5 h-3.5" /> Assign Vehicle
-                </button>
+
+              {/* One-interaction assign: pick → assigned; occupied asks inline */}
+              <div className="max-w-xs">
+                <SearchableSelect
+                  value=""
+                  onChange={handlePickVehicle}
+                  placeholder="Select a vehicle to assign..."
+                  options={assignableVehicles.map((v) => ({
+                    value: v.id,
+                    label: v.vehicleNo,
+                    sub: `${v.type}${v.status === 'on_trip' ? ' · ON TRIP' : ''}${v.currentDriverId ? ` — with ${employeeNameById.get(v.currentDriverId) || 'another driver'}` : ' — free'}`,
+                  }))}
+                />
               </div>
-              <p className="text-[9px] font-semibold text-[var(--color-on-surface-variant)] mt-1.5">
-                Assigning a vehicle held by another driver moves it to this employee (one active driver per vehicle).
-              </p>
+
+              {/* Inline confirmation — only when the picked truck is held by
+                  someone else; nothing moved until the user decides */}
+              {pendingOccupied && (
+                <div className="mt-2.5 p-3 rounded-xl bg-[var(--color-warning-container)]/40 border border-[var(--color-warning)]/30 flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[11px] text-[var(--color-on-surface-variant)]">
+                    <strong className="font-mono text-[var(--color-on-surface)]">{pendingOccupied.vehicleNo}</strong> is currently with{' '}
+                    <strong className="text-[var(--color-on-surface)]">{employeeNameById.get(pendingOccupied.currentDriverId || '') || 'another driver'}</strong> — moving it reassigns to {employee.name}.
+                  </span>
+                  <span className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        db.assignEmployeeVehicle(employee.id, { vehicleId: pendingOccupied.id });
+                        setPendingOccupied(null);
+                      }}
+                      className="px-3.5 py-1.5 rounded-full text-[10px] font-bold bg-[var(--color-secondary)] text-[var(--color-on-secondary)] hover:opacity-90 transition-all"
+                    >
+                      Move to {employee.name.split(' ')[0]}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPendingOccupied(null)}
+                      className="px-3 py-1.5 rounded-full text-[10px] font-bold text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container-high)] transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </span>
+                </div>
+              )}
             </div>
           )}
 

@@ -256,6 +256,38 @@ documentsRouter.post(
   }
 );
 
+// GET /api/documents/expense/:expenseId — documents attached to a vehicle
+// expense entry (fuel bill, repair receipt, payment acknowledgement)
+documentsRouter.get(
+  '/expense/:expenseId',
+  requirePermission('manage_fleet'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const docs = serverDb.getDocumentsForExpense(req.params.expenseId);
+      res.json({ success: true, count: docs.length, data: docs });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+);
+
+// POST /api/documents/expense/:expenseId/link — map already-uploaded documents
+// to an expense entry (used by the expense form's staged uploads on create;
+// edit-mode uploads link immediately)
+documentsRouter.post(
+  '/expense/:expenseId/link',
+  requirePermission('manage_fleet'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { documentIds } = req.body || {};
+      const added = serverDb.linkExpenseDocuments(req.params.expenseId, Array.isArray(documentIds) ? documentIds : []);
+      res.json({ success: true, added, message: `${added} document(s) linked to the expense entry.` });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+);
+
 /**
  * GET /api/documents/:id/download — view link, served via CloudFront ALWAYS
  * (user rule: every served URL is the CDN form; documents.url already carries

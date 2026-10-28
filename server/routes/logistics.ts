@@ -10,6 +10,8 @@ import {
   createTripSlipDirect,
   fetchTyresDirect,
   createTyreDirect,
+  fetchVehicleExpensesDirect,
+  createVehicleExpenseDirect,
 } from '../mysql/operationsService';
 
 export const logisticsRouter = Router();
@@ -95,6 +97,42 @@ logisticsRouter.post('/tyres', requirePermission('manage_tyres'), async (req, re
 });
 logisticsRouter.put('/tyres/:id', requirePermission('manage_tyres'), (req, res) => res.json({ success: true, data: serverDb.updateTyre(req.params.id, req.body) }));
 logisticsRouter.delete('/tyres/:id', requirePermission('manage_tyres'), (req, res) => res.json({ success: serverDb.deleteTyre(req.params.id) }));
+
+// --- VEHICLE EXPENSE LOG (generic expense + diesel entries) ---
+// Balance stream: every create/edit/delete rebalances the linked cash/bank
+// account (the entry list is the balance truth — same contract as
+// vehicle_emi_entries). The READ is auth-only, like GET /logistics/vehicles.
+logisticsRouter.get('/expenses', async (req, res) => {
+  try {
+    const data = await fetchVehicleExpensesDirect(req.query.vehicleId ? String(req.query.vehicleId) : undefined);
+    res.json({ success: true, count: data.length, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+logisticsRouter.post('/expenses', requirePermission('manage_fleet'), async (req, res) => {
+  try {
+    const data = await createVehicleExpenseDirect(req.body);
+    res.status(201).json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+logisticsRouter.put('/expenses/:id', requirePermission('manage_fleet'), async (req, res) => {
+  try {
+    const data = serverDb.updateVehicleExpenseEntry(req.params.id, req.body);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+logisticsRouter.delete('/expenses/:id', requirePermission('manage_fleet'), async (req, res) => {
+  try {
+    res.json({ success: serverDb.deleteVehicleExpenseEntry(req.params.id) });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // --- VEHICLE EMI ENTRIES (auto cron rows + operator-recorded payments) ---
 // Every create/edit/delete rebalances the linked cash/bank account (the

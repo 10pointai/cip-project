@@ -18,7 +18,7 @@ import {
   Sparkles,
   CreditCard,
 } from 'lucide-react';
-import { Party, Transaction, CompanySettings, PartyType, PartyCategory, Sale, Purchase, CashBankAccount } from '../../types';
+import { Party, Transaction, CompanySettings, PartyType, PartyCategory, Sale, Purchase, SaleInvoice, CashBankAccount } from '../../types';
 import { formatCurrency, formatCompactCurrency } from '../../utils/formatters';
 import { PartyFormModal } from './PartyFormModal';
 import { BulkPartyEntryModal } from './BulkPartyEntryModal';
@@ -33,6 +33,8 @@ interface PartiesViewProps {
   /** Relational sale/purchase masters feeding the statement ledger */
   sales?: Sale[];
   purchases?: Purchase[];
+  /** Consolidated invoices — sale_invoice ledger rows open the invoice story */
+  saleInvoices?: SaleInvoice[];
   settings: CompanySettings;
   accounts?: CashBankAccount[];
   onAddParty: (partyData: any) => void;
@@ -40,6 +42,8 @@ interface PartiesViewProps {
   onUpdateParty: (id: string, updates: any) => void;
   onAddTransaction: (txData: any) => void;
   onRecordPayment?: (paymentData: any) => void;
+  /** Open the global Create-Invoice flow for this party (consolidated invoices) */
+  onOpenCreateInvoice?: (partyId?: string) => void;
   /** Jump to the Sales/Purchases module with an order's flow deep-linked */
   onOpenInOrders?: (orderId: string, orderType: 'sales' | 'purchase', action: string) => void;
 }
@@ -49,6 +53,7 @@ export function PartiesView({
   transactions,
   sales,
   purchases,
+  saleInvoices,
   settings,
   accounts,
   onAddParty,
@@ -56,6 +61,7 @@ export function PartiesView({
   onUpdateParty,
   onAddTransaction,
   onRecordPayment,
+  onOpenCreateInvoice,
   onOpenInOrders,
 }: PartiesViewProps) {
   const { showToast } = useToast();
@@ -171,8 +177,10 @@ export function PartiesView({
           transactions={transactions}
           sales={sales}
           purchases={purchases}
+          saleInvoices={saleInvoices}
           accounts={accounts}
           settings={settings}
+          onCreateInvoice={onOpenCreateInvoice}
           onBack={() => setSelectedPartyId(null)}
           onEdit={(party) => {
             setEditingParty(party);

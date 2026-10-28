@@ -27,8 +27,9 @@ import {
   Sparkles,
   FolderOpen,
   Paperclip,
+  FileCheck,
 } from 'lucide-react';
-import { Party, Transaction, CompanySettings, CashBankAccount, Sale, Purchase } from '../../types';
+import { Party, Transaction, CompanySettings, CashBankAccount, Sale, Purchase, SaleInvoice } from '../../types';
 import { formatDate } from '../../utils/formatters';
 import { PrintStatementModal } from '../common/PrintStatementModal';
 import { EvidenceManager } from '../evidence/EvidenceManager';
@@ -39,6 +40,7 @@ import { PartyStatementSummaryCards } from './PartyStatementSummaryCards';
 import { PartyStatementLedger } from './PartyStatementLedger';
 import { PaymentVoucherDetailModal } from './PaymentVoucherDetailModal';
 import { OrderDetailModal } from '../orders/OrderDetailModal';
+import { SaleInvoiceDetailModal } from '../orders/SaleInvoiceDetailModal';
 import { saleToDisplay, purchaseToDisplay, OrderDisplay } from '../orders/orderDisplay';
 import { EntityDocumentsSection } from '../common/EntityDocumentsSection';
 
@@ -50,10 +52,16 @@ interface PartyDetailViewProps {
   purchases?: Purchase[];
   /** Cash/Bank accounts for payment-voucher lookups */
   accounts?: CashBankAccount[];
+  /** Consolidated sales invoices — their journal-voucher ledger rows open the
+   *  full invoice story (SaleInvoiceDetailModal) instead of the generic one */
+  saleInvoices?: SaleInvoice[];
   settings: CompanySettings;
   onBack: () => void;
   onEdit: (party: Party) => void;
   onRecordPayment: (partyId: string, type: 'payment_in' | 'payment_out') => void;
+  /** Open the global Create-Invoice flow preset to this party (one
+   *  consolidated GST invoice for several of its sales orders) */
+  onCreateInvoice?: (partyId?: string) => void;
   /** Jump to the Sales/Purchases module with this order's edit/issue flow
    *  opened (deep link) — omit ⇒ issue/edit buttons are hidden */
   onOpenInOrders?: (orderId: string, orderType: 'sales' | 'purchase', action: string) => void;
@@ -65,10 +73,12 @@ export function PartyDetailView({
   sales,
   purchases,
   accounts,
+  saleInvoices,
   settings,
   onBack,
   onEdit,
   onRecordPayment,
+  onCreateInvoice,
   onOpenInOrders,
 }: PartyDetailViewProps) {
   const { hasPermission } = useAuth();
@@ -261,6 +271,18 @@ export function PartyDetailView({
             </div>
           </div>
 
+          {onCreateInvoice && hasPermission('manage_sales') && (
+            <button
+              type="button"
+              onClick={() => onCreateInvoice(party.id)}
+              className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary-container)] hover:opacity-90 text-[var(--color-on-primary-container)] font-bold text-xs rounded-full shadow-xs transition-all hover:scale-[1.01] active:scale-[0.99] shrink-0"
+              title="Create one consolidated GST invoice from several of this party's uninvoiced sales orders"
+            >
+              <FileCheck className="w-3.5 h-3.5" />
+              <span>Create Invoice</span>
+            </button>
+          )}
+
           {canRecordPayments && (
             <button
               type="button"
@@ -412,6 +434,27 @@ export function PartyDetailView({
           );
         }
         if (detailEntry.transaction) {
+          // Consolidated invoice journal voucher (type sale_invoice, CINV-…
+          // reference) → open the FULL invoice story, same as the Sales
+          // feature's Invoices tab. Match by the stored voucher FK first,
+          // then the invoice-number reference. Other vouchers (legacy per-sale
+          // journals, receipts, manual entries) keep the payment-voucher modal.
+          const txn = detailEntry.transaction;
+          const invoice = (saleInvoices || []).find(
+            (si) =>
+              (si.invoiceVoucherId && si.invoiceVoucherId === txn.id) ||
+              (si.invoiceNumber && si.invoiceNumber && txn.referenceNumber === si.invoiceNumber)
+          );
+          if (invoice) {
+            return (
+              <SaleInvoiceDetailModal
+                isOpen
+                onClose={() => setDetailEntry(null)}
+                invoice={invoice}
+                settings={settings}
+              />
+            );
+          }
           const accountName = detailEntry.transaction.accountId
             ? (accounts || localDb.getAccounts()).find((a) => a.id === detailEntry.transaction!.accountId)?.name
             : undefined;

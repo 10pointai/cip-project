@@ -11,7 +11,7 @@ import {
   Edit2,
   Printer,
 } from 'lucide-react';
-import { Party, Transaction, CompanySettings, Sale, Purchase, CashBankAccount } from '../../types';
+import { Party, Transaction, CompanySettings, Sale, Purchase, SaleInvoice, CashBankAccount } from '../../types';
 import { formatCurrency } from '../../utils/formatters';
 import { PrintStatementModal } from '../common/PrintStatementModal';
 import { useAuth } from '../../context/AuthContext';
@@ -19,6 +19,7 @@ import { cloudStore as localDb } from '../../services/cloudStore';
 import { PartyLedgerEntry, buildPartyStatement, statementToVoucherTransactions } from './partyStatement';
 import { PartyStatementLedger } from './PartyStatementLedger';
 import { OrderDetailModal } from '../orders/OrderDetailModal';
+import { SaleInvoiceDetailModal } from '../orders/SaleInvoiceDetailModal';
 import { PaymentVoucherDetailModal } from './PaymentVoucherDetailModal';
 import { saleToDisplay, purchaseToDisplay, OrderDisplay } from '../orders/orderDisplay';
 
@@ -40,6 +41,8 @@ interface PartyDetailModalProps {
   onRecordPayment: (partyId: string, type: 'payment_in' | 'payment_out') => void;
   /** Optional jump to the Sales/Purchases module (issue/edit deep link) */
   onOpenInOrders?: (orderId: string, orderType: 'sales' | 'purchase', action: string) => void;
+  /** Consolidated invoices — sale_invoice journal rows open the invoice story */
+  saleInvoices?: SaleInvoice[];
 }
 
 export function PartyDetailModal({
@@ -50,6 +53,7 @@ export function PartyDetailModal({
   sales,
   purchases,
   accounts,
+  saleInvoices,
   settings,
   onEdit,
   onRecordPayment,
@@ -389,6 +393,24 @@ export function PartyDetailModal({
           );
         }
         if (detailEntry.transaction) {
+          // Consolidated invoice journal (CINV-…) → the full invoice story,
+          // same as the Sales Invoices tab (see PartyDetailView)
+          const txn = detailEntry.transaction;
+          const invoice = (saleInvoices || []).find(
+            (si) =>
+              (si.invoiceVoucherId && si.invoiceVoucherId === txn.id) ||
+              (si.invoiceNumber && txn.referenceNumber === si.invoiceNumber)
+          );
+          if (invoice) {
+            return (
+              <SaleInvoiceDetailModal
+                isOpen
+                onClose={() => setDetailEntry(null)}
+                invoice={invoice}
+                settings={settings}
+              />
+            );
+          }
           const accountName = detailEntry.transaction.accountId
             ? (accounts || localDb.getAccounts()).find((a) => a.id === detailEntry.transaction!.accountId)?.name
             : undefined;

@@ -61,17 +61,19 @@ interface BulkDoc {
   paymentMode: string;
 }
 
+// 2026-10-28: the DIRECT invoice row is back in bulk too (like the single
+// create popover) — stock + forced credit apply equally to SO and Invoice.
 const STAGE_CHOICES: Array<{ id: SalesStage; label: string }> = [
   { id: 'quotation', label: 'Quotation' },
   { id: 'sales_order', label: 'Sales Order' },
-  { id: 'sales_invoice', label: 'Invoice' },
+  { id: 'sales_invoice', label: 'Invoice (Direct)' },
 ];
 
 /** Document number prefix per stage (mirrors suggestStageNumber): */
 const PREFIX_BY_STAGE: Record<string, string> = {
   quotation: 'QUO',
   sales_order: 'SO',
-  sales_invoice: 'INV',
+  sales_invoice: 'INV', // legacy rows only
 };
 
 const todayStr = () => new Date().toISOString().split('T')[0];
@@ -131,10 +133,11 @@ export function BulkSalesCreateModal({
   const [pasteText, setPasteText] = useState('');
   const [pasteReport, setPasteReport] = useState<{ ok: number; badParties: string[]; badItems: string[] } | null>(null);
 
-  // Fresh batch every time the modal opens — 5 empty documents ready to fill
+  // Fresh batch every time the modal opens — ONE empty document to start;
+  // more rows via "Add Row" / paste-in
   useEffect(() => {
     if (!isOpen) return;
-    setDocs(Array.from({ length: 5 }, emptyDoc));
+    setDocs(Array.from({ length: 1 }, emptyDoc));
     setError(null);
     setIsPasteOpen(false);
     setPasteText('');
@@ -171,10 +174,20 @@ export function BulkSalesCreateModal({
     const used = new Set(existingNumbers);
     const year = new Date().getFullYear();
     const nextForPrefix = new Map<string, number>();
-    const mk = (prefix: string, n: number) => `${prefix}-${year}-${String(n).padStart(4, '0')}`;
+    // RST (2026-10-28): sales_order numbers are BARE serials ('0001', no
+    // prefix/year); the batch continues the global serial — skipping every
+    // serial already in the books AND one past the highest in use (deleted
+    // orders' numbers stay spent server-side).
+    let serialStart = 0;
+    for (const v of used) {
+      if (/^\d+$/.test(String(v))) serialStart = Math.max(serialStart, parseInt(String(v), 10));
+    }
+    const mk = (prefix: string, n: number) =>
+      prefix === 'RST' ? String(n).padStart(4, '0') : `${prefix}-${year}-${String(n).padStart(4, '0')}`;
     return docs.map((doc) => {
-      const prefix = PREFIX_BY_STAGE[doc.stage] || 'SO';
-      let n = nextForPrefix.get(prefix) || 1;
+      let prefix = PREFIX_BY_STAGE[doc.stage] || 'SO';
+      if (doc.stage === 'sales_order') prefix = 'RST';
+      let n = nextForPrefix.get(prefix) || (prefix === 'RST' ? serialStart + 1 : 1);
       while (used.has(mk(prefix, n))) n++;
       const num = mk(prefix, n);
       used.add(num);
@@ -247,9 +260,11 @@ export function BulkSalesCreateModal({
     if (doc.stage === stage) return;
     patchDoc(doc.id, {
       stage,
-      settlementType: stage === 'sales_invoice' ? 'credit' : 'none',
+      // 2026-10-28 client rule: quotation touches nothing; SO / direct
+      // invoice ALWAYS dispatch AND book the forced CREDIT flow.
+      settlementType: stage === 'quotation' ? 'none' : 'credit',
       settlementAccountId: '',
-      updateInventory: stage === 'sales_invoice',
+      updateInventory: stage !== 'quotation',
     });
   };
 
@@ -420,16 +435,20 @@ export function BulkSalesCreateModal({
         setError(`Document ${i + 1} (${num}): Please select a Party.`);
         return;
       }
+      // Compulsory vehicle (same rule as the Add Sale form) — the trip slip
+      // derives from this attachment. Quotation-stage documents ship without
+      // one (same rule as the single-create form; the vehicle attaches when
+      // the quotation advances).
+      if (doc.stage !== 'quotation') {
       if (doc.vehicleId === '__out__') {
         if (!doc.outsourcedNo.trim()) {
           setError(`Document ${i + 1} (${num}): Enter the outsourced vehicle number.`);
           return;
         }
       } else if (!doc.vehicleId || !fleetVehicles.some((v) => v.id === doc.vehicleId)) {
-        // Compulsory vehicle (same rule as the Add Sale form) — the trip slip
-        // derives from this attachment
         setError(`Document ${i + 1} (${num}): Attach a fleet vehicle or mark the vehicle as Outsourced — sales orders always carry a dispatch trip.`);
         return;
+      }
       }
       const validLines = doc.items.filter((l) => l.itemId && Number(l.quantity) > 0 && Number(l.rate) > 0);
       if (validLines.length === 0) {
@@ -451,12 +470,8 @@ export function BulkSalesCreateModal({
           return;
         }
       }
-      if (doc.settlementType === 'account') {
-        if (!doc.settlementAccountId || !activeAccounts.find((a) => a.id === doc.settlementAccountId)) {
-          setError(`Document ${i + 1} (${num}): The selected Cash/Bank account is invalid. Please choose an active account or Book on credit.`);
-          return;
-        }
-      }
+      // (No settlement-account validation: 2026-10-28 — the money flow is
+      // FORCE-BOOKED on credit for every SO / direct invoice; nothing to pick.)
     }
 
     docs.forEach((doc, i) => {
@@ -479,8 +494,12 @@ export function BulkSalesCreateModal({
           };
         });
       const { subtotal, taxAmount } = calcDoc(doc);
-      const updateInventory =
-        doc.stage === 'sales_invoice' ? true : doc.stage === 'sales_order' ? doc.updateInventory : false;
+      // 2026-10-28 client rule: SO / direct-invoice docs ALWAYS apply the
+      // dispatch + book the forced CREDIT flow (the server enforces this too —
+      // payload values are explicit so the optimistic row matches instantly);
+      // quotations touch nothing.
+      const moneyStage = doc.stage === 'sales_order' || doc.stage === 'sales_invoice';
+      const updateInventory = moneyStage ? true : false;
       // Dispatch: own fleet (FK) or OUTSOURCED (typed plate on the master)
       onAddSale({
         saleNumber: docNumbers[i],
@@ -508,11 +527,11 @@ export function BulkSalesCreateModal({
           stageType: doc.stage,
           stageNumber: docNumbers[i],
           date: doc.date,
+          // 2026-10-28 client rule: forced dispatch + forced credit at the
+          // money stages; quotation carries no flow
           updateInventory,
-          updateCash: doc.settlementType !== 'none',
-          settlementType: doc.settlementType !== 'none' ? doc.settlementType : undefined,
-          settlementAccountId: doc.settlementType === 'account' ? doc.settlementAccountId : undefined,
-          paymentMode: doc.settlementType === 'account' ? doc.paymentMode : undefined,
+          updateCash: moneyStage,
+          settlementType: moneyStage ? 'credit' : undefined,
         },
       });
     });
@@ -570,84 +589,18 @@ export function BulkSalesCreateModal({
             </div>
           )}
 
-          {/* Paste from Excel panel */}
-          <div className="rounded-2xl border border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] overflow-hidden">
-            <button
-              type="button"
-              onClick={() => setIsPasteOpen((open) => !open)}
-              className="w-full flex items-center justify-between gap-2 px-4 py-2.5 text-left hover:bg-[var(--color-surface-container-high)]/50 transition-colors"
-            >
-              <span className="flex items-center gap-2 text-xs font-bold text-[var(--color-on-surface)]">
-                <ClipboardPaste className="w-4 h-4 text-[var(--color-primary)]" /> Paste from Excel / Google Sheets
-              </span>
-              <span className="text-[10px] font-bold text-[var(--color-on-surface-variant)]">
-                {isPasteOpen ? 'Hide' : 'Columns: Party | Item | Quantity | Rate'}
-              </span>
-            </button>
-            {isPasteOpen && (
-              <div className="px-4 pb-4 pt-2 space-y-2 border-t border-[var(--color-outline-variant)]/60">
-                <p className="text-[10px] text-[var(--color-on-surface-variant)]">
-                  Copy your rows in Excel/Sheets, paste below and press Import. Columns per line:
-                  <strong className="text-[var(--color-on-surface)]"> Party | Item | Quantity | Rate</strong> (tab or comma separated; a header line is skipped
-                  automatically). Parties and items are matched by name/code — the rate defaults to the item's sale price when empty.
-                  <strong className="text-[var(--color-on-surface)]"> Consecutive rows with the same party merge into one document</strong>, so multiple item
-                  lines of an order can be pasted one after another. Imported documents arrive as <strong className="text-[var(--color-on-surface)]">Sales
-                  Orders</strong> dated today. You can also paste <strong className="text-[var(--color-on-surface)]">directly onto the grid</strong> with Ctrl+V.
-                </p>
-                <textarea
-                  rows={6}
-                  value={pasteText}
-                  onChange={(e) => setPasteText(e.target.value)}
-                  placeholder={'Sharma Traders\tBIT-EMP\t50\t4200\nSharma Traders\tBIT-VG30\t20\t4150\nVerma Infra\tBIT-EMP\t25\t4200'}
-                  className="w-full px-3 py-2.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-[11px] font-mono font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                />
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => importPaste(pasteText)}
-                      disabled={!pasteText.trim()}
-                      className="px-4 py-1.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-[11px] font-bold hover:opacity-90 disabled:opacity-40 transition-all"
-                    >
-                      Import Rows
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPasteText('');
-                        setPasteReport(null);
-                      }}
-                      className="px-3 py-1.5 text-[11px] font-bold text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)] transition-colors"
-                    >
-                      Clear
-                    </button>
-                  </div>
-                  {pasteReport && (
-                    <div className="text-[10px] font-bold flex items-center gap-2 flex-wrap">
-                      <span className="text-[var(--color-success)]">{pasteReport.ok} row(s) matched</span>
-                      {(pasteReport.badParties.length > 0 || pasteReport.badItems.length > 0) && (
-                        <span className="text-[var(--color-error)] inline-flex items-center gap-1">
-                          <AlertTriangle className="w-3 h-3" />
-                          Unmatched parties: {pasteReport.badParties.join(', ') || '—'} · Items: {pasteReport.badItems.join(', ') || '—'} — resolve them in the grid below
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
+          
 
           {/* The grid — one ROW per item line; a document's lines sit together,
               its document-level columns spanning them */}
           <div className="border border-[var(--color-outline-variant)] rounded-2xl bg-[var(--color-surface-container)] overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full text-left min-w-[3250px]">
+              <table className="w-full text-left min-w-[3010px]">
                 <thead>
                   <tr className="bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] font-bold text-[10px] uppercase border-b border-[var(--color-outline-variant)]">
                     <th className="py-2.5 px-2 w-10 text-center">#</th>
                     <th className="py-2.5 px-2 w-48">Type</th>
-                    <th className="py-2.5 px-3 min-w-[170px]">Doc Number</th>
+                    <th className="py-2.5 px-3 min-w-[170px]">REF/RST</th>
                     <th className="py-2.5 px-3 w-48">Date</th>
                     <th className="py-2.5 px-3 min-w-[240px]">Party</th>
                     <th className="py-2.5 px-3 min-w-[260px]">Item / Product</th>
@@ -657,8 +610,9 @@ export function BulkSalesCreateModal({
                     <th className="py-2.5 px-3 w-28">GST</th>
                     <th className="py-2.5 px-3 w-32 text-right">Line Amount</th>
                     <th className="py-2.5 px-3 w-36 text-right">Doc Total</th>
-                    <th className="py-2.5 px-2 w-24 text-center">Update Stock</th>
-                    <th className="py-2.5 px-3 min-w-[210px]">Payment Settlement</th>
+                    {/* Update Stock + Payment Settlement columns REMOVED
+                        (2026-10-28): stock deducts and the flow books credit
+                        automatically at the money stages — nothing to choose */}
                     <th className="py-2.5 px-3 min-w-[190px]">Vehicle *</th>
                     <th className="py-2.5 px-3 w-28">Weight (MT)</th>
                     <th className="py-2.5 px-3 w-28">Distance (km)</th>
@@ -865,81 +819,8 @@ export function BulkSalesCreateModal({
 
                           {isGroupStart && (
                             <>
-                              {/* Stock — per document; quotation never deducts, invoice always does */}
-                              <td rowSpan={lines.length} className="py-2 px-2 text-center align-top">
-                                {doc.stage === 'quotation' ? (
-                                  <span className="text-[11px] font-bold text-[var(--color-outline)] block pt-1.5">—</span>
-                                ) : doc.stage === 'sales_invoice' ? (
-                                  <span
-                                    title="Issuing an invoice permanently posts the FIFO dispatch — inventory always deducts"
-                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 mt-1.5 rounded bg-[var(--color-primary-container)] text-[9px] font-bold uppercase text-[var(--color-on-primary-container)]"
-                                  >
-                                    <Boxes className="w-2.5 h-2.5" /> ON
-                                  </span>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    role="switch"
-                                    aria-checked={doc.updateInventory}
-                                    title={doc.updateInventory ? 'FIFO sale_dispatch posts at batch save' : 'Inventory stays untouched'}
-                                    onClick={() => patchDoc(doc.id, { updateInventory: !doc.updateInventory })}
-                                    className={`relative inline-flex h-5 w-9 shrink-0 mt-1.5 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                                      doc.updateInventory ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-surface-container-highest)]'
-                                    } cursor-pointer`}
-                                  >
-                                    <span
-                                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                                        doc.updateInventory ? 'translate-x-4' : 'translate-x-0'
-                                      }`}
-                                    />
-                                  </button>
-                                )}
-                              </td>
-
-                              {/* Per-document payment settlement */}
-                              <td rowSpan={lines.length} className="py-2 px-3 align-top">
-                                {doc.stage === 'quotation' ? (
-                                  <span className="text-[11px] font-bold text-[var(--color-outline)] block pt-1.5">—</span>
-                                ) : (
-                                  <>
-                                    <select
-                                      value={doc.settlementType === 'account' ? doc.settlementAccountId : doc.settlementType}
-                                      onChange={(e) => {
-                                        const v = e.target.value;
-                                        if (v === 'none' || v === 'credit') {
-                                          patchDoc(doc.id, { settlementType: v, settlementAccountId: '' });
-                                        } else {
-                                          patchDoc(doc.id, { settlementType: 'account', settlementAccountId: v, paymentMode: doc.paymentMode || 'bank_transfer' });
-                                        }
-                                      }}
-                                      className={`w-full mt-0.5 px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${
-                                        doc.settlementType === 'account' && !doc.settlementAccountId ? 'border-[var(--color-error)]/60' : ''
-                                      }`}
-                                    >
-                                      {doc.stage !== 'sales_invoice' && <option value="none">Don't touch</option>}
-                                      <option value="credit">Book on credit</option>
-                                      {activeAccounts.map((acc) => (
-                                        <option key={acc.id} value={acc.id}>
-                                          {acc.name} [{acc.type === 'bank' ? (acc.bankName || 'Bank A/c') : 'Cash'}]
-                                        </option>
-                                      ))}
-                                    </select>
-                                    {doc.settlementType === 'account' && (
-                                      <select
-                                        value={doc.paymentMode}
-                                        onChange={(e) => patchDoc(doc.id, { paymentMode: e.target.value })}
-                                        className="w-full mt-1 px-2 py-1 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-[10px] font-medium text-[var(--color-on-surface-variant)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                                      >
-                                        <option value="bank_transfer">Bank Transfer / IMPS</option>
-                                        <option value="neft_rtgs">NEFT / RTGS</option>
-                                        <option value="upi">UPI / QR Code</option>
-                                        <option value="cheque">Cheque / DD</option>
-                                        <option value="cash">Cash</option>
-                                      </select>
-                                    )}
-                                  </>
-                                )}
-                              </td>
+                              {/* Update Stock + Payment Settlement cells REMOVED
+                                  (2026-10-28 — forced at the money stages) */}
 
                               {/* Dispatch & trip: vehicle (compulsory, same rule
                                   as the Add Sale form — own fleet or OUTSOURCED)
@@ -1143,25 +1024,13 @@ export function BulkSalesCreateModal({
                 >
                   <Plus className="w-3.5 h-3.5" /> Add 5 Rows
                 </button>
-                <span className="text-[10px] text-[var(--color-on-surface-variant)] font-medium ml-1">
-                  (new documents, one item each)
-                </span>
+                
               </div>
-              <p className="text-[10px] text-[var(--color-on-surface-variant)] font-medium hidden sm:flex items-center gap-1.5">
-                <ClipboardPaste className="w-3 h-3" /> Tip: copy rows in Excel and press Ctrl+V anywhere on the grid — consecutive same-party lines merge into one document.
-              </p>
+              
             </div>
           </div>
 
-          {/* Batch summary */}
-          <div className="p-3.5 bg-[var(--color-success-container)]/30 border border-[var(--color-success)]/30 rounded-2xl text-[11px] text-[var(--color-on-success-container)] flex items-start gap-2.5">
-            <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-            <div>
-              <span className="font-bold">Batch summary:</span> {stageCounts || 'no rows yet'} ({totalLines} item line{totalLines !== 1 ? 's' : ''} across{' '}
-              {docs.length} document{docs.length !== 1 ? 's' : ''}) will be created at once ({formatCurrency2(batchTotal)} total GST inclusive), numbered per
-              stage automatically and shown on the list right away.
-            </div>
-          </div>
+        
         </div>
 
         {/* Footer */}

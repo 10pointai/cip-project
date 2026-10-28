@@ -20,25 +20,46 @@ import {
   Landmark,
   Edit3,
   DollarSign,
+  Receipt,
+  Fuel,
+  Paperclip,
+  Layers,
 } from 'lucide-react';
-import { Vehicle, Employee, TripSlip, Order, CompanySettings, Tyre, VehicleEmiDetails, VehicleEmiEntry, CashBankAccount, Sale, Item, Party } from '../../types';
+import { Vehicle, Employee, TripSlip, Order, CompanySettings, Tyre, VehicleEmiDetails, VehicleEmiEntry, VehicleExpenseEntry, CashBankAccount, Sale, Item, Party } from '../../types';
 import { EntityDocumentsSection, StagedDocument } from '../common/EntityDocumentsSection';
 import { cloudStore as localDb } from '../../services/cloudStore';
+import { SearchableSelect } from '../orders/SearchableSelect';
 import { OrderDetailModal } from '../orders/OrderDetailModal';
 import { saleToDisplay } from '../orders/orderDisplay';
+import { VehicleDetailPage } from './VehicleDetailPage';
+import { BulkExpenseCreateModal } from './BulkExpenseCreateModal';
 
 interface LogisticsViewProps {
   /** Provided when the viewer can reach the Employees feature — makes the
    *  Drivers tab names open the full employee profile there */
   onOpenDriverProfile?: (employeeId: string) => void;
+  /** Bump (nonce) from App when a driver profile's Back returns here —
+   *  jumps to the DRIVERS sub-tab (the tab the visitor came from) */
+  openDriversSignal?: number;
 }
 
-export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfile }) => {
+export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfile, openDriversSignal }) => {
+  // Return-from-driver-profile: the Fleet feature must land back on its
+  // DRIVERS tab (App bumps openDriversSignal when returning from Employees)
+  React.useEffect(() => {
+    if (openDriversSignal) {
+      setActiveSubTab('drivers');
+      setDetailVehicle(null);
+      setViewingOrderSaleId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openDriversSignal]);
   // Database States
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [accounts, setAccounts] = useState<CashBankAccount[]>([]);
   const [emiEntries, setEmiEntries] = useState<VehicleEmiEntry[]>([]);
+  const [expenses, setExpenses] = useState<VehicleExpenseEntry[]>([]);
   const [slips, setSlips] = useState<TripSlip[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   // Sales/parties/items masters — the Trips table's SALE ORDER column opens
@@ -50,7 +71,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
   const [tyres, setTyres] = useState<Tyre[]>([]);
 
   // App Navigation & Filter state
-  const [activeSubTab, setActiveSubTab] = useState<'trips' | 'fleet' | 'drivers' | 'emi-entries'>('trips');
+  const [activeSubTab, setActiveSubTab] = useState<'trips' | 'fleet' | 'expenses' | 'emi-entries' | 'drivers'>('trips');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
 
@@ -174,7 +195,9 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
   // Vehicle documents (S3 upload feature) — staged while registering
   const [stagedVehicleDocs, setStagedVehicleDocs] = useState<StagedDocument[]>([]);
 
-  // Vehicle Tyre Inspection state — the axle-position inspector opens from
+  // Vehicle Tyre Inspection state — the axle-position inspector stays mounted
+  // for the tyres feature; the plate click opens the vehicle PROFILE PAGE
+  const [detailVehicle, setDetailVehicle] = useState<Vehicle | null>(null);
   // the Vehicles tab and STAYS in Fleet; tyre CRUD moved to the Tyre
   // Management feature
   const [selectedVehicleForTyres, setSelectedVehicleForTyres] = useState<Vehicle | null>(null);
@@ -189,12 +212,40 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
   const [formEmiAmount, setFormEmiAmount] = useState('');
   const [formEmiNotes, setFormEmiNotes] = useState('');
 
+  // --- VEHICLE EXPENSE LOG (generic expense + diesel fuel-fill entries) ---
+  const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
+  // Bulk entry grid (the expense mirror of the bulk sales grid)
+  const [isBulkExpenseOpen, setIsBulkExpenseOpen] = useState(false);
+  // which form the modal shows — locked when opened from the Add popover
+  const [expenseFormType, setExpenseFormType] = useState<'expense' | 'diesel'>('expense');
+  const [editingExpense, setEditingExpense] = useState<VehicleExpenseEntry | null>(null);
+  const [formExpenseDate, setFormExpenseDate] = useState('');
+  const [formExpenseVehicleId, setFormExpenseVehicleId] = useState('');
+  const [formExpenseAccountId, setFormExpenseAccountId] = useState('');
+  const [formExpenseTypeFree, setFormExpenseTypeFree] = useState('');
+  const [formExpenseLitres, setFormExpenseLitres] = useState('');
+  const [formExpenseRate, setFormExpenseRate] = useState('');
+  const [formExpenseAmount, setFormExpenseAmount] = useState('');
+  const [formExpenseNotes, setFormExpenseNotes] = useState('');
+  const [stagedExpenseDocs, setStagedExpenseDocs] = useState<StagedDocument[]>([]);
+  // Add Expense choice popover (expense entry vs diesel entry), viewport-fixed
+  // (retired 2026-10-28 with the popover — Add Expense opens the bulk grid)
+  const expenseChoiceRef = useRef<HTMLDivElement>(null);
+  // per-row documents drawer (view / upload receipts against a saved entry)
+  const [expenseDocsOpen, setExpenseDocsOpen] = useState<VehicleExpenseEntry | null>(null);
+  const EXPENSE_TYPE_SUGGESTIONS = [
+    'PAUNCTURE + FITTING', 'TYRE CHANGE', 'TOLL CHARGES', 'PERMIT / NOC',
+    'REPAIR & MAINT', 'SPARES & PARTS', 'WASHING', 'PARKING',
+    'DRIVER BATA', 'POLICE CHALLAN', 'BATTERY / ELECTRICALS', 'ROAD TAX',
+  ];
+
   // Load and subscribe to database changes
   const loadData = () => {
     setVehicles(localDb.getVehicles());
     setEmployees(localDb.getEmployees());
     setAccounts(localDb.getAccounts());
     setEmiEntries(localDb.getVehicleEmiEntries().sort((a, b) => (b.date || '').localeCompare(a.date || '')));
+    setExpenses(localDb.getVehicleExpenses());
     setSlips(localDb.getTripSlips());
     setOrders(localDb.getOrders());
     setSettings(localDb.getSettings());
@@ -554,6 +605,120 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
     }
   };
 
+  // --- Vehicle expense log handlers ---
+  // (The add-path CHOICE POPOVER was retired 2026-10-28 — the Add Expense
+  // button opens the bulk grid directly. handleOpenExpenseModal survives for
+  // EDITING an existing row.)
+
+  // Open the expense/diesel form for an existing row (its entryType decides
+  // which form branch shows).
+  const handleOpenExpenseModal = (type: 'expense' | 'diesel', existing?: VehicleExpenseEntry | null) => {
+    setStagedExpenseDocs([]);
+    setExpenseFormType(type);
+    if (existing) {
+      setEditingExpense(existing);
+      setFormExpenseVehicleId(existing.vehicleId || '');
+      setFormExpenseAccountId(existing.accountId || '');
+      setFormExpenseDate(existing.date || new Date().toISOString().split('T')[0]);
+      setFormExpenseTypeFree(existing.expenseType || '');
+      setFormExpenseLitres(existing.litres !== undefined ? String(existing.litres) : '');
+      setFormExpenseRate(existing.ratePerLitre !== undefined ? String(existing.ratePerLitre) : '');
+      setFormExpenseAmount(existing.amount ? String(existing.amount) : '');
+      setFormExpenseNotes(existing.notes || '');
+    } else {
+      setEditingExpense(null);
+      setFormExpenseVehicleId('');
+      setFormExpenseAccountId('');
+      setFormExpenseDate(new Date().toISOString().split('T')[0]);
+      setFormExpenseTypeFree('');
+      setFormExpenseLitres('');
+      setFormExpenseRate('');
+      setFormExpenseAmount('');
+      setFormExpenseNotes('');
+    }
+    setIsExpenseModalOpen(true);
+  };
+
+  // Vehicle change on a diesel fill: prefill the litre rate from that
+  // vehicle's latest recorded fill (rate stays editable) — mirrors the daily
+  // sheet where one day's rate repeats across trucks.
+  const handleExpenseVehicleChange = (vehId: string) => {
+    setFormExpenseVehicleId(vehId);
+    if (vehId && expenseFormType === 'diesel' && !editingExpense) {
+      const lastRate = localDb
+        .getVehicleExpenses(vehId)
+        .filter((e) => e.entryType === 'diesel' && (e.ratePerLitre || 0) > 0)
+        .sort((a, b) => String(b.date).localeCompare(String(a.date)))[0]?.ratePerLitre;
+      if (lastRate) {
+        setFormExpenseRate(String(lastRate));
+        recalcDieselCost(formExpenseLitres, String(lastRate));
+      }
+    }
+  };
+
+  // Diesel cost auto-fill: amount = litres × rate on every litres/rate change
+  // (still a plain input, so a rounding difference can be typed over).
+  const recalcDieselCost = (litres: string, rate: string) => {
+    const cost = (Number(litres) || 0) * (Number(rate) || 0);
+    if (cost > 0) setFormExpenseAmount(String(Math.round(cost * 100) / 100));
+  };
+
+  const handleSaveExpense = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formExpenseVehicleId || !formExpenseAccountId || !formExpenseDate || !(Number(formExpenseAmount) > 0)) {
+      alert('Select the vehicle, account, date and a positive amount.');
+      return;
+    }
+    if (expenseFormType === 'expense' && !formExpenseTypeFree.trim()) {
+      alert('Enter the expense type (e.g. Puncture + Fitting, Tyre Change).');
+      return;
+    }
+    if (expenseFormType === 'diesel' && !((Number(formExpenseLitres) || 0) > 0) && !editingExpense) {
+      alert('Enter the diesel litres filled.');
+      return;
+    }
+    const payload: Partial<VehicleExpenseEntry> = {
+      entryType: expenseFormType,
+      date: formExpenseDate,
+      vehicleId: formExpenseVehicleId,
+      accountId: formExpenseAccountId,
+      ...(expenseFormType === 'expense'
+        ? { expenseType: formExpenseTypeFree.trim() }
+        : { expenseType: undefined, litres: Number(formExpenseLitres) || 0, ratePerLitre: Number(formExpenseRate) || 0 }),
+      amount: Number(formExpenseAmount),
+      notes: formExpenseNotes.trim() || undefined,
+    };
+    if (editingExpense) {
+      // Edit-by-delta: the server rebalances the linked account automatically
+      localDb.updateVehicleExpenseEntry(editingExpense.id, {
+        ...payload,
+        ...(stagedExpenseDocs.length > 0 ? { documentIds: stagedExpenseDocs.map((d) => d.id) } : {}),
+      });
+    } else {
+      localDb.addVehicleExpenseEntry({
+        ...payload,
+        ...(stagedExpenseDocs.length > 0 ? { documentIds: stagedExpenseDocs.map((d) => d.id) } : {}),
+      } as Partial<VehicleExpenseEntry>);
+    }
+    setIsExpenseModalOpen(false);
+    setEditingExpense(null);
+    setStagedExpenseDocs([]);
+  };
+
+  // Expense log filter — vehicle number, free-text type, account name, remarks
+  const filteredExpenses = useMemo(() => {
+    return expenses.filter((e) => {
+      const q = searchQuery.toLowerCase();
+      const matchesSearch =
+        (e.vehicleNo || vehicles.find((v) => v.id === e.vehicleId)?.vehicleNo || '').toLowerCase().includes(q) ||
+        (e.expenseType || (e.entryType === 'diesel' ? 'diesel' : '')).toLowerCase().includes(q) ||
+        (e.accountName || accounts.find((a) => a.id === e.accountId)?.name || '').toLowerCase().includes(q) ||
+        (e.notes || '').toLowerCase().includes(q);
+      const matchesStatus = statusFilter === 'all' || e.entryType === statusFilter;
+      return matchesSearch && matchesStatus;
+    });
+  }, [expenses, vehicles, accounts, searchQuery, statusFilter]);
+
   // Filters Calculation (driverName/materialName are hydrated view fields and
   // may be undefined on outsourced slips — always guard the .toLowerCase())
   const filteredSlips = useMemo(() => {
@@ -596,6 +761,21 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
 
   return (
     <div className="space-y-6">
+      {/* VEHICLE PROFILE PAGE — like the party/employee profiles: selecting a
+          vehicle REPLACES the tab content with its full page (Back returns) */}
+      {detailVehicle ? (
+        <VehicleDetailPage
+          vehicle={detailVehicle}
+          sales={sales}
+          onBack={() => setDetailVehicle(null)}
+          onEdit={(v) => {
+            setDetailVehicle(null);
+            handleOpenVehicleModal(v);
+          }}
+          onOpenRst={(saleId) => setViewingOrderSaleId(saleId)}
+        />
+      ) : (
+      <>
       {/* Action Panel — buttons now live INSIDE the per-tab search bar
           (Add Vehicle on the Vehicles tab, Add Tyre on Tyre
           Fleet Management), placed LEFT of the search container */}
@@ -612,7 +792,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
             }`}
           >
             <FileText className="h-4 w-4" />
-            Trip Slips
+            Trips
             <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)]">
               {slips.length}
             </span>
@@ -629,6 +809,20 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
             Vehicles
             <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)]">
               {vehicles.length}
+            </span>
+          </button>
+          <button
+            onClick={() => { setActiveSubTab('expenses'); setStatusFilter('all'); }}
+            className={`py-3 text-xs font-bold border-b-2 transition-all flex items-center gap-2 whitespace-nowrap ${
+              activeSubTab === 'expenses'
+                ? 'border-[var(--color-primary)] text-[var(--color-primary)]'
+                : 'border-transparent text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
+            }`}
+          >
+            <Receipt className="h-4 w-4" />
+            Expenses
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)]">
+              {expenses.length}
             </span>
           </button>
           <button
@@ -669,7 +863,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
             <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[var(--color-outline)]" />
             <input
               type="text"
-              placeholder={`Search ${activeSubTab === 'trips' ? 'slips, vehicles, destinations...' : activeSubTab === 'fleet' ? 'vehicle number, type...' : activeSubTab === 'drivers' ? 'driver name, license...' : 'vehicle number, type...'}`}
+              placeholder={`Search ${activeSubTab === 'trips' ? 'slips, vehicles, destinations...' : activeSubTab === 'fleet' ? 'vehicle number, type...' : activeSubTab === 'expenses' ? 'vehicle, expense type, remarks...' : activeSubTab === 'drivers' ? 'driver name, license...' : 'vehicle number, type...'}`}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-10 pr-4 py-2 w-full bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] placeholder:text-[var(--color-on-surface-variant)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
@@ -677,7 +871,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
           </div>
           <div className="flex items-center gap-2">
             {/* Status filter — hidden on the Vehicles tab (no status filter there) */}
-            {activeSubTab !== 'fleet' && (
+            {activeSubTab !== 'fleet' && activeSubTab !== 'expenses' && (
               <>
                 <Filter className="h-4 w-4 text-[var(--color-outline)]" />
                 <select
@@ -713,6 +907,22 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                 Add Vehicle
               </button>
             )}
+            {activeSubTab === 'expenses' && (
+              <div className="relative" ref={expenseChoiceRef}>
+                {/* POPOVER REMOVED (2026-10-28, user): the Add Expense button
+                    opens the BULK grid directly — expense + diesel rows in one
+                    grid, diesel is the default kind (single-entry form now
+                    serves only row EDITING). */}
+                <button
+                  type="button"
+                  onClick={() => setIsBulkExpenseOpen(true)}
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-bold shadow-xs transition whitespace-nowrap"
+                >
+                  <Plus className="h-4 w-4" />
+                  Add Expense Entries
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -728,22 +938,24 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-                  <th className="py-3.5 px-4">Slip No</th>
-                  <th className="py-3.5 px-3">Date &amp; Time</th>
-                  <th className="py-3.5 px-3">Sales Order</th>
+                  {/* Slip No column REMOVED (2026-10-28) — details/thermal ticket keep it */}
+                  <th className="py-3.5 px-4">Date &amp; Time</th>
+                  <th className="py-3.5 px-3">RST Number</th>
                   <th className="py-3.5 px-3 min-w-[150px]">Vehicle</th>
                   <th className="py-3.5 px-3">Party</th>
                   <th className="py-3.5 px-3 text-right">Load (MT)</th>
                   <th className="py-3.5 px-3 text-right">Distance (km)</th>
                   <th className="py-3.5 px-3 text-right">Transport Rate (₹/T-km)</th>
                   <th className="py-3.5 px-3 text-right">Transport Total (₹)</th>
+                  <th className="py-3.5 px-3 text-right">GST (%)</th>
+                  <th className="py-3.5 px-3 text-right">Total Transportation Cost</th>
                   <th className="py-3.5 px-3">Drop Site</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--color-outline-variant)]">
                 {filteredSlips.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                    <td colSpan={11} className="py-12 text-center text-[var(--color-on-surface-variant)]">
                       <FileText className="h-8 w-8 text-[var(--color-outline)] mx-auto mb-2" />
                       <p className="text-xs font-bold uppercase">No trip slips found matching filters</p>
                     </td>
@@ -764,11 +976,8 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                         key={slip.id}
                         className="hover:bg-[var(--color-surface-container)]/40 transition-colors text-xs text-[var(--color-on-surface)]"
                       >
-                        <td className="py-3.5 px-4">
-                          <span className="font-mono text-xs font-black text-[var(--color-on-surface)] bg-[var(--color-surface-container)] px-2.5 py-0.5 rounded-full whitespace-nowrap">
-                            {slip.slipNumber}
-                          </span>
-                        </td>
+                        {/* Slip No cell REMOVED (2026-10-28) — the slip number
+                            still shows on the slip-details modal + ticket */}
                         <td className="py-3.5 px-3 font-semibold text-[var(--color-on-surface-variant)] whitespace-nowrap">
                           {slip.date}
                           <span className="text-[10px] block font-medium">@ {slip.time}</span>
@@ -786,11 +995,11 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                                 if (sale) {
                                   setViewingOrderSaleId(sale.id);
                                 } else {
-                                  alert(`Sale record ${slip.orderNumber || ''} isn't loaded yet — try again in a moment.`);
+                                  alert(`RST ${slip.orderNumber || ''} (sales order) isn't loaded yet — try again in a moment.`);
                                 }
                               }}
                               className="font-mono text-[11px] font-black text-[var(--color-primary)] underline decoration-dotted underline-offset-2 hover:opacity-80 cursor-pointer whitespace-nowrap"
-                              title={`Open sales order ${slip.orderNumber || ''} details`}
+                              title={`Open RST ${slip.orderNumber || ''} details`}
                             >
                               {slip.orderNumber || '—'}
                             </button>
@@ -854,6 +1063,27 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                             return total > 0 ? `₹${total.toLocaleString('en-IN')}` : '—';
                           })()}
                         </td>
+                        <td className="py-3.5 px-3 text-right text-[var(--color-on-surface-variant)]">
+                          {/* GST slab ON the transport (freight) row, from the sale */}
+                          {linkedSale && (Number(linkedSale.transportCharges) || 0) > 0
+                            ? `${Number((linkedSale as any).freightGstRate) || 0}%`
+                            : '—'}
+                        </td>
+                        <td className="py-3.5 px-3 text-right font-mono font-black text-[var(--color-primary)]">
+                          {/* Total Transportation Cost = transport total + its GST */}
+                          {(() => {
+                            if (!linkedSale) return '—';
+                            const charged = Number(linkedSale.transportCharges) || 0;
+                            const computed = Math.round(
+                              (Number(linkedSale.weightTonnes) || 0) *
+                              (Number(linkedSale.distanceKm) || 0) * (Number((linkedSale as any).freightRatePerTonne) || 0) * 100
+                            ) / 100;
+                            const transport = charged > 0 ? charged : computed;
+                            if (transport <= 0) return '—';
+                            const gst = Math.round(transport * (Number((linkedSale as any).freightGstRate) || 0)) / 100;
+                            return `₹${(Math.round((transport + gst) * 100) / 100).toLocaleString('en-IN')}`;
+                          })()}
+                        </td>
                         <td className="py-3.5 px-3">
                           <span className="text-[var(--color-on-surface-variant)] font-semibold flex items-center gap-1 truncate max-w-[200px]" title={slip.destination}>
                             <MapPin className="h-3.5 w-3.5 text-[var(--color-outline)] shrink-0" />
@@ -870,18 +1100,8 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
         </div>
       )}
 
-      {/* 1c. LINKED SALE DETAILS — the Trips table's Sales Order cell opens the
-          full order-story modal (stage documents + dispatch trip + preview) */}
-      {viewingSaleDisplay && (
-        <OrderDetailModal
-          isOpen
-          onClose={() => setViewingOrderSaleId(null)}
-          order={viewingSaleDisplay}
-          parties={parties}
-          items={items}
-          settings={settings || ({} as CompanySettings)}
-        />
-      )}
+      {/* (LINKED SALE DETAILS moved to the component tail — mounted outside
+          the tabs/profile branch so it never hides behind the profile page) */}
 
       {/* 2. FLEET & MACHINERY LIST VIEW — merged with Vehicle EMI & Loans */}
       {activeSubTab === 'fleet' && (
@@ -943,12 +1163,12 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-                  <th className="py-3.5 px-4">Vehicle No</th>
+                  <th className="py-3.5 px-4 min-w-[170px]">Vehicle No</th>
                   <th className="py-3.5 px-3">Equipment Type</th>
                   <th className="py-3.5 px-3 min-w-[170px]">Assigned Driver</th>
                   <th className="py-3.5 px-3 min-w-[140px]">Insurance</th>
                   <th className="py-3.5 px-3 text-right">Monthly EMI (₹)</th>
-                  <th className="py-3.5 px-3 min-w-[200px]">Next EMI Date</th>
+                  <th className="py-3.5 px-3 whitespace-nowrap">Next EMI Date</th>
                   <th className="py-3.5 px-3">Tenure / Repayment</th>
                   <th className="py-3.5 px-3">Auto-Debit Account</th>
                   <th className="py-3.5 px-3">Loan Status</th>
@@ -995,15 +1215,14 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
 
                     return (
                       <tr key={vehicle.id} className="hover:bg-[var(--color-surface-container)]/40 transition-colors text-xs text-[var(--color-on-surface)]">
-                        <td className="py-3.5 px-4">
+                        <td className="py-3.5 px-4 min-w-[170px]">
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
-                              onClick={() => setSelectedVehicleForTyres(vehicle)}
+                              onClick={() => setDetailVehicle(vehicle)}
                               className="font-mono text-xs font-black text-[var(--color-on-surface)] bg-[var(--color-surface-container-highest)] hover:bg-[var(--color-surface-container)] px-2.5 py-0.5 rounded-full border border-[var(--color-outline-variant)] tracking-wider transition cursor-pointer flex items-center gap-1"
-                              title="Click to view mounted tyres & positions"
+                              title="Click to view the vehicle's full details, spend & KM run"
                             >
-                              <Disc className="h-3 w-3 text-[var(--color-primary)] animate-spin-slow" />
                               {vehicle.vehicleNo}
                             </button>
                           </div>
@@ -1068,10 +1287,10 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                             <span className="text-[var(--color-on-surface-variant)] font-semibold">—</span>
                           )}
                         </td>
-                        <td className="py-3.5 px-3 min-w-[200px]">
+                        <td className="py-3.5 px-3 whitespace-nowrap">
                           {emi?.hasEmi ? (
                             <div className="space-y-1">
-                              <span className={`inline-flex items-center gap-1 text-[10px] font-extrabold px-2.5 py-0.5 rounded-full ${
+                              <span className={`inline-flex items-center gap-1 text-[10px] font-extrabold px-2.5 py-0.5 rounded-full whitespace-nowrap ${
                                 vehicleShortOfFunds
                                   ? 'bg-[var(--color-error)] text-[var(--color-on-error)] animate-pulse'
                                   : isDueSoon || isOverdue
@@ -1191,6 +1410,144 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
         </div>
         </>
       )}
+
+
+      {/* 2.5 EXPENSES LOG TAB — the fleet's expense log renders as a TABLE:
+          generic rows (free-text type) and diesel rows (litres × rate) share
+          one log; every save DEBITS the chosen cash/bank account */}
+      {activeSubTab === 'expenses' && (() => {
+        const now = new Date(`${istToday}T00:00:00Z`);
+        const monthKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+        const monthRows = expenses.filter((e) => String(e.date).slice(0, 7) === monthKey);
+        const dieselRows = monthRows.filter((e) => e.entryType === 'diesel');
+        return (
+          <>
+            {/* Month metrics */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-start justify-between">
+                <div>
+                  <p className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Spent This Month (₹)</p>
+                  <h3 className="text-2xl font-extrabold text-[var(--color-primary)] mt-1">
+                    {formatCurrency(monthRows.reduce((s, e) => s + (Number(e.amount) || 0), 0)).replace('₹', '₹')}
+                  </h3>
+                  <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)]">{monthRows.length} entr{monthRows.length === 1 ? 'y' : 'ies'}</span>
+                </div>
+                <div className="p-2.5 bg-[var(--color-primary-container)] rounded-2xl">
+                  <Receipt className="h-5 w-5 text-[var(--color-on-primary-container)]" />
+                </div>
+              </div>
+              <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-start justify-between">
+                <div>
+                  <p className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Diesel This Month</p>
+                  <h3 className="text-2xl font-extrabold text-[var(--color-on-surface)] mt-1">
+                    {dieselRows.reduce((s, e) => s + (Number(e.litres) || 0), 0).toFixed(0)}
+                    <span className="text-sm font-semibold text-[var(--color-on-surface-variant)]"> L</span>
+                  </h3>
+                  <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)]">
+                    {formatCurrency(dieselRows.reduce((s, e) => s + (Number(e.amount) || 0), 0))} across {dieselRows.length} fills
+                  </span>
+                </div>
+                <div className="p-2.5 bg-[var(--color-surface-container)] rounded-2xl">
+                  <Fuel className="h-5 w-5 text-[var(--color-primary)]" />
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-[28px] overflow-hidden shadow-2xs">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
+                      <th className="py-3.5 px-4">Date</th>
+                      <th className="py-3.5 px-3 min-w-[140px]">Vehicle</th>
+                      <th className="py-3.5 px-3 min-w-[170px]">Type</th>
+                      <th className="py-3.5 px-3 text-right">Litres</th>
+                      <th className="py-3.5 px-3 text-right">Rate (₹/L)</th>
+                      <th className="py-3.5 px-3 text-right">Amount (₹)</th>
+                      <th className="py-3.5 px-3">From Account</th>
+                      <th className="py-3.5 px-3">Remarks</th>
+                      <th className="py-3.5 px-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--color-outline-variant)]">
+                    {filteredExpenses.length === 0 ? (
+                      <tr>
+                        <td colSpan={9} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                          <Receipt className="h-8 w-8 text-[var(--color-outline)] mx-auto mb-2" />
+                          <p className="text-xs font-bold uppercase">No expense entries found matching filters</p>
+                          <p className="text-[11px] mt-1 text-[var(--color-on-surface-variant)]">
+                            Use "Add Expense" to log an expense entry or a diesel fuel fill.
+                          </p>
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredExpenses.map((entry) => {
+                        const vehNo = entry.vehicleNo || vehicles.find((v) => v.id === entry.vehicleId)?.vehicleNo || '—';
+                        return (
+                          <tr key={entry.id} className="hover:bg-[var(--color-surface-container)]/40 transition-colors text-xs text-[var(--color-on-surface)]">
+                            <td className="py-3.5 px-4 font-semibold text-[var(--color-on-surface-variant)] whitespace-nowrap">
+                              {formatDdMmYyyy(entry.date)}
+                            </td>
+                            <td className="py-3.5 px-3">
+                              <span className="font-mono font-black text-[var(--color-primary)] whitespace-nowrap">{vehNo}</span>
+                            </td>
+                            <td className="py-3.5 px-3 min-w-[170px]">
+                              {entry.entryType === 'diesel' ? (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full bg-[var(--color-info-container)] text-[var(--color-on-info-container)]">
+                                  <Fuel className="h-2.5 w-2.5" /> Diesel
+                                </span>
+                              ) : (
+                                <span className="font-bold text-[var(--color-on-surface)] capitalize">{entry.expenseType || '—'}</span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-3 text-right font-bold">
+                              {entry.entryType === 'diesel' && (entry.litres || 0) > 0 ? entry.litres.toFixed(2) : '—'}
+                            </td>
+                            <td className="py-3.5 px-3 text-right font-mono font-bold">
+                              {entry.entryType === 'diesel' && (entry.ratePerLitre || 0) > 0 ? `₹${entry.ratePerLitre}` : '—'}
+                            </td>
+                            <td className="py-3.5 px-3 text-right font-mono font-black text-[var(--color-on-surface)]">
+                              {formatCurrency(entry.amount)}
+                            </td>
+                            <td className="py-3.5 px-3">
+                              <span className="font-semibold text-[var(--color-on-surface)] truncate block max-w-[150px]" title={entry.accountName}>
+                                {entry.accountName || accounts.find((a) => a.id === entry.accountId)?.name || '—'}
+                              </span>
+                            </td>
+                            <td className="py-3.5 px-3">
+                              <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)] truncate block max-w-[200px]" title={entry.notes}>
+                                {entry.notes || '—'}
+                              </span>
+                            </td>
+                            <td className="py-3.5 px-4 text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                <button
+                                  onClick={() => setExpenseDocsOpen(entry)}
+                                  className="p-1.5 rounded-full text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)] hover:bg-[var(--color-surface-container)] transition"
+                                  title="Documents (receipts) attached to this entry"
+                                >
+                                  <Paperclip className="h-3.5 w-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => handleOpenExpenseModal(entry.entryType, entry)}
+                                  className="px-2.5 py-1 text-[10px] bg-[var(--color-surface-container-lowest)] hover:bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] text-[var(--color-on-surface)] font-bold rounded-full transition shadow-2xs"
+                                  title="Edit entry — the account balance adjusts by the difference automatically"
+                                >
+                                  Edit
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        );
+      })()}
 
 
       {/* 2.6 EMI ENTRIES — DEDUCTIONS LEDGER (its own sub-tab) */}
@@ -2411,6 +2768,267 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
           </div>
         </div>
       )}
+
+      {/* 8. EXPENSE ENTRY MODAL — one form, two branches (expense | diesel).
+          Vehicle + account + date are common (vehicle & account COMPULSORY —
+          the save debits the account); the branch decides its own fields.
+          Receipts upload through the same staged-documents flow as vehicles. */}
+      {isExpenseModalOpen && (
+        <div className="fixed inset-0 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] max-w-md w-full overflow-hidden">
+            <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-[var(--color-primary-container)] rounded-xl">
+                  {expenseFormType === 'diesel'
+                    ? <Fuel className="h-4.5 w-4.5 text-[var(--color-on-primary-container)]" />
+                    : <Receipt className="h-4.5 w-4.5 text-[var(--color-on-primary-container)]" />}
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-[var(--color-on-surface)] text-sm">
+                    {editingExpense ? 'Edit Vehicle Expense' : expenseFormType === 'diesel' ? 'Diesel Entry' : 'Expense Entry'}
+                  </h3>
+                  <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
+                    {expenseFormType === 'diesel' ? 'Fuel fill — the cost debits the selected account.' : 'Log a vehicle expense — the amount debits the selected account.'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setIsExpenseModalOpen(false);
+                  setEditingExpense(null);
+                }}
+                className="p-1.5 hover:bg-[var(--color-surface-container-high)] rounded-full text-[var(--color-on-surface-variant)] transition"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveExpense}>
+              <div className="p-5 space-y-4 text-left">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Vehicle *</label>
+                  <div className="p-2 border border-[var(--color-outline-variant)] rounded-xl bg-[var(--color-surface-container-lowest)]">
+                    <SearchableSelect
+                      value={formExpenseVehicleId}
+                      onChange={handleExpenseVehicleChange}
+                      placeholder="Type vehicle number to search..."
+                      closedDisplay={(() => {
+                        const veh = vehicles.find((v) => v.id === formExpenseVehicleId);
+                        return veh ? `${veh.vehicleNo}` : '';
+                      })()}
+                      options={vehicles.map((v) => ({
+                        value: v.id,
+                        label: v.vehicleNo,
+                        sub: `Type: ${v.type.toUpperCase()}`,
+                      }))}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">From Account *</label>
+                    <div className="p-2 border border-[var(--color-outline-variant)] rounded-xl bg-[var(--color-surface-container-lowest)]">
+                      <SearchableSelect
+                        value={formExpenseAccountId}
+                        onChange={(v) => setFormExpenseAccountId(v)}
+                        placeholder="Type account name to search..."
+                        closedDisplay={(() => {
+                          const acc = accounts.find((a) => a.id === formExpenseAccountId);
+                          return acc
+                            ? `${acc.name} (${acc.type === 'bank' ? acc.bankName || 'Bank' : 'Cash'})`
+                            : '';
+                        })()}
+                        options={accounts.map((a) => ({
+                          value: a.id,
+                          label: a.name,
+                          sub: a.type === 'bank' ? `Bank${a.bankName ? ` · ${a.bankName}` : ''}` : 'Cash',
+                        }))}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Expense Date *</label>
+                    <input
+                      type="date"
+                      value={formExpenseDate}
+                      onChange={(e) => setFormExpenseDate(e.target.value)}
+                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                      required
+                    />
+                  </div>
+                </div>
+
+                {expenseFormType === 'expense' ? (
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Expense Type *</label>
+                    <input
+                      type="text"
+                      list="expense-type-suggestions"
+                      placeholder="e.g. Puncture + Fitting, Tyre Change, Toll"
+                      value={formExpenseTypeFree}
+                      onChange={(e) => setFormExpenseTypeFree(e.target.value)}
+                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-bold focus:outline-none"
+                      required
+                    />
+                    <datalist id="expense-type-suggestions">
+                      {EXPENSE_TYPE_SUGGESTIONS.map((s) => <option key={s} value={s} />)}
+                    </datalist>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Diesel Litres *</label>
+                      <input
+                        type="number" step="0.01" min="0"
+                        placeholder="e.g. 126.00"
+                        value={formExpenseLitres}
+                        onChange={(e) => {
+                          setFormExpenseLitres(e.target.value);
+                          recalcDieselCost(e.target.value, formExpenseRate);
+                        }}
+                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-bold focus:outline-none"
+                        required
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Diesel Rate (₹/L)</label>
+                      <input
+                        type="number" step="0.01" min="0"
+                        placeholder="e.g. 99.89"
+                        value={formExpenseRate}
+                        onChange={(e) => {
+                          setFormExpenseRate(e.target.value);
+                          recalcDieselCost(formExpenseLitres, e.target.value);
+                        }}
+                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-bold focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">
+                    {expenseFormType === 'diesel' ? 'Diesel Cost (₹) *' : 'Amount (₹) *'}
+                  </label>
+                  <input
+                    type="number" step="0.01" min="0"
+                    placeholder="e.g. 48500"
+                    value={formExpenseAmount}
+                    onChange={(e) => setFormExpenseAmount(e.target.value)}
+                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-black focus:outline-none"
+                    required
+                  />
+                  {expenseFormType === 'diesel' && (Number(formExpenseLitres) || 0) > 0 && (Number(formExpenseRate) || 0) > 0 && (
+                    <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)] block">
+                      Auto-calculated: {Number(formExpenseLitres).toLocaleString('en-IN')} L × ₹{Number(formExpenseRate).toLocaleString('en-IN')}
+                    </span>
+                  )}
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Remarks</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Paid by driver in cash at pump"
+                    value={formExpenseNotes}
+                    onChange={(e) => setFormExpenseNotes(e.target.value)}
+                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                  />
+                </div>
+
+                {/* Receipts / supporting documents — staged on create, linked
+                    immediately on edit (same flow as vehicle RC/insurance) */}
+                <div className="p-3 bg-[var(--color-surface-container)]/60 border border-[var(--color-outline-variant)] rounded-2xl">
+                  <EntityDocumentsSection
+                    feature="vehicle-expense"
+                    entityId={editingExpense?.id}
+                    staged={editingExpense ? undefined : stagedExpenseDocs}
+                    onStagedChange={setStagedExpenseDocs}
+                  />
+                  {stagedExpenseDocs.length > 0 && !editingExpense && (
+                    <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)] mt-1 block">
+                      {stagedExpenseDocs.length} document(s) will attach on save
+                    </span>
+                  )}
+                </div>
+
+                <div className="p-3 bg-[var(--color-info-container)]/30 border border-[var(--color-info)]/30 rounded-2xl text-[10px] text-[var(--color-on-surface-variant)]">
+                  Saving debits the selected account's balance immediately and records the entry in the vehicle's expense log.
+                </div>
+              </div>
+
+              <div className="p-4 bg-[var(--color-surface-container)] border-t border-[var(--color-outline-variant)] flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsExpenseModalOpen(false);
+                    setEditingExpense(null);
+                  }}
+                  className="px-4 py-2 border border-[var(--color-outline-variant)] rounded-full text-xs font-bold bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-bold transition shadow-xs"
+                >
+                  {editingExpense ? 'Save & Rebalance' : 'Save Entry'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 9. EXPENSE DOCUMENTS DRAWER — view / upload receipts against a saved
+          entry (row paperclip). Uploads link to the entry immediately. */}
+      {expenseDocsOpen && (
+        <div className="fixed inset-0 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] max-w-md w-full overflow-hidden">
+            <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
+              <div>
+                <h3 className="font-extrabold text-[var(--color-on-surface)] text-sm flex items-center gap-2">
+                  <Paperclip className="h-4.5 w-4.5 text-[var(--color-primary)]" />
+                  Expense Documents
+                </h3>
+                <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
+                  {formatDdMmYyyy(expenseDocsOpen.date)} · {expenseDocsOpen.vehicleNo || vehicles.find((v) => v.id === expenseDocsOpen.vehicleId)?.vehicleNo || '—'} · {formatCurrency(expenseDocsOpen.amount)}
+                </p>
+              </div>
+              <button
+                onClick={() => setExpenseDocsOpen(null)}
+                className="p-1.5 hover:bg-[var(--color-surface-container-high)] rounded-full text-[var(--color-on-surface-variant)] transition"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="p-5 max-h-[70vh] overflow-y-auto">
+              <EntityDocumentsSection feature="vehicle-expense" entityId={expenseDocsOpen.id} />
+            </div>
+          </div>
+        </div>
+      )}
+      </>
+      )}
+      {/* LINKED SALE DETAILS — mounted OUTSIDE the detailVehicle branch: a RST
+          opened from the vehicle profile shows ABOVE it, never behind */}
+      {viewingSaleDisplay && (
+        <OrderDetailModal
+          isOpen
+          onClose={() => setViewingOrderSaleId(null)}
+          order={viewingSaleDisplay}
+          parties={parties}
+          items={items}
+          settings={settings || ({} as CompanySettings)}
+        />
+      )}
+      {/* BULK EXPENSE ENTRIES — one grid, per-row Expense/Diesel type */}
+      <BulkExpenseCreateModal
+        isOpen={isBulkExpenseOpen}
+        onClose={() => setIsBulkExpenseOpen(false)}
+      />
     </div>
   );
 };

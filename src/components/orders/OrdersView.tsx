@@ -35,12 +35,13 @@ import {
   CreditCard,
   Wallet,
 } from 'lucide-react';
-import { Order, OrderItem, OrderType, SalesStage, PurchaseStage, Party, Item, CompanySettings, Sale, Purchase, PaymentMode } from '../../types';
+import { Order, OrderItem, OrderType, SalesStage, PurchaseStage, Party, Item, CompanySettings, Sale, SaleInvoice, Purchase, PaymentMode } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { AddPurchaseModal } from './AddPurchaseModal';
 import { BulkSalesCreateModal } from './BulkSalesCreateModal';
 import { OrderDocumentsSection, StagedDocument } from './OrderDocumentsSection';
 import { SearchableSelect } from './SearchableSelect';
+import { SaleInvoicesView } from './SaleInvoicesView';
 import {
   OrderDisplay,
   saleToDisplay,
@@ -52,7 +53,6 @@ import {
   editLabelFor,
   purchaseEditLabelFor,
   canViewProforma,
-  masterPkShort,
 } from './orderDisplay';
 import { OrderDetailModal } from './OrderDetailModal';
 import { OrderDocumentPreviewModal } from './OrderDocumentPreviewModal';
@@ -88,6 +88,8 @@ function numberToWords(num: number): string {
 
 interface OrdersViewProps {
   sales: Sale[];
+  /** Consolidated sales invoices (one invoice = N sales orders) */
+  saleInvoices?: SaleInvoice[];
   /** @deprecated legacy `orders` rows — shown alongside for continuity */
   purchaseOrders: Purchase[];
   parties: Party[];
@@ -97,6 +99,8 @@ interface OrdersViewProps {
   onUpdateSale: (id: string, updates: any) => any;
   onAddSaleStage: (id: string, stageInput: any) => any;
   onDeleteSale: (id: string) => boolean;
+  /** Open the global Create-Invoice flow (party preset when given) */
+  onOpenCreateInvoice?: (partyId?: string) => void;
   onAddPurchase: (payload: any) => any;
   onUpdatePurchase: (id: string, updates: any) => any;
   onAddPurchaseStage: (id: string, stageInput: any) => any;
@@ -110,6 +114,7 @@ interface OrdersViewProps {
 
 export function OrdersView({
   sales,
+  saleInvoices,
   purchaseOrders,
   parties,
   items,
@@ -118,6 +123,7 @@ export function OrdersView({
   onUpdateSale,
   onAddSaleStage,
   onDeleteSale,
+  onOpenCreateInvoice,
   onAddPurchase,
   onUpdatePurchase,
   onAddPurchaseStage,
@@ -128,6 +134,8 @@ export function OrdersView({
 }: OrdersViewProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [typeFilter, setTypeFilter] = useState<'all' | OrderType>('all');
+  // Sales page sub-tab: the orders list vs the consolidated-invoices list
+  const [salesPageTab, setSalesPageTab] = useState<'orders' | 'invoices'>('orders');
   // Modals state
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isStageMenuOpen, setIsStageMenuOpen] = useState(false);
@@ -239,6 +247,11 @@ export function OrdersView({
     settledDate?: string;
     // Which payment flow was applied (echoed verbatim on locked saves)
     settlementType?: 'credit' | 'account';
+    /** Existing dispatch attachment — the SO-issue dialog shows the dispatch
+     *  section only when this is MISSING (quotation-stage creations ship no
+     *  vehicle; the first money stage must collect it). */
+    vehicleId?: string;
+    vehicleNo?: string;
   } | null>(null);
 
   // Payment-flow section locks: once a flow was applied it shows disabled ON
@@ -250,6 +263,11 @@ export function OrdersView({
   // the switch locks ON there and Don't-touch is not offered. 'credit'
   // applies the flow at applying stage; user can still pick an account.
   const settleFinalStage = (stageIssueCtx?.stageType || formStage) === 'sales_invoice';
+  // 2026-10-28 (CLIENT RULE, no choice): the sales-order + direct-invoice
+  // stages ALWAYS book the money flow as CREDIT — the receivable posts to the
+  // party ledger at the save; no Cash/Bank account can be chosen. The legacy
+  // chooser renders only for older flows shown locked (settleSectionLocked).
+  const creditOnly = formType === 'sales' && (formStage === 'sales_order' || formStage === 'sales_invoice');
 
   // Row-level ⋮ action popover (sales list). Rendered via PORTAL (fixed
   // position above the page) so the list container's overflow-x-auto /
@@ -307,6 +325,8 @@ export function OrdersView({
       settledAmount: order.settledAmount,
       settledDate: order.settledDate,
       settlementType: order.cashApplied ? (order.settlementType || 'account') : undefined,
+      vehicleId: (order as any).vehicleId || undefined,
+      vehicleNo: (order as any).vehicleNo || undefined,
     });
     setEditingOrder(null);
     setFormType('sales');
@@ -323,15 +343,23 @@ export function OrdersView({
     setFormWeightTonnes('');
     setFormDistanceKm('');
     setFormSiteAddress('');
+    // Dispatch attach states mirror the sale's existing attachment: a
+    // quotation-stage creation ships NO vehicle, so issuing the sales_order
+    // stage shows the dispatch section (vehicle required) pre-filled from it
+    const outsourced = !order.vehicleId && !!order.vehicleNo;
+    setVehOutsourced(Boolean(outsourced));
+    setFormOutsourcedNo(outsourced ? (order.vehicleNo || '') : '');
+    setFormVehicleId(order.vehicleId || '');
     // Payment flow: once applied, the section locks ON and every later save
     // echoes the stored flow verbatim (never 'none' — the final-stage journal
     // voucher must keep upserting). A payment flow is COMPULSORY at the
     // invoice stage, so issuing one defaults to Book on credit.
-    setFormSettlementType(order.cashApplied
-      ? (order.settlementType || 'account')
-      : (stageType === 'sales_invoice' ? 'credit' : 'none'));
+    // Flow state legacy echo: an applied flow locks its stored type; an
+    // unapplied legacy sale renders the forced-credit strip
+    setFormSettlementType(order.cashApplied ? (order.settlementType || 'account') : 'credit');
     setFormAccountId(order.settlementAccountId || '');
     setFormPaymentMode((order.paymentMode as any) || 'bank_transfer');
+    // 2026-10-28 client rule: SO/invoice issuance always applies the dispatch
     setUpdateInventory(!order.inventoryApplied);
     setUpdateCash(false);
     setFormItems(
@@ -436,10 +464,23 @@ export function OrdersView({
   // Next document number suggestion per stage type (client-side hint only;
   // server enforces uniqueness on the issued number).
   const suggestStageNumber = (kind: 'sales' | 'purchase', stageType?: string): string => {
+    // RST (2026-10-28): the sales-order document number is a SIMPLE SERIAL
+    // stored bare ('0001') — next = highest bare-serial number in use + 1
+    // (the RST term appears only as the field/column label). The server is
+    // the minting authority (GET /api/sales/next-rst refreshes this prefill;
+    // empty overrides mint server-side; serials are guarded against reuse).
+    if (stageType === 'sales_order') {
+      let max = 0;
+      for (const s of sales) {
+        if (!/^\d+$/.test(String(s.saleNumber || ''))) continue;
+        const n = parseInt(String(s.saleNumber), 10);
+        if (Number.isFinite(n) && n > max) max = n;
+      }
+      return String(max + 1).padStart(4, '0');
+    }
     const year = new Date().getFullYear();
     const prefixMap: Record<string, string> = {
       quotation: 'QUO',
-      sales_order: 'SO',
       proforma_invoice: 'PROF',
       delivery_note: 'DC',
       sales_invoice: 'INV',
@@ -510,16 +551,26 @@ export function OrdersView({
     setFormFreightGst('0');
     setUpdateInventory(false);
     setUpdateCash(false);
-    // A payment flow is COMPULSORY at the invoice stage — a sale created
-    // straight at the invoice defaults to Book on credit (user can still
-    // switch to a Cash/Bank account); other stages start at Don't touch.
-    setFormSettlementType((stage || 'quotation') === 'sales_invoice' ? 'credit' : 'none');
+    // The flow is FORCED CREDIT at the money stages (2026-10-28 client rule —
+    // no account option exists); the strip ignores this state but keeps it sane
+    setFormSettlementType((stage === 'sales_order' || stage === 'sales_invoice') ? 'credit' : 'none');
     setFormAccountId('');
     setFormPaymentMode('bank_transfer' as any);
 
 
     // Document number suggested per the chosen starting stage
-    setFormOrderNumber(suggestStageNumber('sales', stage || 'quotation'));
+    const suggested = suggestStageNumber('sales', stage || 'quotation');
+    setFormOrderNumber(suggested);
+    // RST prefill from the minting authority: the server counts numbers on
+    // rows the client can't see (soft-deleted) — adopt it while the field
+    // still holds the unedited client-side suggestion.
+    if ((stage || 'quotation') === 'sales_order') {
+      localDb.getNextRst().then((next) => {
+        if (next && next !== suggested) {
+          setFormOrderNumber((cur) => (cur === suggested ? next : cur));
+        }
+      }).catch(() => { /* prefill is best-effort — the server mints on empty */ });
+    }
     setFormError(null);
 
     setStagedSaleDocs([]); // fresh document staging per create/edit dialog
@@ -800,10 +851,13 @@ export function OrdersView({
       return;
     }
 
-    // Dispatch & trip details (sales): every sale carries a dispatch trip —
+    // Dispatch & trip details (sales): every dispatched sale carries a trip —
     // an own fleet vehicle (FK) or an OUTSOURCED one (typed plate).
-    // (Stage-issue saves leave the master untouched — no vehicle requirement.)
-    if (formType === 'sales' && !stageIssueCtx) {
+    // Not required: quotation-stage creations (no dispatch section) and
+    // stage-issue saves on a sale that ALREADY has its attachment.
+    if (formType === 'sales' && (!stageIssueCtx
+      ? formStage !== 'quotation'
+      : (formStage === 'sales_order' && !stageIssueCtx.vehicleId && !stageIssueCtx.vehicleNo))) {
       if (vehOutsourced) {
         if (!formOutsourcedNo.trim()) {
           setFormError('Please enter the outsourced vehicle number.');
@@ -861,7 +915,10 @@ export function OrdersView({
     // journal voucher must keep upserting). At the invoice stage the flow is
     // COMPULSORY: an un-decided choice falls back to Book on credit.
     const settleStageFields = () => {
-      const effType = formSettlementType === 'none' && settleFinalStage ? ('credit' as const) : formSettlementType;
+      // Forced-credit stages always book credit regardless of the toggle state
+      const effType = creditOnly
+        ? ('credit' as const)
+        : (formSettlementType === 'none' && settleFinalStage ? ('credit' as const) : formSettlementType);
       return {
         updateCash: effType !== 'none',
         settlementType: effType,
@@ -873,15 +930,28 @@ export function OrdersView({
     if (stageIssueCtx) {
       // STAGE-ISSUE mode: submit issues the new stage document; the lines
       // become that stage's own rows (editable copy of the current stage).
+      // Issuing the sales_order stage on a VEHICLE-LESS sale attaches the
+      // collected dispatch (the quotation-stage creation shipped none).
       onAddSaleStage(stageIssueCtx.saleId, {
         stageType: stageIssueCtx.stageType,
         stageNumber: formOrderNumber.trim(),
         date: formDate,
         notes: formNotes.trim() || undefined,
         partyId: formPartyId || undefined,
-        updateInventory,
+        // 2026-10-28 client rule: the sales-order / invoice rung ALWAYS applies
+        // the dispatch (server forces as well)
+        updateInventory: (stageIssueCtx.stageType === 'sales_order' || stageIssueCtx.stageType === 'sales_invoice') ? true : updateInventory,
         ...settleStageFields(),
         items: itemsList,
+        ...(stageIssueCtx.stageType === 'sales_order' && !stageIssueCtx.vehicleId && !stageIssueCtx.vehicleNo
+          ? {
+              vehicleId: vehOutsourced ? '' : formVehicleId,
+              vehicleNo: vehOutsourced ? formOutsourcedNo.trim().toUpperCase() : '',
+              siteAddress: formSiteAddress.trim() || undefined,
+              distanceKm: Number(formDistanceKm) || undefined,
+              weightTonnes: Number(formWeightTonnes) || undefined,
+            }
+          : {}),
       });
       setStageIssueCtx(null);
       setIsFormOpen(false);
@@ -951,7 +1021,9 @@ export function OrdersView({
           stageNumber: formOrderNumber.trim(),
           date: formDate,
           notes: formNotes.trim(),
-          updateInventory,
+          // 2026-10-28 client rule: sales-order / direct-invoice creations
+          // ALWAYS apply the dispatch (server forces as well)
+          updateInventory: formStage === 'sales_order' || formStage === 'sales_invoice',
           ...settleStageFields(),
         },
       });
@@ -1205,11 +1277,55 @@ export function OrdersView({
             </div>
           )}
 
-          {/* New Order Button (+ Sales / Purchase document stage popover) */}
+          {/* Sales sub-tabs: Orders | Invoices (consolidated GST invoices) */}
+          {fixedType === 'sales' && (
+            <div className="flex items-center gap-1 bg-[var(--color-surface-container)] p-1 rounded-full border border-[var(--color-outline-variant)]">
+              <button
+                type="button"
+                onClick={() => setSalesPageTab('orders')}
+                className={`px-3 py-1 rounded-full text-[11px] font-bold transition-all ${
+                  salesPageTab === 'orders' ? 'bg-[var(--color-surface-container-lowest)] text-[var(--color-success)] shadow-xs' : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
+                }`}
+              >
+                Sales Orders
+              </button>
+              <button
+                type="button"
+                onClick={() => setSalesPageTab('invoices')}
+                className={`px-3 py-1 rounded-full text-[11px] font-bold transition-all ${
+                  salesPageTab === 'invoices' ? 'bg-[var(--color-surface-container-lowest)] text-[var(--color-primary)] shadow-xs' : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
+                }`}
+              >
+                Invoices
+              </button>
+            </div>
+          )}
+
+          {/* Create Invoice (global action — one GST invoice for N sales orders,
+              selected by party + date range; sales page + party detail) */}
+          {fixedType !== 'purchase' && onOpenCreateInvoice && (
+            <button
+              type="button"
+              onClick={() => onOpenCreateInvoice(undefined)}
+              className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-[var(--color-primary-container)] hover:opacity-90 text-[var(--color-on-primary-container)] font-bold text-xs rounded-full transition-all shadow-xs active:scale-95"
+            >
+              <FileCheck className="w-3.5 h-3.5" />
+              <span>Create Invoice</span>
+            </button>
+          )}
+
+          {/* New Order Button — SALES: opens the BULK grid directly (2026-10-28
+              user change: no popover; each bulk row still picks its stage
+              Quotation / Sales Order / Direct Invoice). PURCHASE: keeps its
+              RFQ / PO / GRN stage popover. */}
           <div className="relative" ref={stageMenuRef}>
             <button
               type="button"
-              onClick={() => setIsStageMenuOpen((open) => !open)}
+              onClick={() =>
+                fixedType === 'purchase'
+                  ? setIsStageMenuOpen((open) => !open)
+                  : setIsBulkCreateOpen(true)
+              }
               className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] font-bold text-xs rounded-full transition-all shadow-xs active:scale-95"
             >
               <Plus className="w-3.5 h-3.5" />
@@ -1244,54 +1360,6 @@ export function OrdersView({
                 ))}
               </div>
             )}
-
-            {isStageMenuOpen && fixedType !== 'purchase' && (
-              <div className="absolute right-0 top-[calc(100%+6px)] z-30 w-56 rounded-2xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] shadow-lg overflow-hidden">
-                <p className="px-3 pt-3 pb-2 text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-                  Create Sales Document
-                </p>
-                {[
-                  { id: 'quotation', label: 'Quotation', desc: 'Price Quote — starts a new sale' },
-                  { id: 'sales_order', label: 'Sales Order', desc: 'Confirmed outbound sale' },
-                  { id: 'sales_invoice', label: 'Invoice', desc: 'Final GST Bill — locks the sale' },
-                ].map((step) => (
-                  <button
-                    key={step.id}
-                    type="button"
-                    onClick={() => {
-                      setIsStageMenuOpen(false);
-                      handleOpenCreate('sales', step.id as SalesStage);
-                    }}
-                    className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50"
-                  >
-                    <div>
-                      <p className="text-xs font-bold text-[var(--color-on-surface)]">{step.label}</p>
-                      <p className="text-[10px] text-[var(--color-on-surface-variant)]">{step.desc}</p>
-                    </div>
-                    <ChevronRight className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
-                  </button>
-                ))}
-                {/* Bulk create — several sales documents in one go */}
-                <button
-                  key="bulk_create"
-                  type="button"
-                  onClick={() => {
-                    setIsStageMenuOpen(false);
-                    setIsBulkCreateOpen(true);
-                  }}
-                  className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50 bg-[var(--color-primary-container)]/20"
-                >
-                  <div>
-                    <p className="text-xs font-bold text-[var(--color-on-surface)] flex items-center gap-1.5">
-                      Bulk Create
-                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--color-primary)] text-[var(--color-on-primary)] uppercase">Fast</span>
-                    </p>
-                    <p className="text-[10px] text-[var(--color-on-surface-variant)]">Multiple sales documents in one go</p>
-                  </div>
-                  <Layers className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
-                </button>
-              </div>
-            )}
           </div>
         </div>
       </div>
@@ -1300,7 +1368,9 @@ export function OrdersView({
           the header rides sticky beneath the app header (h-16), matching the
           parties ledger table. overflow-clip keeps the rounded corners while
           letting the sticky header anchor to the viewport (an overflow-
-          hidden/auto ancestor would turn it into its own scroll container). */}
+          hidden/auto ancestor would turn it into its own scroll container).
+          Hidden while the Invoices sub-tab is open (sales page). */}
+      {salesPageTab !== 'invoices' && (
       <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl overflow-clip shadow-xs">
         <div>
           <table className="w-full text-left border-collapse">
@@ -1311,7 +1381,8 @@ export function OrdersView({
                 {fixedType === 'sales' && <th className="py-3.5 px-3">Sales Stage</th>}
                 {fixedType === 'purchase' && <th className="py-3.5 px-3">Purchase Stage</th>}
                 <th className="py-3.5 px-3">Party Name</th>
-                <th className="py-3.5 px-3">Stock / Cash</th>
+                {/* Stock / Cash column REMOVED (2026-10-28) — both apply
+                    automatically at the money stages now */}
                 <th className="py-3.5 px-3">Materials Ordered</th>
                 <th className="py-3.5 px-3 text-right">Total Amount</th>
                 <th className="py-3.5 px-4 text-center">Actions</th>
@@ -1320,7 +1391,7 @@ export function OrdersView({
             <tbody className="divide-y divide-[var(--color-outline-variant)]/60">
               {filteredOrders.length === 0 ? (
                 <tr>
-                  <td colSpan={!fixedType ? 8 : 7} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                  <td colSpan={!fixedType ? 7 : 6} className="py-12 text-center text-[var(--color-on-surface-variant)]">
                     <FileText className="w-8 h-8 mx-auto text-[var(--color-outline-variant)] mb-2" />
                     <p className="text-xs font-bold">No Orders Found</p>
                     <p className="text-[10px] mt-0.5">Try widening search tags or filters.</p>
@@ -1335,14 +1406,31 @@ export function OrdersView({
                       onClick={() => handleOpenDetail(order)}
                       className="hover:bg-[var(--color-surface-container-high)]/40 transition-colors cursor-pointer text-xs"
                     >
-                      {/* Sale/Purchase ID column — the master row's primary
-                          key shortened to `sale-<timestamp>` as the main
-                          line; the registration timestamp beneath it
-                          (dd-mm-yyyy + time) */}
+                      {/* Ref/RST number column — the row's DOCUMENT number by
+                          stage: quotation rows show their QUO-… number, sales
+                          orders show the RST serial (`RST 0001`), direct
+                          invoices show their invoice ref number; legacy/other
+                          rows fall back to the effective stage's own number.
+                          The registration timestamp stays beneath it. */}
                       <td className="py-3.5 px-4">
-                        <div className="font-bold text-[var(--color-on-surface)] truncate max-w-[220px]">
-                          {masterPkShort(order.id)}
-                        </div>
+                        {(() => {
+                          const stage = order.type === 'sales'
+                            ? (order.stage || 'sales_order')
+                            : (order.purchaseStage || 'purchase_order');
+                          const sn = (order.stageNumbers || []).find((x) => x.type === stage)?.number || order.orderNumber;
+                          // RST label only for true bare-serial numbers —
+                          // legacy SO-…/PO-… stage numbers show verbatim
+                          const refNum = stage === 'sales_order'
+                            ? (/^\d+$/.test(String(sn || '')) ? `RST ${sn}` : sn)
+                            : stage === 'quotation' && order.type === 'sales'
+                              ? `Quotation ${sn}`
+                              : sn;
+                          return (
+                            <div className="font-bold text-[var(--color-on-surface)] truncate max-w-[220px]">
+                              {refNum}
+                            </div>
+                          );
+                        })()}
                         <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
                           {formatDateTime(order.createdAt, 'dash')}
                         </p>
@@ -1393,6 +1481,17 @@ export function OrdersView({
                               </span>
                             );
                           })()}
+                          {(order.stage || 'sales_order') === 'sales_order' && (() => {
+                            // RST (2026-10-28): show the sales order's RST
+                            // serial beside its chip (bare serial, RST label)
+                            const soNumber = (order.stageNumbers || []).find((sn) => sn.type === 'sales_order')?.number || order.orderNumber;
+                            return null;
+                          })()}
+                          {order.isInvoiced && (
+                            <span className="ml-1.5 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)] border border-[var(--color-primary)]/20">
+                              Invoiced ✓
+                            </span>
+                          )}
                         </td>
                       )}
 
@@ -1447,37 +1546,9 @@ export function OrdersView({
                         })()}
                       </td>
 
-                      {/* One-shot application flags (Stock / Cash) */}
-                      <td className="py-3.5 px-3">
-                        <div className="flex flex-col items-start gap-1">
-                          <span
-                            title={order.inventoryApplied ? 'Stockyard inventory applied (one-shot)' : 'Inventory not applied yet'}
-                            className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide ${
-                              order.inventoryApplied
-                                ? 'bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]'
-                                : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
-                            }`}
-                          >
-                            <Boxes className="w-2.5 h-2.5" /> {order.inventoryApplied ? 'Stock ✓' : 'Stock —'}
-                          </span>
-                          <span
-                            title={order.cashApplied
-                              ? order.settlementType === 'credit'
-                                ? 'Booked on credit — the receivable/payable moves to the Party ledger, no Cash/Bank movement'
-                                : `Payment flow applied — receipt/payout voucher ${order.settlementVoucherNumber || ''} posted to ${order.settlementAccountName || 'Cash & Bank'}`
-                              : 'Payment flow not applied yet (Don\'t touch settlement)'}
-                            className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide ${
-                              order.cashApplied
-                                ? order.settlementType === 'credit'
-                                  ? 'bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]'
-                                  : 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
-                                : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
-                            }`}
-                          >
-                            <Landmark className="w-2.5 h-2.5" /> {order.cashApplied ? (order.settlementType === 'credit' ? 'Credit ✓' : 'Cash ✓') : 'Cash —'}
-                          </span>
-                        </div>
-                      </td>
+                      {/* One-shot application flags cell REMOVED (2026-10-28) —
+                          stock deducts + credit books automatically at the
+                          money stages; the old flag chips added no decision */}
 
                       {/* Materials Summary */}
                       <td className="py-3.5 px-3">
@@ -1559,6 +1630,17 @@ export function OrdersView({
           </table>
         </div>
       </div>
+      )}
+
+      {/* Consolidated Invoices list (sales page sub-tab) */}
+      {salesPageTab === 'invoices' && (
+        <SaleInvoicesView
+          invoices={saleInvoices || []}
+          sales={sales}
+          parties={parties}
+          settings={settings}
+        />
+      )}
 
       {/* Row action popover — PORTAL: fixed on the page so the list container
           (overflow-x-auto / overflow-hidden) can never clip it */}
@@ -1585,7 +1667,9 @@ export function OrdersView({
               return (
                 <div className="px-3 py-3 border-t border-[var(--color-outline-variant)]/50 text-[10px] font-bold text-[var(--color-error)] flex items-center gap-2">
                   <Ban className="w-3.5 h-3.5" />{' '}
-                  {target.type === 'sales' ? 'Sale locked — invoice issued' : 'Purchase locked — goods received'}
+                  {target.type === 'sales'
+                    ? (target.isInvoiced ? 'Sale locked — included in an invoice' : 'Legacy invoiced sale — locked')
+                    : 'Purchase locked — goods received'}
                 </div>
               );
             }
@@ -1755,7 +1839,12 @@ export function OrdersView({
               {/* Core Details Row */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Order Number</label>
+                {/* RST (2026-10-28): the sales-order number is called RST everywhere */}
+                <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
+                  {formType === 'sales'
+                    ? (formStage === 'sales_order' ? 'RST Number' : formStage === 'sales_invoice' ? 'Invoice Number' : 'Quotation Number')
+                    : 'Order Number'}
+                </label>
                   <input
                     type="text"
                     required
@@ -2024,314 +2113,28 @@ export function OrdersView({
               </div>
               )}
 
-              {/* Payment Mode & Cash/Bank Settlement Account (Optional Switch) — Sales Order & Invoice stages */}
-              {(formStage === 'sales_invoice' || formStage === 'sales_order') && (
-              <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3">
-                <div className="flex items-center justify-between flex-wrap gap-2">
-                  <div className="flex items-center gap-2">
-                    <div className={`p-2 rounded-xl transition-colors ${formSettlementType !== 'none' ? 'bg-[var(--color-primary-container)] text-[var(--color-primary)]' : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'}`}>
-                      <Landmark className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
-                        {formType === 'sales' ? 'Payment Settlement & Deposit Account' : 'Payment Disbursement & Source Account'}
-                      </h4>
-                      <p className="text-[10px] text-[var(--color-on-surface-variant)]">
-                        {settleSectionLocked
-                          ? 'The payment flow was applied at an earlier save and cannot be changed'
-                          : settleFinalStage
-                              ? 'The payment flow must be applied when the invoice is issued — choose Book on credit or settle into a Cash / Bank account'
-                              : formSettlementType !== 'none'
-                                ? 'Update the payment flow — book on credit or settle into a Cash / Bank account'
-                                : "Don't touch — nothing will be posted for this order"}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Toggle Switch: OFF = Don't touch payment settlement; ON =
-                      Update payment flow. Locked ON once the flow was applied,
-                      or at the invoice stage where the flow is compulsory. */}
-                  {(() => {
-                    const flowLocked = settleSectionLocked || settleFinalStage;
-                    const shown = formSettlementType !== 'none' || settleSectionLocked || settleFinalStage;
-                    return (
-                    <label className={`inline-flex items-center gap-2.5 select-none ${flowLocked ? 'opacity-70' : 'cursor-pointer'}`}>
-                    <span className="text-xs font-bold text-[var(--color-on-surface)]">
-                      {settleSectionLocked ? 'Payment Flow — Already Done' : 'Update payment flow'}
-                    </span>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={shown}
-                      disabled={flowLocked}
-                      title={settleSectionLocked
-                        ? `The payment flow for this ${formType === 'sales' ? 'sale' : 'purchase'} was applied at an earlier save and cannot be changed`
-                        : settleFinalStage
-                        ? 'A payment flow must be applied when the invoice is issued — it cannot be switched off at this stage'
-                        : undefined}
-                      onClick={() => setFormSettlementType(formSettlementType === 'none' ? 'credit' : 'none')}
-                      className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                        shown ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-surface-container-highest)]'
-                      } ${flowLocked ? 'cursor-not-allowed' : 'cursor-pointer'}`}
-                    >
-                      <span
-                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
-                          shown ? 'translate-x-5' : 'translate-x-0'
-                        }`}
-                      />
-                    </button>
-                  </label>
-                    );
-                  })()}
-                </div>
-
-                {formSettlementType !== 'none' ? (
-                  <div className="space-y-3 pt-1 border-t border-[var(--color-outline-variant)]/60 animate-in fade-in duration-200">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      {/* Credit / Account chooser — value '' = Book on credit */}
-                      <div>
-                        <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                          Choose Cash / Bank / Credit <span className="text-[var(--color-error)] font-bold">*</span>
-                        </label>
-                        <select
-                          // NOTE: no `required` — the empty value is the valid
-                          // "Book on credit" flow (validation happens on save).
-                          value={formSettlementType === 'account' ? formAccountId : ''}
-                          disabled={settleSectionLocked}
-                          onChange={(e) => {
-                            setFormAccountId(e.target.value);
-                            setFormSettlementType(e.target.value ? 'account' : 'credit');
-                          }}
-                          className={`w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${settleSectionLocked ? 'opacity-60 cursor-not-allowed' : ''}`}
-                        >
-                          <option value="">
-                            Book on credit — {formType === 'sales' ? 'Receivable moves to the Party ledger (no cash movement)' : 'Payable moves to the Party ledger (no cash movement)'}
-                          </option>
-                          {accounts
-                            .filter((a) => a.isActive)
-                            .map((acc) => (
-                              <option key={acc.id} value={acc.id}>
-                                {acc.name} [{acc.type === 'bank' ? (acc.bankName || 'Bank A/c') : 'Cash'}] — Bal: {formatCurrency(acc.currentBalance || 0)}
-                              </option>
-                            ))}
-                        </select>
-                      </div>
-
-                      {/* Mode of payment — only once an account is chosen */}
-                      {formSettlementType === 'account' && formAccountId && (
-                        <div>
-                          <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                            Mode of Payment <span className="text-[var(--color-error)] font-bold">*</span>
-                          </label>
-                          <select
-                            required
-                            value={formPaymentMode}
-                            disabled={settleSectionLocked}
-                            onChange={(e) => setFormPaymentMode(e.target.value as PaymentMode)}
-                            className={`w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${settleSectionLocked ? 'opacity-60 cursor-not-allowed' : ''}`}
-                          >
-                            <option value="bank_transfer">Bank Transfer / IMPS</option>
-                            <option value="neft_rtgs">NEFT / RTGS</option>
-                            <option value="upi">UPI / QR Code</option>
-                            <option value="cheque">Cheque / Demand Draft</option>
-                            <option value="cash">Cash Counter / Petty Cash</option>
-                          </select>
-                        </div>
-                      )}
-                    </div>
-
-                    {accounts.length === 0 && (
-                      <div className="p-2.5 rounded-xl bg-[var(--color-error-container)]/40 border border-[var(--color-error)]/30 flex items-center gap-2 text-[11px] text-[var(--color-error)] font-medium">
-                        <AlertTriangle className="w-4 h-4 shrink-0" />
-                        <span>No Cash/Bank accounts configured. Please create an account under Cash & Bank to book immediate settlement.</span>
-                      </div>
-                    )}
-
-                    {/* Locked "already applied" banners vs pre-save banners */}
-                    {settleSectionLocked && formSettlementType === 'account' ? (
-                      <div className="p-3 rounded-xl bg-[var(--color-success-container)]/40 border border-[var(--color-success)]/30 flex items-center justify-between gap-2 text-[11px] text-[var(--color-on-surface-variant)]">
-                        <span>
-                          Payment of <strong className="text-[var(--color-on-surface)]">{formatCurrency(stageIssueCtx?.settledAmount ?? (editingOrder as any)?.settledAmount ?? formCalculations.totalAmount)}</strong>{' '}
-                          was already settled into the sale's Cash/Bank account — no further voucher will be posted.
-                        </span>
-                        <span className="text-[10px] font-bold text-[var(--color-on-success-container)] uppercase bg-[var(--color-success-container)] px-2.5 py-0.5 rounded-full shrink-0">
-                          Flow Applied
-                        </span>
-                      </div>
-                    ) : settleSectionLocked && formSettlementType === 'credit' ? (
-                      <div className="p-3 rounded-xl bg-[var(--color-primary-container)]/40 border border-[var(--color-primary)]/30 flex items-center justify-between gap-2 text-[11px] text-[var(--color-on-surface-variant)]">
-                        <span>
-                          <strong className="text-[var(--color-on-surface)]">Receivable</strong> of{' '}
-                          <strong className="text-[var(--color-on-surface)] font-bold">{formatCurrency(stageIssueCtx?.settledAmount ?? (editingOrder as any)?.settledAmount ?? formCalculations.totalAmount)}</strong>{' '}
-                          is already booked on the party ledger — flow applied; the voucher re-locks to the invoice total when the invoice stage is issued.
-                        </span>
-                        <span className="text-[10px] font-bold text-[var(--color-primary)] uppercase bg-[var(--color-primary-container)]/60 px-2.5 py-0.5 rounded-full shrink-0">
-                          Flow Applied
-                        </span>
-                      </div>
-                    ) : formSettlementType === 'credit' ? (
-                      <div className="p-2.5 rounded-xl bg-[var(--color-primary-container)]/40 border border-[var(--color-primary)]/30 flex items-center justify-between gap-2 text-[11px] text-[var(--color-on-surface-variant)]">
-                        <span>
-                          <strong className="text-[var(--color-on-surface)]">{formType === 'sales' ? 'Receivable' : 'Payable'}</strong> of{' '}
-                          <strong className="text-[var(--color-on-surface)] font-bold">{formatCurrency(formCalculations.totalAmount)}</strong>{' '}
-                          will be booked against the {formType === 'sales' ? 'party' : 'vendor'} on credit — no Cash/Bank movement.
-                          {' '}No {formType === 'sales' ? 'receipt' : 'payout'} voucher will be posted.
-                        </span>
-                        <span className="text-[10px] font-bold text-[var(--color-primary)] uppercase bg-[var(--color-primary-container)]/60 px-2.5 py-0.5 rounded-full shrink-0">
-                          Credit {formType === 'sales' ? 'Sale' : 'Purchase'}
-                        </span>
-                      </div>
-                    ) : formAccountId ? (
-                      <div className="p-2.5 rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)]/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-[11px] text-[var(--color-on-surface-variant)]">
-                        <div className="flex items-center gap-2">
-                          <span className={`w-2 h-2 rounded-full shrink-0 ${formType === 'sales' ? 'bg-[var(--color-success)]' : 'bg-[var(--color-primary)]'}`} />
-                          <span>
-                            <strong className="text-[var(--color-on-surface)]">Cash Flow Impact:</strong> Order amount of{' '}
-                            <strong className={formType === 'sales' ? 'text-[var(--color-success)] font-bold' : 'text-[var(--color-primary)] font-bold'}>
-                              {formatCurrency(formCalculations.totalAmount)}
-                            </strong>{' '}
-                            will be {formType === 'sales' ? 'added to' : 'deducted from'} the selected account balance.
-                          </span>
-                        </div>
-                        {(() => {
-                          const chosen = accounts.find((a) => a.id === formAccountId);
-                          return chosen ? (
-                            <span className="font-bold text-[10px] text-[var(--color-on-surface)] uppercase px-2 py-0.5 rounded-md bg-[var(--color-surface-container-high)] shrink-0">
-                              {chosen.type.toUpperCase()}: {chosen.name}
-                            </span>
-                          ) : null;
-                        })()}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : settleSectionLocked ? (
-                  formSettlementType === 'account' ? (
-                  <div className="p-3 rounded-xl bg-[var(--color-success-container)]/40 border border-[var(--color-success)]/30 flex items-center justify-between text-xs text-[var(--color-on-surface-variant)]">
-                    <span className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-[var(--color-success)]" />
-                      <span>
-                        Payment of <strong className="text-[var(--color-on-surface)]">{formatCurrency(stageIssueCtx?.settledAmount ?? (editingOrder as any)?.settledAmount ?? 0)}</strong>{' '}
-                        was already settled into the sale's Cash/Bank account — no further voucher will be posted.
-                      </span>
-                    </span>
-                    <span className="text-[10px] font-bold text-[var(--color-on-success-container)] uppercase bg-[var(--color-success-container)] px-2.5 py-0.5 rounded-full shrink-0">
-                      Flow Applied
-                    </span>
-                  </div>
-                  ) : (
-                  <div className="p-3 rounded-xl bg-[var(--color-primary-container)]/40 border border-[var(--color-primary)]/30 flex items-center justify-between text-xs text-[var(--color-on-surface-variant)]">
-                    <span className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-[var(--color-primary)]" />
-                      <span>
-                        {formType === 'sales' ? 'Receivable' : 'Payable'} of{' '}
-                        <strong className="text-[var(--color-on-surface)]">{formatCurrency(stageIssueCtx?.settledAmount ?? (editingOrder as any)?.settledAmount ?? formCalculations.totalAmount)}</strong>{' '}
-                        is already booked on the party ledger — flow applied; the voucher re-locks to the final document's total at the next {formType === 'sales' ? 'invoice' : 'goods-receipt'} stage.
-                      </span>
-                    </span>
-                    <span className="text-[10px] font-bold text-[var(--color-primary)] uppercase bg-[var(--color-primary-container)]/60 px-2.5 py-0.5 rounded-full shrink-0">
-                      Flow Applied
-                    </span>
-                  </div>
-                  )
-                ) : (
-                  <div className="p-3 rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)]/60 flex items-center justify-between text-xs text-[var(--color-on-surface-variant)]">
-                    <span className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-[var(--color-outline)]" />
-                      <span>
-                        {editingOrder
-                          ? 'Nothing will be posted while the flow is switched off — enable the toggle to book this order on credit or settle it into a Cash/Bank account from this edit.'
-                          : "Nothing will be posted — no invoice/bill voucher, no party ledger move, no Cash/Bank movement. You can apply the payment flow later by editing the order or issuing the next document."}
-                      </span>
-                    </span>
-                    <span className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase bg-[var(--color-surface-container-high)] px-2.5 py-0.5 rounded-full shrink-0">
-                      No Entry
-                    </span>
-                  </div>
-                )}
-              </div>
-              )}
-
-              {/* Stockyard Inventory & Cash application toggles — ONE-SHOT per order.
-                  Stock posts a sale_dispatch / purchase_inward movement at this
-                  stage save the first time the user enables it; the server refuses
-                  double application (master flag). Cash applies through the
-                  Payment Settlement section on the invoice stage (voucher
-                  posting — once per order). The inventory switch also shows on
-                  the sales-ORDER EDIT form: checked + disabled once applied,
-                  freely toggleable (and applied on save) while not. */}
-              {formStage !== 'quotation' && (
-                <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3">
-                  <div className="flex items-center justify-between flex-wrap gap-2">
-                    <div className="flex items-center gap-2">
-                      <div className={`p-2 rounded-xl transition-colors ${updateInventory ? 'bg-[var(--color-primary-container)] text-[var(--color-primary)]' : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'}`}>
-                        <Boxes className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <h4 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
-                          {formType === 'sales' ? 'Deduct Stockyard Inventory Now' : 'Receive Into Stockyard Inventory Now'}
-                        </h4>
-                        <p className="text-[10px] text-[var(--color-on-surface-variant)]">
-                          {Boolean(stageIssueCtx?.inventoryApplied || (editingOrder as any)?.inventoryApplied)
-                            ? 'Inventory is already updated for this sale — no further stock movement will be written.'
-                            : stageIssueCtx?.stageType === 'sales_invoice'
-                            ? 'Issuing the invoice permanently updates this sale\'s inventory — it was not applied at an earlier stage, so the dispatch posts now and cannot be switched off.'
-                            : updateInventory
-                            ? (formType === 'sales'
-                              ? 'FIFO sale_dispatch ledger rows will be written at this stage save (one-time per sale)'
-                              : 'FIFO purchase_inward ledger rows will be written at this stage save (one-time per purchase)')
-                            : 'No stock movement yet — you can enable it later at any stage save (applies once)'}
-                        </p>
-                      </div>
-                    </div>
-
-                    {(() => {
-                      const already = Boolean(stageIssueCtx?.inventoryApplied || (editingOrder as any)?.inventoryApplied);
-                      // Issuing the invoice (stage-issue OR create): PERMANENT-ON
-                      // — applies here if it was not applied at the sales-order
-                      // stage; cannot be unchecked at this stage.
-                      const invoiceForcedOn = (stageIssueCtx?.stageType || formStage) === 'sales_invoice' && !already;
-                      const locked = already || invoiceForcedOn;
-                      const shown = locked || updateInventory;
-                      return (
-                    <label className={`inline-flex items-center gap-2.5 select-none ${locked ? 'opacity-70' : 'cursor-pointer'}`}>
-                      <span className="text-xs font-bold text-[var(--color-on-surface)]">
-                        {already ? 'Inventory Updated' : shown ? 'Update Inventory' : 'Inventory Untouched'}
-                      </span>
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={shown}
-                        disabled={locked}
-                        title={already
-                          ? 'Inventory is already updated for this sale'
-                          : invoiceForcedOn
-                          ? 'Inventory must be updated when the invoice is issued — cannot be unchecked at this stage'
-                          : undefined}
-                        onClick={() => setUpdateInventory(!updateInventory)}
-                        className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                          shown ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-surface-container-highest)]'
-                        } ${already ? 'cursor-not-allowed' : 'cursor-pointer'}`}
-                      >
-                        <span
-                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
-                            shown ? 'translate-x-5' : 'translate-x-0'
-                          }`}
-                        />
-                      </button>
-                    </label>
-                      );
-                    })()}
-                  </div>
+              {/* 2026-10-28 (client rule, simplified): the two toggle cards are
+                  GONE — one line states the automatic effects at the money stages */}
+              {(formStage === 'sales_order' || formStage === 'sales_invoice') && (
+                <div className="p-3 rounded-2xl border border-[var(--color-primary)]/30 bg-[var(--color-primary-container)]/30 flex items-start gap-2.5 text-[11px] text-[var(--color-on-surface-variant)]">
+                  <Landmark className="w-4 h-4 text-[var(--color-primary)] shrink-0 mt-0.5" />
+                  <span>
+                    <strong className="text-[var(--color-on-surface)]">Cash will be booked on credit</strong> on the party's ledger (the receivable moves — no cash movement) and{' '}
+                    <strong className="text-[var(--color-on-surface)]">Stock will be updated</strong> (the dispatch deducts FIFO) — once the {formStage === 'sales_invoice' ? 'invoice' : 'sales order'} is created. Neither can be switched off.
+                  </span>
                 </div>
               )}
-
               {/* Dispatch & Trip Details (sales) — a fleet vehicle is
                   COMPULSORY: every sale carries its own dispatch trip slip,
                   auto-derived in the Trip Slips Log and updated in place on
                   every save. ONE common load weight for all items; distance +
-                  drop site plan the trip. Hidden in stage-issue mode (the
-                  master is untouched there). */}
-              {formType === 'sales' && !stageIssueCtx && (
+                  drop site plan the trip. Hidden while CREATING a quotation
+                  (the vehicle attaches when it advances) and in stage-issue
+                  mode UNTIL the sales-order issuance on a vehicle-less sale —
+                  the first money stage must collect the attachment. */}
+              {formType === 'sales' && (!stageIssueCtx
+                ? formStage !== 'quotation'
+                : (formStage === 'sales_order' && !stageIssueCtx.vehicleId && !stageIssueCtx.vehicleNo)) && (
                 <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3">
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <div className="flex items-center gap-2">

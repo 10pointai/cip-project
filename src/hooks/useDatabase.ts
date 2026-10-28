@@ -22,6 +22,7 @@ import {
   TripSlip,
   Tyre,
   VehicleEmiEntry,
+  VehicleExpenseEntry,
   CashBankAccount,
   InternalTransfer,
   AccountAdjustment,
@@ -29,6 +30,8 @@ import {
   ItemStockAdjustment,
   EvidenceFolder,
   EvidenceFile,
+  SaleInvoice,
+  AppDefault,
 } from '../types';
 
 export function useDatabase() {
@@ -42,12 +45,15 @@ export function useDatabase() {
   const [productionBatches, setProductionBatches] = useState<ProductionBatchRun[]>(() => cloudStore.getProductionBatches());
   const [orders, setOrders] = useState<Order[]>(() => cloudStore.getOrders()); // legacy rows
   const [sales, setSales] = useState<Sale[]>(() => cloudStore.getSales());
+  const [saleInvoices, setSaleInvoices] = useState<SaleInvoice[]>(() => cloudStore.getSaleInvoices());
+  const [appDefaults, setAppDefaults] = useState<AppDefault[]>(() => cloudStore.getAppDefaults());
   const [purchases, setPurchases] = useState<Purchase[]>(() => cloudStore.getPurchases());
   const [vehicles, setVehicles] = useState<Vehicle[]>(() => cloudStore.getVehicles());
   const [drivers, setDrivers] = useState<Driver[]>(() => cloudStore.getDrivers());
   const [tripSlips, setTripSlips] = useState<TripSlip[]>(() => cloudStore.getTripSlips());
   const [tyres, setTyres] = useState<Tyre[]>(() => cloudStore.getTyres());
   const [vehicleEmiEntries, setVehicleEmiEntries] = useState<VehicleEmiEntry[]>(() => cloudStore.getVehicleEmiEntries());
+  const [vehicleExpenses, setVehicleExpenses] = useState<VehicleExpenseEntry[]>(() => cloudStore.getVehicleExpenses());
   const [employees, setEmployees] = useState<Employee[]>(() => cloudStore.getEmployees());
   const [attendance, setAttendance] = useState<EmployeeAttendance[]>(() => cloudStore.getAttendance());
   const [leaves, setLeaves] = useState<EmployeeLeave[]>(() => cloudStore.getLeaves());
@@ -76,12 +82,15 @@ export function useDatabase() {
     setProductionBatches(cloudStore.getProductionBatches());
     setOrders(cloudStore.getOrders());
     setSales(cloudStore.getSales());
+    setSaleInvoices(cloudStore.getSaleInvoices());
+    setAppDefaults(cloudStore.getAppDefaults());
     setPurchases(cloudStore.getPurchases());
     setVehicles(cloudStore.getVehicles());
     setDrivers(cloudStore.getDrivers());
     setTripSlips(cloudStore.getTripSlips());
     setTyres(cloudStore.getTyres());
     setVehicleEmiEntries(cloudStore.getVehicleEmiEntries());
+    setVehicleExpenses(cloudStore.getVehicleExpenses());
     setEmployees(cloudStore.getEmployees());
     setAttendance(cloudStore.getAttendance());
     setLeaves(cloudStore.getLeaves());
@@ -131,12 +140,15 @@ export function useDatabase() {
     productionBatches,
     orders,
     sales,
+    saleInvoices,
+    appDefaults,
     purchases,
     vehicles,
     drivers,
     tripSlips,
     tyres,
     vehicleEmiEntries,
+    vehicleExpenses,
     employees,
     attendance,
     leaves,

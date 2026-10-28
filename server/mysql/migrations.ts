@@ -652,6 +652,40 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
             INDEX idx_vem_date (date)
           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         `);
+        // Vehicle EXPENSE LOG (2026-10-27): generic expense + diesel fuel-fill
+        // rows — a balance-stream ledger like vehicle_emi_entries (amounts
+        // debit the linked cash/bank account). FK-only storage: the vehicle
+        // number and account name JOIN their masters at read time; diesel
+        // rows carry litres + rate, normal rows the free-text expense type.
+        await conn.query(`
+          CREATE TABLE IF NOT EXISTS vehicle_expense_entries (
+            id VARCHAR(64) PRIMARY KEY,
+            entry_type VARCHAR(16) NOT NULL DEFAULT 'expense',
+            vehicle_id VARCHAR(64) NOT NULL,
+            account_id VARCHAR(64) NOT NULL,
+            date VARCHAR(32) NOT NULL,
+            expense_type VARCHAR(255) NULL,
+            litres DECIMAL(12,2) NULL,
+            rate_per_litre DECIMAL(12,2) NULL,
+            amount DECIMAL(14,2) NOT NULL DEFAULT 0,
+            notes TEXT,
+            created_at VARCHAR(64),
+            INDEX idx_vxe_vehicle (vehicle_id),
+            INDEX idx_vxe_account (account_id),
+            INDEX idx_vxe_date (date),
+            INDEX idx_vxe_entry_type (entry_type)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        `);
+        await conn.query(`
+          CREATE TABLE IF NOT EXISTS vehicle_expense_documents (
+            id VARCHAR(64) PRIMARY KEY,
+            expense_id VARCHAR(64) NOT NULL,
+            document_id VARCHAR(64) NOT NULL,
+            created_at VARCHAR(64),
+            INDEX idx_vxed_expense (expense_id),
+            INDEX idx_vxed_document (document_id)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        `);
         const vehEmiCols: Array<[string, string, string | null]> = [
           ['ownership', "VARCHAR(32) DEFAULT 'owned'", null],
           ['insurance_monthly_amount', 'DECIMAL(12,2) NULL', null],
@@ -1994,6 +2028,25 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
             await conn.query("ALTER TABLE trip_slips ADD COLUMN trip_type VARCHAR(16) NULL AFTER driver_name");
             console.log('[MySQL Migration] Added trip_slips.trip_type column.');
           }
+          // FK-only vehicle numbers (Golden Rule §2, 2026-10-27): trip_slips /
+          // sales_orders no longer carry a copied vehicle_no for OWN-FLEET rows
+          // — the plate JOINs the vehicles master at read time. The column
+          // stays as the OUTSOURCED typed-plate store (no vehicles row to
+          // join). Make it nullable and NULL-out copies that a master row
+          // actually backs; plates whose vehicle master row is already gone
+          // are preserved so no history goes blank.
+          try {
+            await conn.query('ALTER TABLE trip_slips MODIFY COLUMN vehicle_number VARCHAR(64) NULL');
+            await conn.query(
+              'UPDATE trip_slips ts LEFT JOIN vehicles v ON v.id = ts.vehicle_id SET ts.vehicle_number = NULL WHERE ts.vehicle_id IS NOT NULL AND v.id IS NOT NULL'
+            );
+            await conn.query(
+              'UPDATE sales_orders s JOIN vehicles v ON v.id = s.vehicle_id SET s.vehicle_no = NULL WHERE s.vehicle_id IS NOT NULL AND v.id IS NOT NULL'
+            );
+            console.log('[MySQL Migration] Nullable trip_slips.vehicle_number; cleared FK-backed vehicle_no copies on trip_slips + sales_orders.');
+          } catch (vehNoErr: any) {
+            console.warn('[MySQL Migration] vehicle_no FK-copy cleanup notice:', vehNoErr.message);
+          }
           // order_id / order_number / material_item_id: written by BOTH the
           // liveSync and createTripSlipDirect but never created — every slip
           // INSERT/REPLACE failed wholesale (P0: slips persisted nowhere).
@@ -2085,6 +2138,120 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         }
       } catch (tyrePermErr: any) {
         console.warn('[MySQL Migration] tyre permission grant notice:', tyrePermErr.message);
+      }
+
+      // 17. CONSOLIDATED SALES INVOICES — one invoice for N sales orders
+      // (the invoice left the sale ladder: sales_orders gains `is_invoiced`;
+      //  members link via sales_invoice_orders, lines snapshot into
+      //  sales_invoice_items — FKs per Golden Rule §2, numbers/totals are the
+      //  §2 exception-1 statutory snapshots).
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS sales_invoices (
+          id VARCHAR(64) PRIMARY KEY,
+          invoice_number VARCHAR(64) NOT NULL,
+          party_id VARCHAR(64) NOT NULL,
+          date VARCHAR(32) NOT NULL,
+          notes TEXT,
+          subtotal DECIMAL(15,2) DEFAULT 0.00,
+          tax_amount DECIMAL(15,2) DEFAULT 0.00,
+          total_amount DECIMAL(15,2) DEFAULT 0.00,
+          transport_charges DECIMAL(15,2) COMMENT 'Σ member transportCharges — display roll-up, not an added charge',
+          settlement_type VARCHAR(16) NOT NULL COMMENT 'credit | account — compulsory at creation',
+          settlement_account_id VARCHAR(64) COMMENT 'FK cash_bank_accounts — where the payment was deposited',
+          payment_mode VARCHAR(64) COMMENT 'bank_transfer | neft_rtgs | upi | cheque | cash',
+          invoice_voucher_id VARCHAR(64) COMMENT 'FK transactions — the sale_invoice journal voucher',
+          settlement_voucher_id VARCHAR(64) COMMENT 'FK transactions — the payment_in receipt voucher',
+          settled_amount DECIMAL(15,2) COMMENT 'statutory snapshot of the settled total',
+          settled_date VARCHAR(32),
+          cash_applied BOOLEAN DEFAULT FALSE,
+          created_at VARCHAR(64) NOT NULL,
+          updated_at VARCHAR(64),
+          INDEX idx_sinv_number (invoice_number),
+          INDEX idx_sinv_party (party_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS sales_invoice_orders (
+          id VARCHAR(64) PRIMARY KEY,
+          sales_invoice_id VARCHAR(64) NOT NULL,
+          sale_id VARCHAR(64) NOT NULL,
+          sale_total_amount DECIMAL(15,2) DEFAULT 0.00 COMMENT 'member stage total at invoicing time (statutory snapshot)',
+          created_at VARCHAR(64) NOT NULL,
+          UNIQUE KEY uq_sio_sale (sale_id),
+          INDEX idx_sio_invoice (sales_invoice_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS sales_invoice_items (
+          id VARCHAR(64) PRIMARY KEY,
+          sales_invoice_id VARCHAR(64) NOT NULL,
+          sale_id VARCHAR(64) NOT NULL COMMENT 'FK sales_orders — source member order',
+          sale_stage_id VARCHAR(64) COMMENT 'FK sales_order_stages — the stage whose rows were invoiced',
+          item_id VARCHAR(64) NOT NULL,
+          unit_id VARCHAR(64) COMMENT 'FK item_units — display JOINed at read',
+          quantity DECIMAL(15,3) NOT NULL DEFAULT 0.000,
+          rate DECIMAL(15,4) NOT NULL DEFAULT 0.0000,
+          gst_rate DECIMAL(5,2) DEFAULT NULL,
+          location_id VARCHAR(64) COMMENT 'FK item_locations — dispatched from',
+          item_notes TEXT,
+          INDEX idx_sii_invoice (sales_invoice_id),
+          INDEX idx_sii_sale (sale_id),
+          INDEX idx_sii_item (item_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      try {
+        const [sinvCols]: any = await conn.query('SHOW COLUMNS FROM sales_orders');
+        const sinvc = (sinvCols || []).map((c: any) => c.Field);
+        if (sinvc.length > 0 && !sinvc.includes('is_invoiced')) {
+          await conn.query(
+            "ALTER TABLE sales_orders ADD COLUMN is_invoiced BOOLEAN DEFAULT FALSE COMMENT 'included in a consolidated sales invoice (locked + completed)' AFTER cash_applied"
+          );
+          console.log('[MySQL Migration] Added sales_orders.is_invoiced column.');
+        }
+        const [sinvIdxRows]: any = await conn.query('SHOW INDEX FROM sales_orders WHERE Key_name = "idx_sales_invoiced"');
+        if (!sinvIdxRows || sinvIdxRows.length === 0) {
+          await conn.query('ALTER TABLE sales_orders ADD INDEX idx_sales_invoiced (is_invoiced)');
+        }
+        // Backfill: rows that already carry a sales_invoice stage (the retired
+        // ladder) were invoiced — exclude them from future invoice pulls.
+        const [invBf]: any = await conn.query(
+          `UPDATE sales_orders so
+             JOIN sales_order_stages st ON st.sale_id = so.id AND st.stage_type = 'sales_invoice'
+           SET so.is_invoiced = TRUE
+           WHERE so.is_invoiced = FALSE`
+        );
+        if (invBf.affectedRows > 0) {
+          console.log(`[MySQL Migration] Backfilled is_invoiced on ${invBf.affectedRows} sales order(s) with an invoice stage.`);
+        }
+      } catch (invFlagErr: any) {
+        console.warn('[MySQL Migration] sales_orders.is_invoiced notice:', invFlagErr.message);
+      }
+
+      // 18. APP DEFAULTS — the generic key/value default-value store
+      // (user directive 2026-10-28): every tunable default lives here, read
+      // anywhere in the app, edited from Settings (manage_settings). The first
+      // default seeds itself: diesel_rate = '99.8' (₹/litre).
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS app_defaults (
+          app_key VARCHAR(64) PRIMARY KEY,
+          app_value TEXT NOT NULL,
+          updated_at VARCHAR(64) NOT NULL,
+          INDEX idx_ad_updated (updated_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+      try {
+        const seeded = await conn.query(
+          "INSERT IGNORE INTO app_defaults (app_key, app_value, updated_at) VALUES ('diesel_rate', '99.8', ?)",
+          [new Date().toISOString()]
+        );
+        if ((seeded[0] as any).affectedRows > 0) {
+          console.log("[MySQL Migration] Seeded app_defaults: diesel_rate = '99.8'.");
+        }
+      } catch (seedErr: any) {
+        console.warn('[MySQL Migration] app_defaults seed notice:', seedErr.message);
       }
 
       console.log('[MySQL Migration] All tables verified successfully.');

@@ -45,6 +45,7 @@ import {
   EmployeePayment,
   EmployeeLedgerTransaction,
   VehicleEmiEntry,
+  VehicleExpenseEntry,
 } from '../../types';
 import { formatCurrency, formatDate, formatDateTime } from '../../utils/formatters';
 import { formatLedgerBalance } from '../parties/partyStatement';
@@ -68,6 +69,8 @@ interface CashBankViewProps {
   employeeLedgerTransactions?: EmployeeLedgerTransaction[];
   /** auto-posted + manual vehicle loan installments debited from accounts */
   vehicleEmiEntries?: VehicleEmiEntry[];
+  /** vehicle expense log (generic + diesel) debited from accounts */
+  vehicleExpenses?: VehicleExpenseEntry[];
   settings: CompanySettings;
   onAddAccount: (acc: Omit<CashBankAccount, 'id' | 'createdAt' | 'updatedAt' | 'currentBalance' | 'isActive'>) => void;
   onUpdateAccount: (id: string, updates: Partial<CashBankAccount>) => void;
@@ -88,6 +91,7 @@ export function CashBankView({
   employeePayments,
   employeeLedgerTransactions,
   vehicleEmiEntries,
+  vehicleExpenses,
   settings,
   onAddAccount,
   onUpdateAccount,
@@ -366,6 +370,30 @@ export function CashBankView({
         });
       });
 
+    // 3.c-i Vehicle expense log entries — generic expenses and diesel fuel
+    // fills from Fleets → Expenses (editing/removing an entry rebalances the
+    // account on the server; diesel rows surface their litres × rate)
+    (vehicleExpenses || [])
+      .filter((e) => e.accountId === selectedAccountId)
+      .forEach((e) => {
+        const isDiesel = e.entryType === 'diesel';
+        list.push({
+          id: e.id,
+          date: e.date,
+          type: 'payment_out',
+          title: `Vehicle Expense — ${e.vehicleNo || 'Vehicle'}${isDiesel ? ' (Diesel)' : ` (${e.expenseType || 'Expense'})`}`,
+          description: e.notes || (isDiesel
+            ? [e.litres !== undefined ? `${Number(e.litres).toLocaleString('en-IN')} L` : '', e.ratePerLitre !== undefined ? `₹${e.ratePerLitre}/L` : ''].filter(Boolean).join(' @ ') || 'Diesel fuel fill debited'
+            : 'Vehicle expense debited'),
+          referenceNumber: undefined,
+          moneyIn: 0,
+          moneyOut: Number(e.amount) || 0,
+          createdAt: (e as any).createdAt || e.date,
+          // assigned by the registration-order sequencer below
+          runningBalance: 0,
+        });
+      });
+
     // 3.c Employee ledger rows on this account (Ledger & Salary tab): a
     // reduce_balance pays OUT; a bank-linked direct transaction moves
     // whichever direction was recorded (add_balance/accruals never touch bank)
@@ -402,7 +430,9 @@ export function CashBankView({
 
       const modeText = (ord.paymentMode || 'bank_transfer').replace('_', ' ').toUpperCase();
       const orderTypeTitle = isSales
-        ? `${ord.partyName} (Sales Order: ${ord.orderNumber})`
+        // RST (2026-10-28): sales-order numbers are referred to as RST —
+        // bare serial numbers; legacy numbers keep their old spelling
+        ? `${ord.partyName} (${/^\d+$/.test(String(ord.orderNumber || '')) ? 'RST' : 'Sales Order'}: ${ord.orderNumber})`
         : `${ord.partyName} (Purchase Order: ${ord.orderNumber})`;
 
       list.push({
@@ -437,7 +467,7 @@ export function CashBankView({
     }
 
     return sorted;
-  }, [selectedAccountId, selectedAccount, transactions, transfers, adjustments, orders, employeeLedgerTransactions]);
+  }, [selectedAccountId, selectedAccount, transactions, transfers, adjustments, orders, employeeLedgerTransactions, vehicleEmiEntries, vehicleExpenses]);
 
   // Handle CSV Export
   const handleExportCSV = () => {

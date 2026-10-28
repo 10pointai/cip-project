@@ -23,6 +23,7 @@ import { ModulePlaceholderView } from './components/common/ModulePlaceholderView
 import { AccessDeniedView } from './components/common/AccessDeniedView';
 import { PartyFormModal } from './components/parties/PartyFormModal';
 import { RecordPaymentModal } from './components/parties/RecordPaymentModal';
+import { CreateSaleInvoiceModal } from './components/orders/CreateSaleInvoiceModal';
 import { TransactionFormModal } from './components/parties/TransactionFormModal';
 import { PartyDetailModal } from './components/parties/PartyDetailModal';
 import { BackendStatusModal } from './components/common/BackendStatusModal';
@@ -43,6 +44,7 @@ function AppContent() {
     productionBatches,
     orders,
     sales,
+    saleInvoices,
     purchases,
     employees,
     employeePayments,
@@ -52,6 +54,7 @@ function AppContent() {
     adjustments,
     stockAdjustments,
     vehicleEmiEntries,
+    vehicleExpenses,
     isOnline,
     counts,
     loadFeature,
@@ -71,6 +74,16 @@ function AppContent() {
   // Cross-feature focus — a driver clicked in the Fleet Drivers tab lands on
   // his profile page in the Employees feature
   const [focusEmployeeId, setFocusEmployeeId] = useState<string | null>(null);
+  // ORIGIN AWARENESS for that focus (2026-10-28): a profile opened from the
+  // Fleet's Drivers tab returns to the DRIVERS tab on Back (nonce-bumped
+  // signal makes LogisticsView jump there)
+  const [driverProfileFromFleet, setDriverProfileFromFleet] = useState(false);
+  const [fleetDriversSignal, setFleetDriversSignal] = useState(0);
+  const returnToFleetDrivers = () => {
+    setDriverProfileFromFleet(false);
+    setFleetDriversSignal((n) => n + 1);
+    setActiveTab('logistics');
+  };
 
   // PER-FEATURE DATA LOADING
   // Boot tier — once per sign-in, the small lookup tables that global modals,
@@ -247,24 +260,42 @@ function AppContent() {
     showToast('Adjustment voucher deleted.', 'info');
   };
 
-  // Sales & Purchase handlers (relational order model)
+  // Sales & Purchase handlers (relational order model).
+  // RST (2026-10-28): the sales-order number is referred to as RST everywhere;
+  // quotations/invoices keep their own terms.
+  const docTermFor = (stageType?: string) =>
+    stageType === 'quotation' ? 'Quotation' : stageType === 'sales_invoice' ? 'Invoice' : 'RST';
+
   const handleAddSale = (payload: any) => {
     const sale = db.addSale(payload);
-    showToast(`${payload.stage?.stageType === 'quotation' ? 'Quotation' : 'Sale'} ${sale.saleNumber} registered successfully!`);
+    showToast(`${docTermFor(payload.stage?.stageType)} ${sale.saleNumber} registered successfully!`);
     return sale;
   };
 
   const handleUpdateSale = (id: string, updates: any) => {
     const sale = db.updateSale(id, updates);
-    if (sale) showToast(`Sale ${sale.saleNumber} updated successfully!`);
+    if (sale) showToast(`${docTermFor((sale.stages || []).length > 0 ? (sale.stages || [])[(sale.stages || []).length - 1].stageType : 'sales_order')} ${sale.saleNumber} updated successfully!`);
     return sale;
   };
 
   const handleAddSaleStage = (id: string, stageInput: any) => {
     const sale = db.addSaleStage(id, stageInput);
-    if (sale) showToast(`Stage ${stageInput.stageType} saved on ${sale.saleNumber}!`);
+    if (sale) showToast(`${docTermFor(stageInput.stageType)} ${stageInput.stageNumber || sale.saleNumber} saved!`);
     return sale;
   };
+
+  // Consolidated invoice handler — creation only (cancellation stays a
+  // server/cloudStore capability but has no UI affordance by design)
+  const handleAddSaleInvoice = (payload: any) => {
+    const invoice = db.addSaleInvoice(payload);
+    showToast(`Invoice created for ${(payload.saleIds || []).length} sales order(s)!`);
+    return invoice;
+  };
+
+  // Create-Invoice modal state (Sales page button + Party-detail button both
+  // open it; partyId presets when entering from a party's detail)
+  const [invoiceCreatorState, setInvoiceCreatorState] = useState<{ isOpen: boolean; partyId?: string }>({ isOpen: false });
+  const handleOpenCreateInvoice = (partyId?: string) => setInvoiceCreatorState({ isOpen: true, partyId });
 
   const handleDeleteSale = (id: string) => {
     const success = db.deleteSale(id);
@@ -524,6 +555,7 @@ function AppContent() {
               transactions={transactions}
               sales={sales}
               purchases={purchases}
+              saleInvoices={saleInvoices}
               settings={settings}
               accounts={accounts}
               onAddParty={handleAddParty}
@@ -531,6 +563,7 @@ function AppContent() {
               onUpdateParty={handleUpdateParty}
               onAddTransaction={handleAddTransaction}
               onRecordPayment={handleRecordPayment}
+              onOpenCreateInvoice={handleOpenCreateInvoice}
               onOpenInOrders={handleOpenInOrders}
             />
           )}
@@ -545,6 +578,7 @@ function AppContent() {
               employeePayments={employeePayments}
               employeeLedgerTransactions={employeeLedgerTransactions}
               vehicleEmiEntries={vehicleEmiEntries}
+              vehicleExpenses={vehicleExpenses}
               settings={settings}
               onAddAccount={handleAddAccount}
               onUpdateAccount={handleUpdateAccount}
@@ -581,6 +615,7 @@ function AppContent() {
           {activeTab === 'sales' && hasPermission('manage_sales') && (
             <OrdersView
               sales={sales}
+              saleInvoices={saleInvoices}
               purchaseOrders={purchases}
               parties={parties}
               items={items}
@@ -589,6 +624,7 @@ function AppContent() {
               onUpdateSale={handleUpdateSale}
               onAddSaleStage={handleAddSaleStage}
               onDeleteSale={handleDeleteSale}
+              onOpenCreateInvoice={handleOpenCreateInvoice}
               onAddPurchase={handleAddPurchase}
               onUpdatePurchase={handleUpdatePurchase}
               onAddPurchaseStage={handleAddPurchaseStage}
@@ -639,11 +675,14 @@ function AppContent() {
               onOpenDriverProfile={
                 hasPermission('manage_employees')
                   ? (employeeId: string) => {
+                      // Remember the ORIGIN: that profile's Back returns here
+                      setDriverProfileFromFleet(true);
                       setFocusEmployeeId(employeeId);
                       setActiveTab('employees');
                     }
                   : undefined
               }
+              openDriversSignal={fleetDriversSignal}
             />
           )}
 
@@ -655,6 +694,9 @@ function AppContent() {
             <EmployeesView
               focusEmployeeId={focusEmployeeId}
               onFocusHandled={() => setFocusEmployeeId(null)}
+              // Origin-aware Back: a driver profile opened from the FLEET's
+              // Drivers tab returns there; roster profiles use the default
+              onProfileBack={driverProfileFromFleet ? returnToFleetDrivers : undefined}
             />
           )}
 
@@ -718,6 +760,7 @@ function AppContent() {
         transactions={transactions}
         sales={sales}
         purchases={purchases}
+        saleInvoices={saleInvoices}
         accounts={accounts}
         settings={settings}
         onEdit={(party) => {
@@ -749,6 +792,19 @@ function AppContent() {
         onSave={handleAddTransaction}
         currencySymbol={settings.currency.symbol}
         prefixes={settings.prefixes}
+      />
+
+      {/* Consolidated invoice creator — one GST invoice for N sales orders
+          (Create Invoice action on the Sales page + Party detail) */}
+      <CreateSaleInvoiceModal
+        open={invoiceCreatorState.isOpen}
+        onClose={() => setInvoiceCreatorState({ isOpen: false })}
+        parties={parties}
+        sales={sales}
+        accounts={accounts}
+        settings={settings}
+        presetPartyId={invoiceCreatorState.partyId}
+        onSubmit={handleAddSaleInvoice}
       />
 
       <BackendStatusModal

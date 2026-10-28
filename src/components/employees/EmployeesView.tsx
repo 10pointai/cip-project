@@ -33,9 +33,13 @@ interface EmployeesViewProps {
   focusEmployeeId?: string | null;
   /** Cleared once the focus is handled, so the same driver can re-open */
   onFocusHandled?: () => void;
+  /** Provided ONLY when the profile was opened from ANOTHER feature (the
+   *  Fleet Drivers tab): the detail page's Back returns there (logistics,
+   *  drivers tab) instead of the roster. Omitted ⇒ default roster return. */
+  onProfileBack?: () => void;
 }
 
-export function EmployeesView({ focusEmployeeId, onFocusHandled }: EmployeesViewProps) {
+export function EmployeesView({ focusEmployeeId, onFocusHandled, onProfileBack }: EmployeesViewProps) {
   const {
     employees,
     employeeLedgerTransactions,
@@ -255,7 +259,12 @@ export function EmployeesView({ focusEmployeeId, onFocusHandled }: EmployeesView
           employee={employees.find((e) => e.id === detailEmployee.id) || detailEmployee}
           employees={employees}
           currencySymbol={currencySymbol}
-          onBack={() => setDetailEmployee(null)}
+          onBack={() => {
+            // Origin-aware: profiles opened from the Fleet Drivers tab return
+            // THERE; roster-internal profiles fall back to the directory
+            if (onProfileBack) return onProfileBack();
+            setDetailEmployee(null);
+          }}
           // The page STAYS open when editing — the form modal overlays it and
           // the roster refresh keeps the page on updated data after saving
           onEdit={(emp) => openEmployeeModal(emp)}

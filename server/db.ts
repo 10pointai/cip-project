@@ -39,8 +39,12 @@ import {
   PurchaseOrderItemInput,
   SalesOrderStageInput,
   PurchaseOrderStageInput,
+  SaleInvoice,
+  SaleInvoiceItem,
+  SaleInvoiceOrderLink,
   AppUser,
   AppDocument,
+  AppDefault,
   SaleOrderDocumentLink,
   PurchaseOrderDocumentLink,
   PartyDocumentLink,
@@ -48,6 +52,8 @@ import {
   EmployeeDocumentLink,
   VehicleDocumentLink,
   VehicleEmiEntry,
+  VehicleExpenseEntry,
+  ExpenseDocumentLink,
   UserPermissions,
   UserRole,
   UserStatus,
@@ -63,6 +69,9 @@ import {
   liveSyncSale,
   liveSyncSaleItems,
   liveSyncSaleStages,
+  liveSyncSaleInvoice,
+  liveSyncSaleInvoiceItems,
+  liveSyncSaleInvoiceOrders,
   liveSyncPurchase,
   liveSyncPurchaseItems,
   liveSyncPurchaseStages,
@@ -77,6 +86,9 @@ import {
   liveSyncVehicleDocLink,
   liveSyncVehicle,
   liveSyncVehicleEmiEntry,
+  liveSyncVehicleExpenseEntry,
+  liveSyncExpenseDocLink,
+  liveSyncAppDefault,
   liveSyncDriver,
   liveSyncTripSlip,
   liveSyncTyre,
@@ -99,7 +111,7 @@ import {
 import { isMysqlConfigured } from './mysql/connection';
 
 /** Document-mapping feature kinds (one join table per kind). */
-type DocLinkKind = 'sale' | 'purchase' | 'party' | 'item' | 'employee' | 'vehicle';
+type DocLinkKind = 'sale' | 'purchase' | 'party' | 'item' | 'employee' | 'vehicle' | 'expense';
 import {
   computeItemValuation,
   computeOutwardConsumptionRate,
@@ -155,6 +167,8 @@ export interface DatabaseSchema {
   /** @deprecated legacy `orders` rows (retired by the relational sale/purchase split) */
   orders: Order[];
   sales: Sale[];
+  /** Consolidated sales invoices (one invoice = N sales orders) */
+  salesInvoices: SaleInvoice[];
   purchases: Purchase[];
   vehicles: Vehicle[];
   drivers: Driver[];
@@ -185,6 +199,13 @@ export interface DatabaseSchema {
   vehicleDocuments: VehicleDocumentLink[];
   /** vehicle EMI ledger rows (table vehicle_emi_entries) — balance stream */
   vehicleEmiEntries: VehicleEmiEntry[];
+  /** vehicle expense log rows (table vehicle_expense_entries) — balance stream */
+  vehicleExpenseEntries: VehicleExpenseEntry[];
+  /** expense_documents mapping rows (table vehicle_expense_documents) */
+  expenseDocuments: ExpenseDocumentLink[];
+  /** APP DEFAULTS — the generic key/value default store (table app_defaults;
+   *  key IS the primary key). First member: diesel_rate = '99.8' (₹/litre). */
+  appDefaults: AppDefault[];
 }
 
 /**
@@ -233,6 +254,7 @@ class ServerLocalDatabase {
       productionBatches: JSON.parse(JSON.stringify(SEED_BATCHES)),
       orders: [],
       sales: [],
+      salesInvoices: [],
       purchases: [],
       vehicles: JSON.parse(JSON.stringify(SEED_VEHICLES)),
       drivers: JSON.parse(JSON.stringify(SEED_DRIVERS)),
@@ -255,6 +277,13 @@ class ServerLocalDatabase {
       employeeDocuments: [],
       vehicleDocuments: [],
       vehicleEmiEntries: [],
+      vehicleExpenseEntries: [],
+      expenseDocuments: [],
+      // First default (user directive): diesel cost fixed at ₹99.8/litre —
+      // editable from Settings; the bulk diesel rows prefill it
+      appDefaults: [
+        { key: 'diesel_rate', value: '99.8', updatedAt: new Date().toISOString() },
+      ],
       auditLogs: [
         {
           id: `aud-${Date.now()}`,
@@ -387,6 +416,12 @@ class ServerLocalDatabase {
           this.data = mysqlData;
           this.lastMysqlHydrationTime = Date.now();
           this.persistSync();
+          // Balance-stream sweep: accounts touched by vehicle expense entries
+          // recompute their balance straight from the entry lists (opening +
+          // streams) — covers expenses recorded before this stream joined
+          // recalculateAccountBalance, and keeps every hydration idempotent.
+          const touchedExpenseAccounts = new Set((mysqlData.vehicleExpenseEntries || []).map((e) => e.accountId));
+          touchedExpenseAccounts.forEach((aid) => { try { this.recalculateAccountBalance(aid); } catch (e: any) { console.warn('[DB] Expense-stream balance sweep failed for account:', aid, e.message); } });
           console.log('[DB] Live database hydrated directly from Azure Database for MySQL Flexible Server');
           return true;
         }
@@ -409,7 +444,9 @@ class ServerLocalDatabase {
       items: this.data.items.map((i) => this.hydrateItemWithMovements(i)),
       // Sale/purchase display fields are live views: party/unit/location names
       // are re-resolved from the masters on every snapshot (Golden Rule §2).
-      sales: (this.data.sales || []).map((s) => this.hydrateSale(s)),
+      sales: (this.data.sales || []).filter((s) => this.isVisibleSale(s)).map((s) => this.hydrateSale(s)),
+      salesInvoices: (this.data.salesInvoices || []).map((si) => this.hydrateSaleInvoice(si)),
+      tripSlips: this.visibleTripSlips(),
       purchases: (this.data.purchases || []).map((p) => this.hydratePurchase(p)),
       // Transfer/adjustment display names are live views from the account master
       transfers: (this.data.transfers || []).map((t) => this.hydrateTransfer(t)),
@@ -1473,6 +1510,30 @@ class ServerLocalDatabase {
     return this.data.locations.find((l) => (l.name || '').trim().toLowerCase() === n)?.id;
   }
 
+  /** RST numbering (2026-10-28 user rule): the sales-order document number is
+   *  a SIMPLE SERIAL stored bare ('0001'); every surface shows the number
+   *  beside the "RST" label (RST 0001). Next = highest bare-serial saleNumber
+   *  in use — INCLUDING soft-deleted rows, whose numbers stay spent — plus 1;
+   *  legacy SO-/QUO-/SALE-… numbers are ignored by the parse and untouched. */
+  private isBareSerial(v: string | undefined): boolean {
+    return /^\d+$/.test(String(v || ''));
+  }
+
+  private nextRstNumber(): string {
+    let max = 0;
+    for (const s of this.data.sales || []) {
+      if (!this.isBareSerial(s.saleNumber)) continue;
+      const n = parseInt(String(s.saleNumber), 10);
+      if (Number.isFinite(n) && n > max) max = n;
+    }
+    return String(max + 1).padStart(4, '0');
+  }
+
+  /** For the Add-Sale form's prefill (GET /api/sales/next-rst). */
+  public peekNextRstNumber(): string {
+    return this.nextRstNumber();
+  }
+
   private computeStageTotals(
     lines: Array<{ quantity: number; rate: number; gstRate?: number }>,
     transportCharges = 0,
@@ -2302,12 +2363,20 @@ class ServerLocalDatabase {
 
   // ---------- SALES ----------
 
+  /** Sales fetch (Golden fetch-rule, 2026-10-28): soft-deleted rows
+   *  (status 'deleted') never surface in the sales feature. */
+  private isVisibleSale(s: Sale): boolean {
+    return s.status !== 'deleted';
+  }
+
   public getSales(): Sale[] {
-    return (this.data.sales || []).map((s) => this.hydrateSale(s));
+    return (this.data.sales || [])
+      .filter((s) => this.isVisibleSale(s))
+      .map((s) => this.hydrateSale(s));
   }
 
   public getSaleById(id: string): Sale | undefined {
-    const sale = (this.data.sales || []).find((s) => s.id === id);
+    const sale = (this.data.sales || []).find((s) => s.id === id && this.isVisibleSale(s));
     return sale ? this.hydrateSale(sale) : undefined;
   }
 
@@ -2321,7 +2390,20 @@ class ServerLocalDatabase {
       stageNumber: data.saleNumber,
       date: data.date,
     };
-    const masterNumber = data.saleNumber || stageInput.stageNumber || `SALE-${Date.now().toString().slice(-8)}`;
+    const firstStageType = stageInput.stageType || 'sales_order';
+    let masterNumber = data.saleNumber || stageInput.stageNumber || '';
+    // RST minting: a sales_order master without a number gets the next
+    // simple serial (quotation/invoice-first sales keep the client's QUO-/INV-…)
+    if (!masterNumber && firstStageType === 'sales_order') {
+      masterNumber = this.nextRstNumber();
+    }
+    if (!masterNumber) masterNumber = `SALE-${Date.now().toString().slice(-8)}`;
+    // RST uniqueness: a bare serial must never collide with an existing sale
+    // (user-override protection; server-minted serials never clash)
+    if (this.isBareSerial(masterNumber) &&
+        (this.data.sales || []).some((s) => s.saleNumber === masterNumber)) {
+      throw new Error(`RST number ${masterNumber} is already in use — choose a different RST number.`);
+    }
 
     // The FIRST stage owns the item rows it is saved with (quotation /
     // sales_order / invoice — a new sale may start at any of the three).
@@ -2365,6 +2447,8 @@ class ServerLocalDatabase {
       // ₹ per tonne per KM; transportCharges = weight × distance × rate
       freightRatePerTonne: Number(data.freightRatePerTonne) > 0 ? Number(data.freightRatePerTonne) : undefined,
       freightGstRate: Number((data as any).freightGstRate) > 0 ? Number((data as any).freightGstRate) : undefined,
+      // Consolidated-invoice membership — server-managed flag (createSaleInvoice)
+      isInvoiced: false,
       inventoryApplied: false,
       cashApplied: false,
       items,
@@ -2373,27 +2457,23 @@ class ServerLocalDatabase {
       updatedAt: now,
     };
 
-    // Toggle-gated one-shot inventory application (cash posting rules pending
-    // user specification — flag is recorded only).
-    if (stageInput.updateInventory || firstStage.stageType === 'sales_invoice') {
-      // Invoice stage: the inventory application is PERMANENT-ON — it applies
-      // at the invoice save even if the toggle was never enabled earlier.
-      if (this.applySaleInventory(sale, firstStage.stageNumber)) {
+    // 2026-10-28 (CLIENT RULE, no toggle/no choice): EVERY money-stage first save
+    // applies its stock AND books the flow as CREDIT — the sales_order stage and
+    // the direct invoice both deduct stockyard inventory and post the credit
+    // journal immediately (receivable rides the party ledger; receipt is
+    // recorded later against the party). Quotations touch nothing.
+    if (firstStage.stageType === 'sales_invoice' || firstStageType === 'sales_order') {
+      if (this.applySaleInventory(sale, firstStage.stageNumber, true)) {
         sale.inventoryApplied = true;
       }
-    }
-    if (firstStage.stageType === 'sales_invoice' || firstStage.stageType === 'sales_order') {
-      // Cash & Bank wiring: the payment_in receipt voucher posts the moment
-      // "Settle Payment Now" is chosen (sales-order or invoice stage — once
-      // per sale); the sale_invoice journal voucher posts when the invoice
-      // document exists.
+      const askedType = (stageInput as any).settlementType;
       this.applySaleCash(sale, firstStage, {
-        settle: Boolean(stageInput.updateCash),
-        type: (stageInput as any).settlementType,
-        settlementAccountId: stageInput.settlementAccountId,
-        paymentMode: stageInput.paymentMode,
-      }, firstStage.stageType);
-      this.logAudit('CREATE', 'SALE_CASH', saleId, `Payment flow on sale ${sale.saleNumber} at ${firstStage.stageType} (type=${(stageInput as any).settlementType ?? (stageInput.updateCash ? 'account(legacy)' : 'legacy-off')})`);
+        settle: false,
+        type: 'credit',
+        settlementAccountId: undefined,
+        paymentMode: undefined,
+      }, firstStage.stageType as SalesStage);
+      this.logAudit('CREATE', 'SALE_CASH', saleId, `Forced flow on sale ${sale.saleNumber} at ${firstStage.stageType} (inventory forced; credit journal)${askedType && askedType !== 'credit' ? ` — client asked ${askedType}, overridden to credit` : ''}`);
     } else if (stageInput.updateCash) {
       this.logAudit('DISPATCH', 'SALE_CASH', saleId, `Cash application requested at ${firstStage.stageType} stage — applies at the sales-order stage`);
     }
@@ -2429,6 +2509,11 @@ class ServerLocalDatabase {
     // immutable — no master edits, no item edits, no cancellation.
     if (latestStage?.stageType === 'sales_invoice') {
       throw new Error(`Sale ${existing.saleNumber} is locked (invoice issued) — nothing can be edited.`);
+    }
+    // CONSOLIDATED-INVOICE LOCK: member sales orders of a consolidated
+    // invoice are frozen too (they cannot be edited out from under it).
+    if ((existing as any).isInvoiced) {
+      throw new Error(`Sale ${existing.saleNumber} is locked (included in a consolidated invoice) — nothing can be edited.`);
     }
     const wasCancelled = existing.status === 'cancelled';
 
@@ -2571,11 +2656,13 @@ class ServerLocalDatabase {
   }
 
   /**
-   * Issues the NEXT stage document for a sale. Stage ladder:
-   *   quotation   -> sales_order (item rows seeded as a copy of the quotation's
-   *                  own rows) | sales_invoice (invoice straight from quotation)
-   *   sales_order -> sales_invoice
-   *   sales_invoice -> LOCKED (sale is immutable, nothing further can be added)
+   * Issues the NEXT stage document for a sale. Stage ladder (2026-10-28):
+   *   quotation     -> sales_order (item rows seeded as a copy of the
+   *                    quotation's own rows or the caller's lines)
+   *   sales_order   -> LOCKED ladder: no further RUNG — GST invoices are
+   *                    consolidated separately (createSaleInvoice: one invoice
+   *                    for N sales orders). Legacy 'sales_invoice' stage rows
+   *                    still render (history) but can never be issued again.
    * Item rows are PER STAGE (sales_order_items.sales_order_stage_id): the new
    * stage keeps its own rows — either the caller's lines (stageInput.items)
    * or an exact copy of the current stage's lines — and previous stage values
@@ -2591,16 +2678,72 @@ class ServerLocalDatabase {
     if (currentType === 'sales_invoice') {
       throw new Error(`Sale ${sale.saleNumber} is locked (invoice issued) — no further stage documents can be added.`);
     }
+    if ((sale as any).isInvoiced) {
+      throw new Error(`Sale ${sale.saleNumber} is locked (included in a consolidated invoice) — no further stage documents can be added.`);
+    }
     if (sale.status === 'cancelled') {
       throw new Error(`Sale ${sale.saleNumber} is cancelled — no further stage documents can be added.`);
     }
-    const allowed: SalesStage[] = currentType === 'quotation' ? ['sales_order', 'sales_invoice'] : ['sales_invoice'];
+    // LADDER (2026-10-28): the invoice is no longer a rung. A sale is
+    // quotation → sales_order; GST invoices are CONSOLIDATED (one invoice for
+    // N sales orders) via the Create Invoice action (see createSaleInvoice).
+    if (stageInput.stageType === 'sales_invoice') {
+      throw new Error('A sale cannot issue a sales invoice directly — invoices are now consolidated from several sales orders via the Create Invoice action.');
+    }
+    const allowed: SalesStage[] = currentType === 'quotation' ? ['sales_order'] : [];
     if (!allowed.includes(stageInput.stageType as SalesStage)) {
       throw new Error(`A sale at ${currentType} stage cannot issue a ${stageInput.stageType} document.`);
     }
 
     const now = new Date().toISOString();
     const stageId = `sos-${id}-${Math.random().toString(36).slice(2, 8)}`;
+
+    // RST (2026-10-28): issuing the sales_order stage PROMOTES the master
+    // numbering to the confirmed order's RST serial — a quotation-first sale
+    // abandons its QUO-… number in favor of the RST (the quotation stage row
+    // keeps its own QUO-… stageNumber as the §2 statutory snapshot). The
+    // caller's typed number wins; otherwise the server mints the next serial.
+    let stageNumber = stageInput.stageNumber || sale.saleNumber;
+    if (stageInput.stageType === 'sales_order' && !this.isBareSerial(sale.saleNumber)) {
+      const minted = (stageInput.stageNumber || '').trim() || this.nextRstNumber();
+      if ((this.data.sales || []).some((s) => s.id !== id && s.saleNumber === minted)) {
+        throw new Error(`RST number ${minted} is already in use — choose a different RST number.`);
+      }
+      stageNumber = minted;
+      sale.saleNumber = minted;
+    }
+
+    // Dispatch attachment (2026-10-28): a quotation-stage creation ships NO
+    // vehicle — issuing the sales_order stage may carry the dispatch details
+    // from the issue dialog; the master adopts them (own-fleet FK authority,
+    // outsourced typed plate — same semantics as updateSale). The sales order
+    // may not be issued without SOME dispatch attachment.
+    const si = stageInput as any;
+    if (stageInput.stageType === 'sales_order' &&
+        (si.vehicleId !== undefined || si.vehicleNo !== undefined)) {
+      if (si.vehicleId) {
+        sale.vehicleId = si.vehicleId;
+        sale.vehicleNo = undefined;
+      } else {
+        const plate = String(si.vehicleNo || '').trim().toUpperCase();
+        if (plate) {
+          sale.vehicleId = undefined;
+          sale.vehicleNo = plate;
+        }
+      }
+    }
+    if (stageInput.stageType === 'sales_order' && !sale.vehicleId && !sale.vehicleNo) {
+      throw new Error('A sales order must carry a dispatch attachment — attach a fleet vehicle or enter an outsourced vehicle number.');
+    }
+    if (stageInput.stageType === 'sales_order') {
+      if (si.siteAddress !== undefined) sale.siteAddress = si.siteAddress || undefined;
+      if (si.distanceKm !== undefined) {
+        sale.distanceKm = Number(si.distanceKm) > 0 ? Number(si.distanceKm) : undefined;
+      }
+      if (si.weightTonnes !== undefined) {
+        sale.weightTonnes = Number(si.weightTonnes) > 0 ? Number(si.weightTonnes) : undefined;
+      }
+    }
 
     // The new stage's rows: caller-provided lines, else seeded from the
     // current stage's rows (copy — ids regenerate; values carry over).
@@ -2624,7 +2767,7 @@ class ServerLocalDatabase {
       id: stageId,
       saleId: id,
       stageType: stageInput.stageType,
-      stageNumber: stageInput.stageNumber || sale.saleNumber,
+      stageNumber,
       date: stageInput.date || now.split('T')[0],
       subtotal: total.subtotal,
       taxAmount: total.taxAmount,
@@ -2637,23 +2780,23 @@ class ServerLocalDatabase {
     sale.stages = stagesArr;
     sale.items = items; // master view follows the current stage
 
-    if ((stageInput.updateInventory || (stage.stageType === 'sales_invoice' && !sale.inventoryApplied)) &&
-        this.applySaleInventory(sale, stage.stageNumber)) {
-      // Invoice stage: PERMANENT-ON inventory application (see createSale).
-      sale.inventoryApplied = true;
-    }
-    if (stage.stageType === 'sales_invoice' || stage.stageType === 'sales_order') {
-      // Cash & Bank wiring: the payment_in receipt voucher posts the moment
-      // "Settle Payment Now" is checked (sales-order or invoice stage —
-      // once per sale); the sale_invoice journal voucher posts when the
-      // invoice document exists.
+    // 2026-10-28 (CLIENT RULE, no toggle/no choice): issuing the sales_order
+    // stage applies the dispatch AND books the flow as CREDIT — the sale's
+    // stock updates now (one-shot) and the receivable posts to the party
+    // ledger at this save. (The invoice-stage rung is retired — consolidated
+    // invoices post nothing; see createSaleInvoice.)
+    if (stage.stageType === 'sales_order') {
+      if (!sale.inventoryApplied && this.applySaleInventory(sale, stage.stageNumber, true)) {
+        sale.inventoryApplied = true;
+      }
+      const askedType = (stageInput as any).settlementType;
       this.applySaleCash(sale, stage, {
-        settle: Boolean(stageInput.updateCash),
-        type: (stageInput as any).settlementType,
-        settlementAccountId: stageInput.settlementAccountId,
-        paymentMode: stageInput.paymentMode,
-      }, stage.stageType);
-      this.logAudit('CREATE', 'SALE_CASH', id, `Payment flow on sale ${sale.saleNumber} at ${stage.stageType} ${stage.stageNumber} (type=${(stageInput as any).settlementType ?? (stageInput.updateCash ? 'account(legacy)' : 'legacy-off')})`);
+        settle: false,
+        type: 'credit',
+        settlementAccountId: undefined,
+        paymentMode: undefined,
+      }, 'sales_order');
+      this.logAudit('CREATE', 'SALE_CASH', id, `Forced flow on sale ${sale.saleNumber} at ${stage.stageType} ${stage.stageNumber} (inventory forced; credit journal)${askedType && askedType !== 'credit' ? ` — client asked ${askedType}, overridden to credit` : ''}`);
     } else if (stageInput.updateCash) {
       this.logAudit('DISPATCH', 'SALE_CASH', id, `Cash application requested at ${stage.stageType} stage — applies at the sales-order stage`);
     }
@@ -2678,6 +2821,9 @@ class ServerLocalDatabase {
     if (stagesArr.length > 0 && stagesArr[stagesArr.length - 1].stageType === 'sales_invoice') {
       throw new Error(`Sale ${this.data.sales[index].saleNumber} is locked (invoice issued) and cannot be deleted.`);
     }
+    if ((this.data.sales[index] as any).isInvoiced) {
+      throw new Error(`Sale ${this.data.sales[index].saleNumber} is locked (included in a consolidated invoice) and cannot be deleted.`);
+    }
     const sale = this.data.sales[index];
     if (sale.inventoryApplied) {
       this.unapplySaleInventory(sale, 'Deletion reversal for sale');
@@ -2700,6 +2846,301 @@ class ServerLocalDatabase {
     this.logAudit('DELETE', 'SALE', id, `Deleted sale ${sale.saleNumber}`);
     this.save();
     this.syncSaleToMysql(sale, true);
+    return true;
+  }
+
+  // ---------- CONSOLIDATED SALES INVOICES (one invoice = N sales orders) ----------
+  // An invoice is no longer a rung of the sale ladder: sales orders carry only
+  // Quotation → Sales Order. The Create Invoice action (Sales page / Party
+  // detail) folds N of a party's UNINVOICED sales orders in a date range into
+  // ONE invoice entry — its lines flatten every member order's current-stage
+  // rows (FKs per §2; qty/rate/gst are statutory snapshots — invoiced orders
+  // are locked, so they cannot drift). sales_orders.is_invoiced marks
+  // membership: invoiced orders stop being eligible, are locked and complete.
+
+  /** Collision-safe invoice serial: highest CINV-<year>-#### in use + 1. */
+  private nextSaleInvoiceNumber(): string {
+    const year = new Date().getFullYear();
+    const prefix = `CINV-${year}-`;
+    let max = 0;
+    for (const inv of this.data.salesInvoices || []) {
+      if (!String(inv.invoiceNumber || '').startsWith(prefix)) continue;
+      const n = parseInt(inv.invoiceNumber.slice(prefix.length), 10);
+      if (Number.isFinite(n) && n > max) max = n;
+    }
+    return `${prefix}${String(max + 1).padStart(4, '0')}`;
+  }
+
+  private hydrateSaleInvoice(invoice: SaleInvoice): SaleInvoice {
+    const party = this.data.parties.find((p) => p.id === invoice.partyId);
+    const items: SaleInvoiceItem[] = (invoice.items || []).map((li) => {
+      const master = this.findItemRaw(li.itemId);
+      const unitId = li.unitId || master?.unitId;
+      const saleRow = (this.data.sales || []).find((s) => s.id === li.saleId);
+      return {
+        ...li,
+        saleNumber: saleRow?.saleNumber || li.saleNumber,
+        itemName: master?.name,
+        itemCode: master?.code,
+        unit: unitId ? this.data.units.find((u) => u.id === unitId)?.code || undefined : master?.unit,
+        location: li.locationId ? this.data.locations.find((l) => l.id === li.locationId)?.name : undefined,
+        amount: (Number(li.quantity) || 0) * (Number(li.rate) || 0),
+      };
+    });
+    const orders: SaleInvoiceOrderLink[] = (invoice.orders || []).map((lk) => {
+      const saleRow = (this.data.sales || []).find((s) => s.id === lk.saleId);
+      return {
+        ...lk,
+        saleNumber: saleRow?.saleNumber || lk.saleNumber,
+        saleDate: saleRow?.date || lk.saleDate,
+      };
+    });
+    return {
+      ...invoice,
+      partyName: party ? (party.tradeName || party.name) : undefined,
+      orders,
+      items,
+      // Settlement display fields (Golden Rule §2 — JOINed, never persisted)
+      settlementAccountName: invoice.settlementAccountId
+        ? (this.data.accounts || []).find((a) => a.id === invoice.settlementAccountId)?.name
+        : undefined,
+      invoiceVoucherNumber: invoice.invoiceVoucherId
+        ? (this.data.transactions || []).find((t) => t.id === invoice.invoiceVoucherId)?.voucherNumber
+        : undefined,
+      settlementVoucherNumber: invoice.settlementVoucherId
+        ? (this.data.transactions || []).find((t) => t.id === invoice.settlementVoucherId)?.voucherNumber
+        : undefined,
+    };
+  }
+
+  public getSaleInvoices(): SaleInvoice[] {
+    return (this.data.salesInvoices || []).map((i) => this.hydrateSaleInvoice(i));
+  }
+
+  public getSaleInvoiceById(id: string): SaleInvoice | undefined {
+    const invoice = (this.data.salesInvoices || []).find((i) => i.id === id);
+    return invoice ? this.hydrateSaleInvoice(invoice) : undefined;
+  }
+
+  private syncSaleInvoiceToMysql(invoice: SaleInvoice, isDelete = false): void {
+    liveSyncSaleInvoice(invoice, isDelete);
+    if (!isDelete) {
+      liveSyncSaleInvoiceItems(invoice.id, invoice.items || [], false);
+      liveSyncSaleInvoiceOrders(invoice.id, invoice.orders || [], false);
+    }
+  }
+
+  /**
+   * Create ONE invoice entry from N selected sales orders of a single party:
+   *   1. validate every member (same party, not cancelled, not already
+   *      invoiced, no legacy invoice stage, SO-stage confirmed, has items);
+   *   2. CATCH-UP dispatch: member orders whose inventory never applied
+   *      (legacy rows) dispatch NOW — dispatched goods must be billed;
+   *   3. flatten lines + totals from each member's current (latest) stage;
+   *   4. stamp every member sale is_invoiced + status Completed;
+   *   5. persist invoice + members to MySQL.
+   * 2026-10-28 (CLIENT RULE): the consolidated invoice is a pure DOCUMENT —
+   * it posts NO journal and NO receipt voucher of its own (every member
+   * booked its credit receivable at creation; posting again would
+   * double-count). The party pays later; the receipts post as payment_in
+   * vouchers against the party (Record Payment), un-keyed to the invoice.
+   * The displayed settlement rides the members: all-credit ⇒ 'credit'.
+   */
+  public createSaleInvoice(data: any): SaleInvoice {
+    const now = new Date().toISOString();
+    const partyId = data.partyId;
+    const invoiceDate = data.date || now.split('T')[0];
+    const party = this.data.parties.find((p) => p.id === partyId);
+    if (!party) throw new Error('Party not found — a consolidated invoice needs an existing party.');
+
+    const saleIds: string[] = Array.isArray(data.saleIds) ? data.saleIds : [];
+    if (saleIds.length === 0) throw new Error('Select at least one sales order to invoice.');
+    if (new Set(saleIds).size !== saleIds.length) throw new Error('Duplicate sales orders in the selection.');
+
+    const members = saleIds.map((sid) => (this.data.sales || []).find((s) => s.id === sid));
+    if (members.some((m) => !m)) {
+      throw new Error(`Sales order not found: ${saleIds[members.findIndex((m) => !m)]}`);
+    }
+    const sales = members as Sale[];
+    for (const sale of sales) {
+      if (sale.partyId !== partyId) {
+        throw new Error(`Sales order ${sale.saleNumber} belongs to a different party — an invoice covers a single party.`);
+      }
+      if (sale.status === 'cancelled') {
+        throw new Error(`Sales order ${sale.saleNumber} is cancelled and cannot be invoiced.`);
+      }
+      if ((sale as any).isInvoiced) {
+        throw new Error(`Sales order ${sale.saleNumber} is already part of an invoice and cannot join another one.`);
+      }
+      const stagesArr = sale.stages || [];
+      const latest = stagesArr.length > 0 ? stagesArr[stagesArr.length - 1] : undefined;
+      if (latest?.stageType === 'sales_invoice') {
+        throw new Error(`Sales order ${sale.saleNumber} is locked (legacy invoice issued) and cannot join a consolidated invoice.`);
+      }
+      if (!latest || latest.stageType !== 'sales_order') {
+        throw new Error(`Sales order ${sale.saleNumber} is not a confirmed Sales Order yet — advance it to the Sales Order stage before invoicing.`);
+      }
+      if ((sale.items || []).length === 0) {
+        throw new Error(`Sales order ${sale.saleNumber} has no items to invoice.`);
+      }
+    }
+
+    // Validate... the settlement account is gone: the invoice posts nothing of
+    // its own (member journals already carry the receivable).
+
+    // 1. Catch-up inventory: a member that never applied its dispatch
+    //    (legacy rows that predate the forced rule) dispatches NOW.
+    for (const sale of sales) {
+      if (!sale.inventoryApplied && this.applySaleInventory(sale, sale.saleNumber, true)) {
+        sale.inventoryApplied = true;
+      }
+    }
+
+    // 2. Build the invoice: member links + flattened line rows.
+    const invoiceId = `vinv-${this.nextLedgerMs()}-${Math.random().toString(36).slice(2, 8)}`;
+    const invoiceNumber = this.nextSaleInvoiceNumber();
+    let subtotal = 0;
+    let taxAmount = 0;
+    let totalAmount = 0;
+    let transportCharges = 0;
+    const orders: SaleInvoiceOrderLink[] = sales.map((sale, idx) => {
+      const latest = (sale.stages || []).length > 0 ? (sale.stages || [])[(sale.stages || []).length - 1] : undefined;
+      subtotal += Number(latest?.subtotal) || 0;
+      taxAmount += Number(latest?.taxAmount) || 0;
+      totalAmount += Number(latest?.totalAmount) || 0;
+      transportCharges += Number(sale.transportCharges) || 0;
+      return {
+        id: `sio-${invoiceId}-${idx}`,
+        salesInvoiceId: invoiceId,
+        saleId: sale.id,
+        saleTotalAmount: this.roundMoney(Number(latest?.totalAmount) || 0),
+        createdAt: now,
+      };
+    });
+    subtotal = this.roundMoney(subtotal);
+    taxAmount = this.roundMoney(taxAmount);
+    totalAmount = this.roundMoney(totalAmount);
+    const items: SaleInvoiceItem[] = [];
+    for (const sale of sales) {
+      const stagesArr = sale.stages || [];
+      const latest = stagesArr.length > 0 ? stagesArr[stagesArr.length - 1] : undefined;
+      const stageRows = latest && (latest.items || []).length > 0 ? latest.items! : sale.items || [];
+      for (const li of stageRows) {
+        if ((Number(li.quantity) || 0) === 0) continue; // empty placeholder rows never invoice
+        items.push({
+          id: `sli-${invoiceId}-${items.length + 1}`,
+          salesInvoiceId: invoiceId,
+          saleId: sale.id,
+          saleStageId: latest?.id,
+          itemId: li.itemId,
+          unitId: li.unitId,
+          quantity: Number(li.quantity) || 0,
+          rate: Number(li.rate) || 0,
+          gstRate: li.gstRate,
+          locationId: li.locationId,
+          itemNotes: li.itemNotes,
+        });
+      }
+    }
+
+    const invoice: SaleInvoice = {
+      id: invoiceId,
+      invoiceNumber,
+      partyId,
+      date: invoiceDate,
+      notes: data.notes,
+      subtotal,
+      taxAmount,
+      totalAmount,
+      transportCharges: this.roundMoney(transportCharges),
+      // Display-only flow state (the invoice posts nothing): members booked
+      // credit at creation — all-credit members ⇒ 'credit'. Legacy members
+      // with the account flow (or flow never applied) ⇒ 'account' is shown
+      // only when the members actually settled into accounts.
+      cashApplied: true,
+      settlementType: sales.every((s) => s.cashApplied && s.settlementType === 'credit')
+        ? 'credit'
+        : (sales.some((s) => s.cashApplied && s.settlementType === 'account') ? 'account' : 'credit'),
+      settlementAccountId: undefined,
+      paymentMode: undefined,
+      orders,
+      items,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    // 3. Stamp EVERY member sale isInvoiced + Completed (locked from here on).
+    for (const sale of sales) {
+      sale.isInvoiced = true;
+      sale.status = 'completed';
+      sale.updatedAt = now;
+      this.logAudit('UPDATE', 'SALE', sale.id, `Sales order ${sale.saleNumber} joined consolidated invoice ${invoiceNumber} (is_invoiced → locked)`);
+      this.syncSaleToMysql(sale);
+    }
+
+    (this.data.salesInvoices = this.data.salesInvoices || []).unshift(invoice);
+    this.logAudit('CREATE', 'SALE_INVOICE', invoiceId, `Consolidated invoice ${invoiceNumber} created for ${members.length} sales order(s) (₹${totalAmount}; document-only — member journals already carry the receivable)`);
+    this.save();
+    this.syncSaleInvoiceToMysql(invoice);
+    return this.hydrateSaleInvoice(invoice);
+  }
+
+  /** payment_in receipt voucher for a consolidated invoice (mirror of
+   *  upsertSaleReceiptVoucher; id `txn-<invoiceId>-pay`, idempotent). */
+  private upsertInvoiceReceiptVoucher(invoice: SaleInvoice, paymentMode?: string): string {
+    const account = (this.data.accounts || []).find((a) => a.id === invoice.settlementAccountId && a.isActive);
+    if (!account) {
+      throw new Error('Selected settlement account was not found — please choose an active Cash/Bank account.');
+    }
+    const party = this.data.parties.find((p) => p.id === invoice.partyId);
+    const existingVoucher = invoice.settlementVoucherId
+      ? (this.data.transactions || []).find((t) => t.id === invoice.settlementVoucherId)
+      : undefined;
+    const voucherNumber = existingVoucher?.voucherNumber || this.mintVoucherNumber(this.data.settings.prefixes.paymentReceipt);
+    const voucherId = existingVoucher?.id || `txn-${invoice.id}-pay`;
+    this.createTransaction(
+      {
+        id: voucherId,
+        voucherNumber,
+        partyId: invoice.partyId,
+        partyType: (party?.type as any) || 'customer',
+        type: 'payment_in',
+        amount: this.roundMoney(invoice.totalAmount),
+        date: invoice.date,
+        accountId: invoice.settlementAccountId,
+        paymentMode: ((paymentMode as any) || invoice.paymentMode || 'bank_transfer'),
+        referenceNumber: invoice.invoiceNumber,
+        description: `Receipt against Sales Invoice ${invoice.invoiceNumber}`,
+        status: 'paid',
+      }
+    );
+    return voucherId;
+  }
+
+  /**
+   * Cancel a consolidated invoice: un-book its vouchers (journal + receipt —
+   * the party/account balances re-recalculate via deleteTransaction's built-in
+   * compensation), RELEASE every member sale (is_invoiced → false, status
+   * recomputed) so the orders become selectable again, and DELETE the invoice
+   * entry. Stock dispatches are NOT reversed — the goods left the yard.
+   */
+  public deleteSaleInvoice(id: string): boolean {
+    const index = (this.data.salesInvoices || []).findIndex((i) => i.id === id);
+    if (index === -1) return false;
+    const invoice = this.data.salesInvoices[index];
+    this.deleteLinkedVouchers(invoice, `Consolidated invoice ${invoice.invoiceNumber} cancellation`);
+    for (const lk of invoice.orders || []) {
+      const sale = (this.data.sales || []).find((s) => s.id === lk.saleId);
+      if (!sale) continue; // the member sale may be gone — release what exists
+      sale.isInvoiced = false;
+      sale.status = this.computeSalesStatus(sale);
+      this.logAudit('UPDATE', 'SALE', sale.id, `Sales order ${sale.saleNumber} released from cancelled invoice ${invoice.invoiceNumber}`);
+      this.syncSaleToMysql(sale);
+    }
+    this.data.salesInvoices.splice(index, 1);
+    this.logAudit('DELETE', 'SALE_INVOICE', invoice.id, `Cancelled consolidated invoice ${invoice.invoiceNumber} (members released)`);
+    this.save();
+    this.syncSaleInvoiceToMysql(invoice, true);
     return true;
   }
 
@@ -3180,6 +3621,109 @@ class ServerLocalDatabase {
     return true;
   }
 
+  // --- VEHICLE EXPENSE LOG (generic + diesel entries; operators record/edit) ---
+
+  private hydrateVehicleExpenseEntry(e: VehicleExpenseEntry): VehicleExpenseEntry {
+    return {
+      ...e,
+      vehicleNo: this.data.vehicles.find((v) => v.id === e.vehicleId)?.vehicleNo || e.vehicleNo,
+      accountName: this.getAccountById(e.accountId)?.name || e.accountName,
+    };
+  }
+
+  // ---------- APP DEFAULTS (generic key/value default store) ----------
+  // The generic "every default lives in the db" table (user directive,
+  // 2026-10-28): keys are read anywhere in the app (bulk diesel rows prefill
+  // the diesel_rate), values are edited from Settings (manage_settings gate
+  // on the route). diesel_rate seeds at '99.8'.
+
+  public getAppDefaults(): AppDefault[] {
+    return [...(this.data.appDefaults || [])];
+  }
+
+  public getAppDefault(key: string): string | undefined {
+    return (this.data.appDefaults || []).find((d) => d.key === key)?.value;
+  }
+
+  public upsertAppDefault(key: string, value: string): AppDefault {
+    const k = String(key || '').trim();
+    if (!k) throw new Error('A default needs a key.');
+    const now = new Date().toISOString();
+    const entry: AppDefault = { key: k, value: String(value), updatedAt: now };
+    const idx = (this.data.appDefaults || []).findIndex((d) => d.key === k);
+    if (idx > -1) {
+      this.data.appDefaults[idx] = entry;
+    } else {
+      (this.data.appDefaults = this.data.appDefaults || []).push(entry);
+    }
+    this.logAudit('UPDATE', 'APP_DEFAULT', k, `Default ${k} set to ${value}`);
+    this.save();
+    liveSyncAppDefault(entry);
+    return entry;
+  }
+
+  public getVehicleExpenseEntries(vehicleId?: string): VehicleExpenseEntry[] {
+    const list = this.data.vehicleExpenseEntries || [];
+    return (vehicleId ? list.filter((e) => e.vehicleId === vehicleId) : list)
+      .map((e) => this.hydrateVehicleExpenseEntry(e));
+  }
+
+  public addVehicleExpenseEntry(data: Omit<VehicleExpenseEntry, 'id' | 'createdAt'>): VehicleExpenseEntry {
+    if (!this.data.vehicleExpenseEntries) this.data.vehicleExpenseEntries = [];
+    // documentIds ride the create payload (staged uploads on the NEW-expense
+    // flow) — never persisted on the row; link below.
+    const createDocIds = this.extractDocumentIds(data as any);
+    delete (data as any).documentIds;
+    const entry: VehicleExpenseEntry = {
+      ...data,
+      id: `vxe-${this.nextLedgerMs()}`,
+      createdAt: new Date().toISOString(),
+    };
+    this.data.vehicleExpenseEntries.unshift(entry);
+    // The expense amount leaves the linked account's balance (balance stream).
+    this.recalculateAccountBalance(entry.accountId);
+    this.logAudit('CREATE', 'VEHICLE_EXPENSE', entry.id, `${entry.entryType === 'diesel' ? ' Diesel' : 'Vehicle'} expense ${this.formatRupee(Number(data.amount) || 0)} for ${this.data.vehicles.find((v) => v.id === data.vehicleId)?.vehicleNo || data.vehicleId} from ${this.getAccountById(data.accountId)?.name || data.accountId}`);
+    this.save();
+    liveSyncVehicleExpenseEntry(entry);
+    if (createDocIds.length > 0) this.linkExpenseDocuments(entry.id, createDocIds);
+    return entry;
+  }
+
+  public updateVehicleExpenseEntry(id: string, updates: Partial<VehicleExpenseEntry>): VehicleExpenseEntry {
+    const idx = (this.data.vehicleExpenseEntries || []).findIndex((e) => e.id === id);
+    if (idx === -1) throw new Error(`Vehicle expense entry ${id} not found.`);
+    const prev = this.data.vehicleExpenseEntries[idx];
+    // edit-mode uploads link immediately; documentIds never persist on the row
+    const editDocIds = this.extractDocumentIds(updates as any);
+    delete (updates as any).documentIds;
+    const updated: VehicleExpenseEntry = { ...prev, ...updates, createdAt: prev.createdAt };
+    this.data.vehicleExpenseEntries[idx] = updated;
+    // Edit-by-delta (vehicle/account/amount change → balance streams)
+    if (prev.accountId !== updated.accountId) {
+      this.recalculateAccountBalance(prev.accountId);
+    }
+    this.recalculateAccountBalance(updated.accountId);
+    this.logAudit('UPDATE', 'VEHICLE_EXPENSE', id, `Edited vehicle expense entry (amount ${this.formatRupee(Number(prev.amount) || 0)} → ${this.formatRupee(Number(updated.amount) || 0)})`);
+    this.save();
+    liveSyncVehicleExpenseEntry(updated);
+    if (editDocIds.length > 0) this.linkExpenseDocuments(id, editDocIds);
+    return updated;
+  }
+
+  public deleteVehicleExpenseEntry(id: string): boolean {
+    const idx = (this.data.vehicleExpenseEntries || []).findIndex((e) => e.id === id);
+    if (idx === -1) return false;
+    const removed = this.data.vehicleExpenseEntries[idx];
+    this.data.vehicleExpenseEntries.splice(idx, 1);
+    // Removing the entry reverses its debit from the account balance.
+    this.recalculateAccountBalance(removed.accountId);
+    this.detachExpenseDocuments(id);
+    this.logAudit('DELETE', 'VEHICLE_EXPENSE', id, `Deleted vehicle expense entry (reverses ${this.formatRupee(Number(removed.amount) || 0)} on ${this.getAccountById(removed.accountId)?.name || removed.accountId})`);
+    this.save();
+    liveSyncVehicleExpenseEntry(removed, true);
+    return true;
+  }
+
   private formatRupee(n: number): string {
     return `₹${Math.round(n).toLocaleString('en-IN')}`;
   }
@@ -3216,7 +3760,18 @@ class ServerLocalDatabase {
   }
 
   public getTripSlips(): TripSlip[] {
-    return this.data.tripSlips;
+    return this.visibleTripSlips();
+  }
+
+  /** Trip-slip fetch rule (2026-10-28, mirrors sales): slips DERIVED from a
+   *  soft-deleted sales order (status 'deleted') don't surface; manual slips
+   *  (no saleId) always stay. */
+  private visibleTripSlips(): TripSlip[] {
+    return (this.data.tripSlips || []).filter((t) => {
+      if (!t.saleId) return true;
+      const sale = (this.data.sales || []).find((s) => s.id === t.saleId);
+      return !sale || sale.status !== 'deleted';
+    });
   }
 
   /**
@@ -3234,6 +3789,12 @@ class ServerLocalDatabase {
     const party = t.partyId
       ? (this.data.parties || []).find((p) => p.id === t.partyId)
       : undefined;
+    // FK-only vehicle number (Golden Rule §2): own-fleet slips JOIN the
+    // vehicles master by vehicleId; the typed plate survives only on
+    // outsourced slips (no fleet row) — a dangling FK falls back to it.
+    const vehicle = t.vehicleId
+      ? this.data.vehicles.find((v) => v.id === t.vehicleId)
+      : undefined;
     let materialName: string | undefined = t.materialName || undefined;
     if (t.saleId) {
       const sale = (this.data.sales || []).find((s) => s.id === t.saleId);
@@ -3247,6 +3808,7 @@ class ServerLocalDatabase {
     }
     return {
       ...t,
+      vehicleNo: vehicle?.vehicleNo || t.vehicleNo || '',
       driverName: driver?.name || undefined,
       partyName: party ? (party.tradeName || party.name) : undefined,
       materialName,
@@ -3255,7 +3817,7 @@ class ServerLocalDatabase {
 
   /** Hydrated trip slips — for the API read paths and internal consumers. */
   public getHydratedTripSlips(): TripSlip[] {
-    return (this.data.tripSlips || []).map((t) => this.hydrateTripSlip(t));
+    return this.visibleTripSlips().map((t) => this.hydrateTripSlip(t));
   }
 
   // --- SALE → TRIP SLIP (auto-derived dispatch trips) ---
@@ -3996,10 +4558,14 @@ class ServerLocalDatabase {
     return this.documentsFor('vehicle', vehicleId);
   }
 
+  public getDocumentsForExpense(expenseId: string): AppDocument[] {
+    return this.documentsFor('expense', expenseId);
+  }
+
   private documentsFor(kind: DocLinkKind, ownerId: string): AppDocument[] {
     const links = this.docLinksFor(kind);
     const ids = (links as any[])
-      .filter((l) => (kind === 'sale' ? l.saleId : kind === 'purchase' ? l.purchaseId : kind === 'party' ? l.partyId : kind === 'employee' ? l.employeeId : kind === 'vehicle' ? l.vehicleId : l.itemId) === ownerId)
+      .filter((l) => (kind === 'sale' ? l.saleId : kind === 'purchase' ? l.purchaseId : kind === 'party' ? l.partyId : kind === 'employee' ? l.employeeId : kind === 'vehicle' ? l.vehicleId : kind === 'expense' ? l.expenseId : l.itemId) === ownerId)
       .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
       .map((l) => l.documentId);
     return (this.data.documents || []).filter(
@@ -4022,6 +4588,8 @@ class ServerLocalDatabase {
         return (this.data.employeeDocuments = this.data.employeeDocuments || []);
       case 'vehicle':
         return (this.data.vehicleDocuments = this.data.vehicleDocuments || []);
+      case 'expense':
+        return (this.data.expenseDocuments = this.data.expenseDocuments || []);
     }
   }
 
@@ -4080,6 +4648,10 @@ class ServerLocalDatabase {
     return this.linkOrderDocuments('vehicle', vehicleId, documentIds);
   }
 
+  public linkExpenseDocuments(expenseId: string, documentIds: string[]): number {
+    return this.linkOrderDocuments('expense', expenseId, documentIds);
+  }
+
   /** Idempotent FK-link writer — mapping rows only (no document mutation). */
   private linkOrderDocuments(kind: DocLinkKind, ownerId: string, documentIds: string[]): number {
     if (!Array.isArray(documentIds)) return 0;
@@ -4089,7 +4661,7 @@ class ServerLocalDatabase {
     const links = this.docLinksFor(kind);
     let added = 0;
     validIds.forEach((docId) => {
-      const ownerKey = kind === 'sale' ? 'saleId' : kind === 'purchase' ? 'purchaseId' : kind === 'party' ? 'partyId' : kind === 'employee' ? 'employeeId' : kind === 'vehicle' ? 'vehicleId' : 'itemId';
+      const ownerKey = kind === 'sale' ? 'saleId' : kind === 'purchase' ? 'purchaseId' : kind === 'party' ? 'partyId' : kind === 'employee' ? 'employeeId' : kind === 'vehicle' ? 'vehicleId' : kind === 'expense' ? 'expenseId' : 'itemId';
       const exists = links.some((l: any) => l.documentId === docId && l[ownerKey] === ownerId);
       if (exists) return;
       const link = {
@@ -4115,6 +4687,7 @@ class ServerLocalDatabase {
     else if (kind === 'party') liveSyncPartyDocLink(link as PartyDocumentLink, isDelete);
     else if (kind === 'employee') liveSyncEmployeeDocLink(link as EmployeeDocumentLink, isDelete);
     else if (kind === 'vehicle') liveSyncVehicleDocLink(link as VehicleDocumentLink, isDelete);
+    else if (kind === 'expense') liveSyncExpenseDocLink(link as ExpenseDocumentLink, isDelete);
     else liveSyncItemDocLink(link as ItemDocumentLink, isDelete);
   }
 
@@ -4188,11 +4761,15 @@ class ServerLocalDatabase {
     this.detachOrderDocuments('vehicle', vehicleId);
   }
 
+  public detachExpenseDocuments(expenseId: string): void {
+    this.detachOrderDocuments('expense', expenseId);
+  }
+
   /** Cascade for owner deletion: drop mappings, soft-delete orphaned documents. */
   private detachOrderDocuments(kind: DocLinkKind, ownerId: string): void {
-    const ownerKey = kind === 'sale' ? 'saleId' : kind === 'purchase' ? 'purchaseId' : kind === 'party' ? 'partyId' : kind === 'employee' ? 'employeeId' : kind === 'vehicle' ? 'vehicleId' : 'itemId';
+    const ownerKey = kind === 'sale' ? 'saleId' : kind === 'purchase' ? 'purchaseId' : kind === 'party' ? 'partyId' : kind === 'employee' ? 'employeeId' : kind === 'vehicle' ? 'vehicleId' : kind === 'expense' ? 'expenseId' : 'itemId';
     const removed = this.docLinksFor(kind).filter((l: any) => l[ownerKey] === ownerId);
-    const kinds: DocLinkKind[] = ['sale', 'purchase', 'party', 'item', 'employee', 'vehicle'];
+    const kinds: DocLinkKind[] = ['sale', 'purchase', 'party', 'item', 'employee', 'vehicle', 'expense'];
     // Drop this kind's mapping rows for the deleted owner
     const keptForKind = this.docLinksFor(kind).filter((l: any) => l[ownerKey] !== ownerId);
     switch (kind) {
@@ -4213,6 +4790,9 @@ class ServerLocalDatabase {
         break;
       case 'vehicle':
         this.data.vehicleDocuments = keptForKind as VehicleDocumentLink[];
+        break;
+      case 'expense':
+        this.data.expenseDocuments = keptForKind as ExpenseDocumentLink[];
         break;
     }
     removed.forEach((l: any) => this.liveSyncDocLink(kind, l, true));
@@ -4248,6 +4828,8 @@ class ServerLocalDatabase {
         return this.data.employeeDocuments || [];
       case 'vehicle':
         return this.data.vehicleDocuments || [];
+      case 'expense':
+        return this.data.expenseDocuments || [];
     }
   }
 
@@ -4624,6 +5206,14 @@ class ServerLocalDatabase {
     // list is the truth and edits rebalance by delta automatically).
     const vehEmiEntries = (this.data.vehicleEmiEntries || []).filter((e) => e.accountId === accountId);
     for (const e of vehEmiEntries) {
+      balance -= Number(e.amount) || 0;
+    }
+
+    // 7. Vehicle expense log — generic expenses AND diesel fuel fills against
+    // this account (Fleets → Expenses; the entry list is the truth — edits
+    // rebalance by delta and deletes reverse their debit).
+    const vehExpenses = (this.data.vehicleExpenseEntries || []).filter((e) => e.accountId === accountId);
+    for (const e of vehExpenses) {
       balance -= Number(e.amount) || 0;
     }
 

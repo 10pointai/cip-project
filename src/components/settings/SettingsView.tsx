@@ -3,8 +3,12 @@ import {
   Building2,
   Check,
   MapPin,
+  Fuel,
+  Pencil,
+  Database,
 } from 'lucide-react';
-import { CompanySettings } from '../../types';
+import { CompanySettings, AppDefault } from '../../types';
+import { cloudStore } from '../../services/cloudStore';
 import { INDIAN_STATES, validateGSTIN } from '../../utils/formatters';
 import { useToast } from '../common/Toast';
 
@@ -329,6 +333,108 @@ export function SettingsView({ settings, onUpdateSettings }: SettingsViewProps) 
           </button>
         </div>
       </form>
+
+      {/* APP DEFAULTS — the generic key/value default store (app_defaults):
+          tunable defaults the app reads anywhere; each row edits in place and
+          saves its own key (no global save button). The label map prettifies
+          the known keys; unknown future keys render keyed as stored. */}
+      <div className="bg-[var(--color-surface-container-lowest)] p-6 rounded-[28px] border border-[var(--color-outline-variant)] shadow-2xs space-y-4">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-sm font-bold text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-2">
+            <div className="p-1.5 rounded-lg bg-[var(--color-primary-container)] text-[var(--color-primary)]">
+              <Database className="w-4 h-4" />
+            </div>
+            App Defaults
+          </h2>
+          <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)]">values the app pre-fills everywhere</span>
+        </div>
+        {(cloudStore.getAppDefaults().length === 0) && (
+          <p className="text-xs text-[var(--color-on-surface-variant)] py-2">No defaults saved yet.</p>
+        )}
+        <div className="divide-y divide-[var(--color-outline-variant)]/50">
+          {cloudStore.getAppDefaults().map((d) => (
+            <div key={d.key}>
+              <AppDefaultRow def={d} onSave={(value) => {
+                cloudStore.setAppDefault(d.key, value);
+                showToast(`Default "${d.key}" saved.`);
+              }} />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The pretty label per known default key; future keys show their raw key. */
+const APP_DEFAULT_LABELS: Record<string, string> = {
+  diesel_rate: 'Diesel Rate (₹ per litre)',
+};
+
+function AppDefaultRow({ def, onSave }: { def: AppDefault; onSave: (value: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(def.value);
+  useEffect(() => setValue(def.value), [def.value]);
+  const isNumber = /^\d+(\.\d+)?$/.test(def.value);
+  return (
+    <div className="py-3 flex flex-wrap items-center justify-between gap-3">
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="p-2 rounded-xl bg-[var(--color-tertiary-container)] text-[var(--color-on-tertiary-container)] shrink-0">
+          {def.key === 'diesel_rate' ? <Fuel className="w-4 h-4" /> : <Database className="w-4 h-4" />}
+        </span>
+        <div className="min-w-0">
+          <p className="text-xs font-bold text-[var(--color-on-surface)]">
+            {APP_DEFAULT_LABELS[def.key] || def.key}
+          </p>
+          <p className="text-[9px] font-mono font-semibold text-[var(--color-on-surface-variant)]">
+            {def.key} · updated {def.updatedAt ? def.updatedAt.split('T')[0] : '—'}
+          </p>
+        </div>
+      </div>
+      {editing ? (
+        <div className="flex items-center gap-2">
+          <input
+            type={isNumber ? 'number' : 'text'}
+            step="any"
+            value={value}
+            autoFocus
+            onChange={(e) => setValue(e.target.value)}
+            className="w-36 px-3 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-primary)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none"
+          />
+          <button
+            type="button"
+            disabled={value.trim() === '' || value === def.value}
+            onClick={() => { onSave(value.trim()); setEditing(false); }}
+            className="px-3.5 py-2 rounded-full text-[10px] font-bold bg-[var(--color-primary)] text-[var(--color-on-primary)] hover:opacity-90 disabled:opacity-40 transition-all"
+          >
+            Save
+          </button>
+          <button
+            type="button"
+            onClick={() => { setValue(def.value); setEditing(false); }}
+            className="px-3 py-2 rounded-full text-[10px] font-bold text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container)] transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <span
+            className={`px-4 py-1.5 rounded-full text-xs font-black font-mono ${isNumber ? 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)]' : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)]'}`}
+            title="Saved default value"
+          >
+            {def.value}
+          </span>
+          <button
+            type="button"
+            onClick={() => setEditing(true)}
+            className="p-2 rounded-full text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container)] transition-colors"
+            title="Edit this default"
+          >
+            <Pencil className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

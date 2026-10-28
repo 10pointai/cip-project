@@ -246,6 +246,16 @@ export interface VehicleDocumentLink {
   createdAt: string;
 }
 
+/** vehicle_expense_entries ↔ documents join row (FK-only) — table vehicle_expense_documents */
+export interface ExpenseDocumentLink {
+  id: string;
+  /** FK vehicle_expense_entries.id */
+  expenseId: string;
+  /** FK documents.id */
+  documentId: string;
+  createdAt: string;
+}
+
 export interface ItemStockAdjustment {
   id: string;
   adjustmentNumber: string; // e.g. "STK-ADJ-26/001"
@@ -290,7 +300,7 @@ export interface ProductionBatchRun {
 }
 
 export type OrderType = 'sales' | 'purchase';
-export type OrderStatus = 'pending' | 'partially_delivered' | 'completed' | 'cancelled';
+export type OrderStatus = 'pending' | 'partially_delivered' | 'completed' | 'cancelled' | 'deleted';
 export type SalesStage = 'quotation' | 'sales_order' | 'proforma_invoice' | 'delivery_note' | 'sales_invoice';
 export type PurchaseStage = 'rfq' | 'purchase_order' | 'goods_receipt';
 
@@ -646,6 +656,37 @@ export interface VehicleEmiEntry {
   accountName?: string;
 }
 
+/**
+ * Vehicle expense log entry — one row per recorded fleet expense, either a
+ * generic `expense` (free-text type, entered amount) or a `diesel` fuel fill
+ * (litres × ₹/litre = cost). The amount DEBITS the linked cash/bank account:
+ * the entry list is a balance stream in recalculateAccountBalance (same
+ * semantics as vehicle_emi_entries — the truth is this list).
+ */
+export interface VehicleExpenseEntry {
+  id: string;
+  entryType: 'expense' | 'diesel';
+  /** Effective expense date YYYY-MM-DD */
+  date: string;
+  /** FK vehicles.id — compulsory (every expense is attributable to a truck) */
+  vehicleId: string;
+  /** FK cash_bank_accounts.id — the account the expense debited (compulsory) */
+  accountId: string;
+  /** Free-text expense classification (normal entries), e.g. "PUCHER + FITING" */
+  expenseType?: string;
+  /** Diesel: litres filled — amount derives from litres × ratePerLitre */
+  litres?: number;
+  /** Diesel: ₹ per litre at fill time */
+  ratePerLitre?: number;
+  /** Total debited (normal: entered; diesel: litres × rate, operator-overridable) */
+  amount: number;
+  notes?: string;
+  createdAt: string;
+  // Hydrated read-time view fields (never persisted)
+  vehicleNo?: string;
+  accountName?: string;
+}
+
 export interface Employee {
   id: string;
   name: string;
@@ -974,9 +1015,106 @@ export interface Sale {
   settlementVoucherNumber?: string; // hydrated read-time (JOIN transactions)
   settledAmount?: number;
   settledDate?: string;
+  /** Included in a CONSOLIDATED Sales Invoice (see SaleInvoice) — the sale is
+   *  locked (no edit / stage issue / delete) and counted as Completed. */
+  isInvoiced?: boolean;
   // Attached child rows (hydrated at read)
   items: SalesOrderItem[];
   stages: SalesOrderStage[]; // chronological (oldest first)
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ==========================================
+// APP DEFAULTS — the generic key/value default-value store (app_defaults)
+// ==========================================
+
+/** One default value: the KEY is the primary key ('diesel_rate' ⇒ ₹99.8 …).
+ *  Editable from Settings (manage_settings); read anywhere in the app. */
+export interface AppDefault {
+  key: string;
+  value: string;
+  updatedAt: string;
+}
+
+// ==========================================
+// CONSOLIDATED SALES INVOICE — ONE invoice for N sales orders
+// (The invoice is no longer a rung of the sale ladder. A sale carries only
+//  Quotation → Sales Order; invoices are created from the Create Invoice
+//  action (Sales page / Party detail) by picking a party + a date range and
+//  checking the sales orders to bill together. sales_orders.is_invoiced
+//  marks membership: an invoiced sale can never join another invoice.)
+// ==========================================
+
+/** Member link row — one per sales order folded into the invoice. */
+export interface SaleInvoiceOrderLink {
+  id: string;
+  salesInvoiceId: string;
+  saleId: string; // FK sales_orders — the member sales order
+  /** Statutory snapshot: the member's stage total at invoicing time (§2 exc. 1) */
+  saleTotalAmount: number;
+  /** Hydrated read-time (JOIN sales_orders) */
+  saleNumber?: string;
+  saleDate?: string;
+  createdAt: string;
+}
+
+/** Invoice line flattened from a member sale's current-stage rows (§2 FKs:
+ *  item_id / unit_id / location_id; quantity / rate / gst are statutory
+ *  snapshots — invoiced orders are locked so they cannot drift). */
+export interface SaleInvoiceItem {
+  id: string;
+  salesInvoiceId: string;
+  /** Source sales order + the stage whose rows were invoiced (FKs, §2) */
+  saleId: string;
+  saleNumber?: string; // hydrated read-time (JOIN sales_orders)
+  saleStageId?: string;
+  itemId: string;
+  unitId?: string;
+  // Hydrated read-time view fields (never persisted)
+  itemName?: string;
+  itemCode?: string;
+  unit?: string;
+  location?: string;
+  quantity: number;
+  rate: number;
+  amount?: number; // convenience: quantity * rate
+  gstRate?: number;
+  locationId?: string;
+  itemNotes?: string;
+}
+
+export interface SaleInvoice {
+  id: string;
+  invoiceNumber: string; // CINV-YYYY-#### (server-minted, collision-safe)
+  partyId: string;
+  partyName?: string; // hydrated read-time (JOIN parties)
+  date: string; // YYYY-MM-DD (invoice date)
+  notes?: string;
+  // Totals = Σ member sales orders' current-stage figures (each stage total
+  // already includes its own transport / freight GST) — statutory snapshots.
+  subtotal: number;
+  taxAmount: number;
+  totalAmount: number;
+  /** Σ member transportCharges — a display roll-up, not an added charge. */
+  transportCharges?: number;
+  // One-shot settlement — COMPULSORY at invoice creation (mirrors the old
+  // invoice stage): 'credit' books the receivable on the party ledger (no
+  // cash), 'account' settles into a Cash/Bank account (journal + receipt).
+  cashApplied: boolean;
+  settlementType: 'credit' | 'account';
+  settlementAccountId?: string;
+  settlementAccountName?: string; // hydrated read-time (JOIN cash_bank_accounts)
+  paymentMode?: 'bank_transfer' | 'cheque' | 'cash' | 'upi' | 'neft_rtgs';
+  invoiceVoucherId?: string; // FK transactions — the sale_invoice journal voucher
+  settlementVoucherId?: string; // FK transactions — the payment_in receipt voucher
+  invoiceVoucherNumber?: string; // hydrated read-time (JOIN transactions)
+  settlementVoucherNumber?: string; // hydrated read-time (JOIN transactions)
+  settledAmount?: number;
+  settledDate?: string;
+  // Attached child rows (hydrated at read)
+  orders?: SaleInvoiceOrderLink[];
+  items?: SaleInvoiceItem[];
   createdAt: string;
   updatedAt: string;
 }

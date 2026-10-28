@@ -19,6 +19,7 @@ import {
   EmployeeLeave,
   EmployeePayment,
   AppUser,
+  AppDefault,
   AppDocument,
   SaleOrderDocumentLink,
   PurchaseOrderDocumentLink,
@@ -27,6 +28,8 @@ import {
   EmployeeDocumentLink,
   VehicleDocumentLink,
   VehicleEmiEntry,
+  VehicleExpenseEntry,
+  ExpenseDocumentLink,
   DocumentStatus,
   CashBankAccount,
   InternalTransfer,
@@ -37,6 +40,9 @@ import {
   Purchase,
   SalesOrderItem,
   SalesOrderStage,
+  SaleInvoice,
+  SaleInvoiceItem,
+  SaleInvoiceOrderLink,
   PurchaseOrderItem,
   PurchaseOrderStage,
   EmployeeLedgerTransaction,
@@ -448,6 +454,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
       // stage-history rows are attached to each master (FKs only in storage).
       let sales: Sale[] = [];
       let purchases: Purchase[] = [];
+      // Consolidated invoices load in the sales block below (declared here so
+      // the schema return — outside this try — sees it)
+      let saleInvoices: SaleInvoice[] = [];
       try {
         // --- SALES ---
         const [saleMasterRows]: [any[], any] = await conn.query(
@@ -561,6 +570,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
             freightGstRate: so.freight_gst_rate !== null && so.freight_gst_rate !== undefined ? numOr(so.freight_gst_rate) : undefined,
             inventoryApplied: Boolean(so.inventory_applied),
             cashApplied: Boolean(so.cash_applied),
+            isInvoiced: Boolean(so.is_invoiced),
             settlementType: so.settlement_type || (so.settlement_voucher_id ? 'account' : undefined),
             settlementAccountId: so.settlement_account_id || undefined,
             settlementAccountName: so.settlement_account_display || undefined, // live view (§2)
@@ -577,6 +587,105 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
             updatedAt: so.updated_at || so.created_at,
           };
         });
+
+        // --- CONSOLIDATED SALES INVOICES (invoice-eligible flags live on the
+        // sale masters: sales_orders.is_invoiced) ---
+        try {
+          const [sinvMasterRows]: [any[], any] = await conn.query(
+            `SELECT si.*, p.name AS party_display,
+                    acc.name AS settlement_account_display,
+                    iv.voucher_number AS invoice_voucher_display,
+                    sv.voucher_number AS settlement_voucher_display
+             FROM sales_invoices si
+             LEFT JOIN parties p ON p.id = si.party_id
+             LEFT JOIN cash_bank_accounts acc ON acc.id = si.settlement_account_id
+             LEFT JOIN transactions iv ON iv.id = si.invoice_voucher_id
+             LEFT JOIN transactions sv ON sv.id = si.settlement_voucher_id
+             ORDER BY si.date DESC, si.created_at DESC`
+          );
+          const [sinvItemRows]: [any[], any] = await conn.query(
+            `SELECT sii.*, i.name AS item_name, i.code AS item_code,
+                    u.code AS unit_display, loc.name AS location_display,
+                    so.sale_number AS sale_number
+             FROM sales_invoice_items sii
+             LEFT JOIN items i ON i.id = sii.item_id
+             LEFT JOIN item_units u ON u.id = sii.unit_id
+             LEFT JOIN item_locations loc ON loc.id = sii.location_id
+             LEFT JOIN sales_orders so ON so.id = sii.sale_id`
+          );
+          const [sinvOrderRows]: [any[], any] = await conn.query(
+            `SELECT sio.*, so.sale_number AS sale_number, so.date AS sale_date
+             FROM sales_invoice_orders sio
+             LEFT JOIN sales_orders so ON so.id = sio.sale_id`
+          );
+          const sinvItemsByInvoice = new Map<string, SaleInvoiceItem[]>();
+          for (const li of sinvItemRows || []) {
+            const list = sinvItemsByInvoice.get(li.sales_invoice_id) || [];
+            list.push({
+              id: li.id,
+              salesInvoiceId: li.sales_invoice_id,
+              saleId: li.sale_id,
+              saleNumber: li.sale_number || undefined,
+              saleStageId: li.sale_stage_id || undefined,
+              itemId: li.item_id,
+              unitId: li.unit_id || undefined,
+              itemName: li.item_name || undefined,
+              itemCode: li.item_code || undefined,
+              unit: li.unit_display || undefined,
+              location: li.location_display || undefined,
+              quantity: numOr(li.quantity),
+              rate: numOr(li.rate),
+              amount: numOr(li.quantity) * numOr(li.rate),
+              gstRate: li.gst_rate !== null && li.gst_rate !== undefined ? numOr(li.gst_rate) : undefined,
+              locationId: li.location_id || undefined,
+              itemNotes: li.item_notes || undefined,
+            });
+            sinvItemsByInvoice.set(li.sales_invoice_id, list);
+          }
+          const sinvOrdersByInvoice = new Map<string, SaleInvoiceOrderLink[]>();
+          for (const lk of sinvOrderRows || []) {
+            const list = sinvOrdersByInvoice.get(lk.sales_invoice_id) || [];
+            list.push({
+              id: lk.id,
+              salesInvoiceId: lk.sales_invoice_id,
+              saleId: lk.sale_id,
+              saleTotalAmount: numOr(lk.sale_total_amount),
+              saleNumber: lk.sale_number || undefined,
+              saleDate: lk.sale_date || undefined,
+              createdAt: lk.created_at,
+            });
+            sinvOrdersByInvoice.set(lk.sales_invoice_id, list);
+          }
+          saleInvoices = (sinvMasterRows || []).map((si) => ({
+            id: si.id,
+            invoiceNumber: si.invoice_number,
+            partyId: si.party_id,
+            partyName: si.party_display || undefined, // live view (§2)
+            date: si.date,
+            notes: si.notes || undefined,
+            subtotal: numOr(si.subtotal),
+            taxAmount: numOr(si.tax_amount),
+            totalAmount: numOr(si.total_amount),
+            transportCharges: si.transport_charges !== null && si.transport_charges !== undefined ? numOr(si.transport_charges) : undefined,
+            cashApplied: Boolean(si.cash_applied),
+            settlementType: si.settlement_type || 'credit',
+            settlementAccountId: si.settlement_account_id || undefined,
+            settlementAccountName: si.settlement_account_display || undefined, // live view (§2)
+            paymentMode: si.payment_mode || undefined,
+            invoiceVoucherId: si.invoice_voucher_id || undefined,
+            invoiceVoucherNumber: si.invoice_voucher_display || undefined, // live view (§2)
+            settlementVoucherId: si.settlement_voucher_id || undefined,
+            settlementVoucherNumber: si.settlement_voucher_display || undefined, // live view (§2)
+            settledAmount: si.settled_amount !== null && si.settled_amount !== undefined ? numOr(si.settled_amount) : undefined,
+            settledDate: si.settled_date || undefined,
+            orders: sinvOrdersByInvoice.get(si.id) || [],
+            items: sinvItemsByInvoice.get(si.id) || [],
+            createdAt: si.created_at,
+            updatedAt: si.updated_at || si.created_at,
+          }));
+        } catch (sinvLoadErr: any) {
+          console.warn('[Azure MySQL] Consolidated sales invoices load skipped:', sinvLoadErr.message);
+        }
 
         // --- PURCHASES ---
         const [purMasterRows]: [any[], any] = await conn.query(
@@ -768,7 +877,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         date: ts.date,
         time: ts.time || '10:00',
         vehicleId: ts.vehicle_id || '',
-        vehicleNo: ts.vehicle_number,
+        // Own-fleet rows carry NULL (plate JOINs the vehicles master); the
+        // persisted plate survives only on outsourced slips (no FK master)
+        vehicleNo: ts.vehicle_number || '',
         saleId: ts.sale_id || undefined,
         // Sale-derived slips surface their sale order link from the FK;
         // legacy/other linkages come from the persisted order columns
@@ -1133,8 +1244,49 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         createdAt: e.created_at || new Date().toISOString(),
       }));
 
+      // 10a-v. Vehicle expense log — generic + diesel entries (FK-only; the
+      // vehicle number and account name JOIN their masters at read time).
+      const [vehExpenseRows]: any[] = await conn.query(
+        'SELECT * FROM vehicle_expense_entries ORDER BY date ASC'
+      );
+      const vehicleExpenseEntries: VehicleExpenseEntry[] = (vehExpenseRows || []).map((e: any) => ({
+        id: e.id,
+        entryType: (e.entry_type as any) || 'expense',
+        vehicleId: e.vehicle_id,
+        accountId: e.account_id,
+        date: e.date,
+        expenseType: e.expense_type || undefined,
+        litres: e.litres !== null && e.litres !== undefined ? parseNum(e.litres) : undefined,
+        ratePerLitre: e.rate_per_litre !== null && e.rate_per_litre !== undefined ? parseNum(e.rate_per_litre) : undefined,
+        amount: parseNum(e.amount),
+        notes: e.notes || undefined,
+        createdAt: e.created_at || new Date().toISOString(),
+      }));
+      const [expenseDocRows]: any[] = await conn.query(
+        'SELECT * FROM vehicle_expense_documents ORDER BY created_at ASC'
+      );
+      const expenseDocuments: ExpenseDocumentLink[] = (expenseDocRows || []).map((l: any) => ({
+        id: l.id,
+        expenseId: l.expense_id,
+        documentId: l.document_id,
+        createdAt: l.created_at,
+      }));
+
       if (!settings) {
         return null;
+      }
+
+      // APP DEFAULTS — the generic key/value store (diesel_rate = '99.8' …)
+      let appDefaults: AppDefault[] = [];
+      try {
+        const [adRows]: any[] = await conn.query('SELECT * FROM app_defaults ORDER BY app_key ASC');
+        appDefaults = (adRows || []).map((d) => ({
+          key: d.app_key,
+          value: d.app_value,
+          updatedAt: d.updated_at || new Date().toISOString(),
+        }));
+      } catch (appDefErr: any) {
+        console.warn('[Azure MySQL] app_defaults load skipped:', appDefErr.message);
       }
 
       console.log(`[Azure MySQL] Loaded live data from Azure: ${parties.length} parties, ${items.length} items, ${transactions.length} transactions, ${accounts.length} accounts, ${sales.length} sales, ${purchases.length} purchases, ${orders.length} legacy orders.`);
@@ -1153,6 +1305,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         productionBatches,
         orders,
         sales,
+        salesInvoices: saleInvoices,
         purchases,
         vehicles,
         drivers,
@@ -1176,6 +1329,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         employeeDocuments,
         vehicleDocuments,
         vehicleEmiEntries,
+        vehicleExpenseEntries,
+        expenseDocuments,
+        appDefaults,
         auditLogs,
       };
     } finally {
@@ -1433,8 +1589,8 @@ export async function liveSyncSale(sale: Sale, isDelete = false) {
   if (!pool) return;
   try {
     await pool.query(
-      `REPLACE INTO sales_orders (id, sale_number, party_id, date, status, notes, vehicle_id, site_address, distance_km, weight_tonnes, vehicle_no, driver_name, transport_charges, freight_rate_per_tonne, freight_gst_rate, inventory_applied, cash_applied, settlement_type, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `REPLACE INTO sales_orders (id, sale_number, party_id, date, status, notes, vehicle_id, site_address, distance_km, weight_tonnes, vehicle_no, driver_name, transport_charges, freight_rate_per_tonne, freight_gst_rate, inventory_applied, cash_applied, is_invoiced, settlement_type, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sale.id,
         sale.saleNumber,
@@ -1446,13 +1602,14 @@ export async function liveSyncSale(sale: Sale, isDelete = false) {
         sale.siteAddress || null,
         sale.distanceKm !== undefined && sale.distanceKm !== null ? sale.distanceKm : null,
         sale.weightTonnes !== undefined && sale.weightTonnes !== null ? sale.weightTonnes : null,
-        sale.vehicleNo || null,
+        sale.vehicleId ? null : (sale.vehicleNo || null), // FK-only vehicle number — typed plate for outsourced only
         sale.driverName || null,
         numOr(sale.transportCharges),
         (sale as any).freightRatePerTonne !== undefined && (sale as any).freightRatePerTonne !== null ? (sale as any).freightRatePerTonne : null,
         (sale as any).freightGstRate !== undefined && (sale as any).freightGstRate !== null ? (sale as any).freightGstRate : null,
         sale.inventoryApplied ? 1 : 0,
         sale.cashApplied ? 1 : 0,
+        (sale as any).isInvoiced ? 1 : 0,
         (sale as any).settlementType || null,
         sale.settlementAccountId || null,
         sale.paymentMode || null,
@@ -1543,6 +1700,106 @@ export async function liveSyncSaleStages(saleId: string, stages: SalesOrderStage
     }
   } catch (e: any) {
     console.error('[Azure MySQL LiveSync] Failed to sync sale stages:', e.message);
+  }
+}
+
+export async function liveSyncSaleInvoice(invoice: SaleInvoice, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    await pool.query(
+      `REPLACE INTO sales_invoices (id, invoice_number, party_id, date, notes, subtotal, tax_amount, total_amount, transport_charges, settlement_type, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, cash_applied, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        invoice.id,
+        invoice.invoiceNumber,
+        invoice.partyId,
+        invoice.date,
+        invoice.notes || null,
+        numOr(invoice.subtotal),
+        numOr(invoice.taxAmount),
+        numOr(invoice.totalAmount),
+        invoice.transportCharges !== undefined && invoice.transportCharges !== null ? numOr(invoice.transportCharges) : null,
+        invoice.settlementType || 'credit',
+        invoice.settlementAccountId || null,
+        invoice.paymentMode || null,
+        invoice.invoiceVoucherId || null,
+        invoice.settlementVoucherId || null,
+        invoice.settledAmount !== undefined && invoice.settledAmount !== null ? numOr(invoice.settledAmount) : null,
+        invoice.settledDate || null,
+        invoice.cashApplied ? 1 : 0,
+        invoice.createdAt || new Date().toISOString(),
+        invoice.updatedAt || new Date().toISOString(),
+      ]
+    );
+    if (isDelete) {
+      await pool.query('DELETE FROM sales_invoice_items WHERE sales_invoice_id = ?', [invoice.id]);
+      await pool.query('DELETE FROM sales_invoice_orders WHERE sales_invoice_id = ?', [invoice.id]);
+      await pool.query('DELETE FROM sales_invoices WHERE id = ?', [invoice.id]);
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync consolidated sales invoice:', e.message);
+  }
+}
+
+export async function liveSyncSaleInvoiceItems(invoiceId: string, items: SaleInvoiceItem[], isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    const ids = (items || []).map((li) => li.id);
+    if (isDelete || ids.length === 0) {
+      await pool.query('DELETE FROM sales_invoice_items WHERE sales_invoice_id = ?', [invoiceId]);
+      return;
+    }
+    const ph = ids.map(() => '?').join(',');
+    await pool.query(`DELETE FROM sales_invoice_items WHERE sales_invoice_id = ? AND id NOT IN (${ph})`, [invoiceId, ...ids]);
+    for (const li of items || []) {
+      await pool.query(
+        `REPLACE INTO sales_invoice_items (id, sales_invoice_id, sale_id, sale_stage_id, item_id, unit_id, quantity, rate, gst_rate, location_id, item_notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          li.id,
+          invoiceId,
+          li.saleId,
+          li.saleStageId || null,
+          li.itemId,
+          li.unitId || null,
+          numOr(li.quantity),
+          numOr(li.rate),
+          li.gstRate ?? null,
+          li.locationId || null,
+          li.itemNotes || null,
+        ]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync consolidated sales invoice items:', e.message);
+  }
+}
+
+export async function liveSyncSaleInvoiceOrders(invoiceId: string, orders: SaleInvoiceOrderLink[], isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM sales_invoice_orders WHERE sales_invoice_id = ?', [invoiceId]);
+      return;
+    }
+    for (const lk of orders || []) {
+      await pool.query(
+        `REPLACE INTO sales_invoice_orders (id, sales_invoice_id, sale_id, sale_total_amount, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [
+          lk.id,
+          invoiceId,
+          lk.saleId,
+          numOr(lk.saleTotalAmount),
+          lk.createdAt || new Date().toISOString(),
+        ]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync consolidated sales invoice order links:', e.message);
   }
 }
 
@@ -1782,6 +2039,52 @@ export async function liveSyncVehicleEmiEntry(entry: VehicleEmiEntry, isDelete =
   }
 }
 
+export async function liveSyncVehicleExpenseEntry(e: VehicleExpenseEntry, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM vehicle_expense_entries WHERE id = ?', [e.id]);
+    } else {
+      await pool.query(
+        `REPLACE INTO vehicle_expense_entries (id, entry_type, vehicle_id, account_id, date, expense_type, litres, rate_per_litre, amount, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          e.id,
+          e.entryType || 'expense',
+          e.vehicleId,
+          e.accountId,
+          e.date,
+          e.expenseType || null,
+          e.litres ?? null,
+          e.ratePerLitre ?? null,
+          e.amount || 0,
+          e.notes || null,
+          e.createdAt || new Date().toISOString(),
+        ]
+      );
+    }
+  } catch (err: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync vehicle expense entry:', err.message);
+  }
+}
+
+export async function liveSyncExpenseDocLink(link: ExpenseDocumentLink, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM vehicle_expense_documents WHERE id = ?', [link.id]);
+    } else {
+      await pool.query(
+        `REPLACE INTO vehicle_expense_documents (id, expense_id, document_id, created_at) VALUES (?, ?, ?, ?)`,
+        [link.id, link.expenseId, link.documentId, link.createdAt]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync vehicle expense document link:', e.message);
+  }
+}
+
 export async function liveSyncDriver(d: Driver, isDelete = false) {
   const pool = getMysqlPool();
   if (!pool) return;
@@ -1832,7 +2135,10 @@ export async function liveSyncTripSlip(ts: TripSlip, isDelete = false) {
           ts.date,
           ts.time || null,
           ts.vehicleId || null, // FK — NULL for outsourced (typed-plate) slips
-          ts.vehicleNo,
+          // FK-only vehicle number (Golden Rule §2): the plate JOINs the
+          // vehicles master at read for own-fleet slips; the typed plate is
+          // persisted ONLY for outsourced slips (no master row to join).
+          ts.vehicleId ? null : (ts.vehicleNo || null),
           ts.saleId || null,
           ts.orderId || null,
           ts.orderNumber || null,
@@ -2144,6 +2450,20 @@ export async function liveSyncUser(u: AppUser, isDelete = false) {
     }
   } catch (e: any) {
     console.error('[Azure MySQL LiveSync] Failed to sync user:', e.message);
+  }
+}
+
+/** APP DEFAULTS — upsert one key/value default (app_defaults; key = PK). */
+export async function liveSyncAppDefault(d: AppDefault) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    await pool.query(
+      `REPLACE INTO app_defaults (app_key, app_value, updated_at) VALUES (?, ?, ?)`,
+      [d.key, d.value, d.updatedAt || new Date().toISOString()]
+    );
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync app default:', e.message);
   }
 }
 

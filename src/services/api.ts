@@ -9,6 +9,8 @@ import {
   ProductionBatchRun,
   Order,
   Sale,
+  SaleInvoice,
+  AppDefault,
   Purchase,
   Vehicle,
   Driver,
@@ -31,6 +33,7 @@ import {
   EvidenceFolder,
   EvidenceFile,
   VehicleEmiEntry,
+  VehicleExpenseEntry,
 } from '../types';
 
 export interface HealthResponse {
@@ -87,6 +90,7 @@ export interface SyncPayload {
   productionBatches: ProductionBatchRun[];
   orders: Order[];
   sales: Sale[];
+  salesInvoices?: SaleInvoice[];
   purchases: Purchase[];
   vehicles: Vehicle[];
   drivers: Driver[];
@@ -103,6 +107,8 @@ export interface SyncPayload {
   stockAdjustments?: ItemStockAdjustment[];
   evidenceFolders?: any[];
   evidenceFiles?: any[];
+  /** APP DEFAULTS — the generic key/value default store */
+  appDefaults?: AppDefault[];
   auditLogs: any[];
 }
 
@@ -554,6 +560,29 @@ class ApiClient {
 
   public async deleteSale(id: string): Promise<{ success: boolean }> {
     return this.request<{ success: boolean }>(`/sales/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /** Next RST serial (the SO document number, stored bare; label term is RST). */
+  public async getNextRst(): Promise<{ success: boolean; data: string }> {
+    return this.request<{ success: boolean; data: string }>('/sales/next-rst');
+  }
+
+  // Consolidated sales invoices — one invoice for N sales orders
+  public async getSaleInvoices(): Promise<{ success: boolean; data: SaleInvoice[] }> {
+    return this.request<{ success: boolean; data: SaleInvoice[] }>('/sales-invoices');
+  }
+
+  public async createSaleInvoice(payload: any): Promise<{ success: boolean; data: SaleInvoice }> {
+    return this.request<{ success: boolean; data: SaleInvoice }>('/sales-invoices', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async deleteSaleInvoice(id: string): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(`/sales-invoices/${id}`, {
       method: 'DELETE',
     });
   }
@@ -1057,6 +1086,51 @@ class ApiClient {
 
   public async deleteVehicleEmiEntry(id: string): Promise<{ success: boolean }> {
     return this.request(`/logistics/emi-entries/${id}`, { method: 'DELETE' });
+  }
+
+  public async getVehicleExpenses(vehicleId?: string): Promise<{ success: boolean; count: number; data: VehicleExpenseEntry[] }> {
+    return this.request(`/logistics/expenses${vehicleId ? `?vehicleId=${encodeURIComponent(vehicleId)}` : ''}`);
+  }
+
+  public async createVehicleExpenseEntry(entry: Partial<VehicleExpenseEntry>): Promise<{ success: boolean; data: VehicleExpenseEntry }> {
+    return this.request('/logistics/expenses', {
+      method: 'POST',
+      body: JSON.stringify(entry),
+    });
+  }
+
+  public async updateVehicleExpenseEntry(id: string, updates: Partial<VehicleExpenseEntry>): Promise<{ success: boolean; data: VehicleExpenseEntry }> {
+    return this.request(`/logistics/expenses/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  }
+
+  public async deleteVehicleExpenseEntry(id: string): Promise<{ success: boolean }> {
+    return this.request(`/logistics/expenses/${id}`, { method: 'DELETE' });
+  }
+
+  // APP DEFAULTS — the generic key/value default store
+  public async getAppDefaults(): Promise<{ success: boolean; count: number; data: AppDefault[] }> {
+    return this.request<{ success: boolean; count: number; data: AppDefault[] }>('/app-defaults');
+  }
+
+  public async upsertAppDefault(key: string, value: string): Promise<{ success: boolean; data: AppDefault }> {
+    return this.request<{ success: boolean; data: AppDefault }>(`/app-defaults/${encodeURIComponent(key)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ value }),
+    });
+  }
+
+  public async getExpenseDocuments(expenseId: string): Promise<{ success: boolean; count: number; data?: any[] }> {
+    return this.request(`/documents/expense/${expenseId}`);
+  }
+
+  public async linkExpenseDocuments(expenseId: string, documentIds: string[]): Promise<{ success: boolean; added: number }> {
+    return this.request(`/documents/expense/${expenseId}/link`, {
+      method: 'POST',
+      body: JSON.stringify({ documentIds }),
+    });
   }
 
   public async updateEmployeePayment(id: string, updates: Partial<EmployeePayment>): Promise<{ success: boolean; data: EmployeePayment }> {

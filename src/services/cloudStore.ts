@@ -13,6 +13,7 @@ import {
   TripSlip,
   Tyre,
   VehicleEmiEntry,
+  VehicleExpenseEntry,
   Employee,
   EmployeeAttendance,
   EmployeeLeave,
@@ -23,6 +24,8 @@ import {
   AccountAdjustment,
   ItemStockAdjustment,
   Sale,
+  SaleInvoice,
+  AppDefault,
   Purchase,
   EvidenceFolder,
   EvidenceFile,
@@ -36,11 +39,12 @@ import { api } from './api';
 /** The 25 store collections, as addressable fetch targets. */
 export type CollectionName =
   | 'parties' | 'transactions' | 'settings' | 'items' | 'categories' | 'units'
-  | 'locations' | 'productionBatches' | 'orders' | 'sales' | 'purchases'
+  | 'locations' | 'productionBatches' | 'orders' | 'sales' | 'saleInvoices' | 'purchases'
   | 'vehicles' | 'drivers' | 'tripSlips' | 'tyres' | 'employees' | 'attendance'
   | 'leaves' | 'employeePayments' | 'employeeLedgerTransactions' | 'accounts'
   | 'transfers' | 'adjustments'
-  | 'stockAdjustments' | 'evidenceFolders' | 'evidenceFiles' | 'vehicleEmiEntries';
+  | 'stockAdjustments' | 'evidenceFolders' | 'evidenceFiles' | 'vehicleEmiEntries' | 'vehicleExpenses'
+  | 'appDefaults';
 
 export interface SidebarCounts {
   parties: number;
@@ -59,7 +63,9 @@ export interface SidebarCounts {
 // deliberately NOT here — it is per-feature.
 const BOOT_LOOKUPS: CollectionName[] = [
   'settings', 'parties', 'items', 'categories', 'units', 'locations', 'accounts',
-  'orders', 'vehicles', 'drivers', 'tripSlips', 'tyres', 'vehicleEmiEntries',
+  'orders', 'vehicles', 'drivers', 'tripSlips', 'tyres', 'vehicleEmiEntries', 'vehicleExpenses',
+  // defaults (diesel_rate etc.) power pre-fills in any feature's forms
+  'appDefaults',
 ];
 
 // Collections touched by a sale/purchase write (they can mint or compensate
@@ -67,6 +73,9 @@ const BOOT_LOOKUPS: CollectionName[] = [
 // 'tripSlips' rides with the sale touch list: the server auto-derives /
 // updates the dispatch trip slip on every sale create/edit
 const SALE_TOUCH: CollectionName[] = ['sales', 'transactions', 'parties', 'accounts', 'items', 'tripSlips'];
+// Consolidated invoice writes move the member sales orders (is_invoiced) +
+// mint vouchers + party/account balances.
+const SALE_INVOICE_TOUCH: CollectionName[] = ['saleInvoices', 'sales', 'transactions', 'parties', 'accounts', 'items'];
 const PURCHASE_TOUCH: CollectionName[] = ['purchases', 'transactions', 'parties', 'accounts', 'items'];
 
 // Sidebar tab → the heavy collections fetched on EVERY visit to that tab
@@ -75,15 +84,15 @@ const PURCHASE_TOUCH: CollectionName[] = ['purchases', 'transactions', 'parties'
 // layer. users/settings/design tabs need nothing here.
 const FEATURE_COLLECTIONS: Record<string, CollectionName[]> = {
   dashboard: ['transactions'],
-  parties: ['parties', 'transactions', 'sales', 'purchases', 'accounts'],
+  parties: ['parties', 'transactions', 'sales', 'saleInvoices', 'purchases', 'accounts'],
   'cash-bank': ['accounts', 'transfers', 'adjustments', 'transactions', 'parties', 'employeePayments'],
   items: ['items', 'categories', 'units', 'locations', 'stockAdjustments'],
-  sales: ['sales', 'purchases', 'transactions', 'accounts'],
+  sales: ['sales', 'saleInvoices', 'purchases', 'transactions', 'accounts'],
   purchases: ['purchases', 'sales', 'transactions', 'accounts'],
   production: ['productionBatches', 'items'],
   // drivers are employees with role 'driver' — loaded via 'employees'.
   logistics: [
-    'vehicles', 'tripSlips', 'tyres', 'employees', 'vehicleEmiEntries',
+    'vehicles', 'tripSlips', 'tyres', 'employees', 'vehicleEmiEntries', 'vehicleExpenses',
     // The Trips table's SALE ORDER column + transport figures resolve from
     // the sales master (slip.saleId) — the fleet feature must carry it
     'sales',
@@ -107,12 +116,15 @@ const COLLECTION_FETCHERS: Partial<Record<CollectionName, () => Promise<{ succes
   productionBatches: () => api.getBatches(),
   orders: () => api.getOrders(),
   sales: () => api.getSales(),
+  saleInvoices: () => api.getSaleInvoices(),
   purchases: () => api.getPurchases(),
   vehicles: () => api.getVehicles(),
+  appDefaults: () => api.getAppDefaults(),
   drivers: () => api.getDrivers(),
   tripSlips: () => api.getTripSlips(),
   tyres: () => api.getTyres(),
   vehicleEmiEntries: () => api.getVehicleEmiEntries(),
+  vehicleExpenses: () => api.getVehicleExpenses(),
   employees: () => api.getEmployees(),
   attendance: () => api.getAttendance(),
   leaves: () => api.getLeaves(),
@@ -176,12 +188,14 @@ class CloudStore {
   private productionBatches: ProductionBatchRun[] = [];
   private orders: Order[] = []; // legacy rows (retired table) — read-only
   private sales: Sale[] = [];
+  private saleInvoices: SaleInvoice[] = [];
   private purchases: Purchase[] = [];
   private vehicles: Vehicle[] = [];
   private drivers: Driver[] = [];
   private tripSlips: TripSlip[] = [];
   private tyres: Tyre[] = [];
   private vehicleEmiEntries: VehicleEmiEntry[] = [];
+  private vehicleExpenses: VehicleExpenseEntry[] = [];
   private employees: Employee[] = [];
   private attendance: EmployeeAttendance[] = [];
   private leaves: EmployeeLeave[] = [];
@@ -193,6 +207,7 @@ class CloudStore {
   private stockAdjustments: ItemStockAdjustment[] = [];
   private evidenceFolders: EvidenceFolder[] = [];
   private evidenceFiles: EvidenceFile[] = [];
+  private appDefaults: AppDefault[] = [];
 
   private listeners: Set<() => void> = new Set();
   private isServerOnline = true;
@@ -252,6 +267,8 @@ class CloudStore {
         if (d.productionBatches) this.productionBatches = d.productionBatches;
         if (d.orders) this.orders = d.orders;
         if (d.sales) this.sales = d.sales;
+        if (d.salesInvoices) this.saleInvoices = d.salesInvoices;
+        if (d.appDefaults) this.appDefaults = d.appDefaults;
         if (d.purchases) this.purchases = d.purchases;
         if (d.vehicles) this.vehicles = d.vehicles;
         if (d.drivers) this.drivers = d.drivers;
@@ -365,12 +382,15 @@ class CloudStore {
       if (loaded.locations) this.locations = loaded.locations as ItemLocation[];
       if (loaded.productionBatches) this.productionBatches = loaded.productionBatches as ProductionBatchRun[];
       if (loaded.sales) this.sales = loaded.sales as Sale[];
+      if (loaded.saleInvoices) this.saleInvoices = loaded.saleInvoices as SaleInvoice[];
+      if (loaded.appDefaults) this.appDefaults = loaded.appDefaults as AppDefault[];
       if (loaded.purchases) this.purchases = loaded.purchases as Purchase[];
       if (loaded.vehicles) this.vehicles = loaded.vehicles as Vehicle[];
       if (loaded.drivers) this.drivers = loaded.drivers as Driver[];
       if (loaded.tripSlips) this.tripSlips = loaded.tripSlips as TripSlip[];
       if (loaded.tyres) this.tyres = loaded.tyres as Tyre[];
       if (loaded.vehicleEmiEntries) this.vehicleEmiEntries = loaded.vehicleEmiEntries as VehicleEmiEntry[];
+      if (loaded.vehicleExpenses) this.vehicleExpenses = loaded.vehicleExpenses as VehicleExpenseEntry[];
       if (loaded.employees) this.employees = loaded.employees as Employee[];
       if (loaded.attendance) this.attendance = loaded.attendance as EmployeeAttendance[];
       if (loaded.leaves) this.leaves = loaded.leaves as EmployeeLeave[];
@@ -503,6 +523,17 @@ class CloudStore {
     return updated;
   }
   public getSales(): Sale[] { return [...this.sales]; }
+  /** Next RST serial — the Add-Sale form's prefill asks the minting server. */
+  public async getNextRst(): Promise<string | null> {
+    try {
+      const res = await api.getNextRst();
+      return res && res.success ? res.data : null;
+    } catch {
+      return null;
+    }
+  }
+  public getSaleInvoices(): SaleInvoice[] { return [...this.saleInvoices]; }
+  public getSaleInvoiceById(id: string): SaleInvoice | undefined { return this.saleInvoices.find((i) => i.id === id); }
   public getPurchaseById(id: string) { return this.purchases.find((p) => p.id === id); }
   public getSaleById(id: string) { return this.sales.find((s) => s.id === id); }
   public getPurchases(): Purchase[] { return [...this.purchases]; }
@@ -524,6 +555,29 @@ class CloudStore {
   public getStockAdjustments(): ItemStockAdjustment[] { return [...this.stockAdjustments]; }
   public getEvidenceFolders(): EvidenceFolder[] { return [...this.evidenceFolders]; }
   public getEvidenceFiles(): EvidenceFile[] { return [...this.evidenceFiles]; }
+  public getAppDefaults(): AppDefault[] { return [...this.appDefaults]; }
+  /** One default's value ('99.8' for diesel_rate, etc.) — undefined when unset */
+  public getAppDefault(key: string): string | undefined {
+    return this.appDefaults.find((d) => d.key === key)?.value;
+  }
+
+  /** Upsert one default (Settings gate server-side); optimistic + swap. */
+  public setAppDefault(key: string, value: string): AppDefault {
+    const now = new Date().toISOString();
+    const optimistic: AppDefault = { key, value, updatedAt: now };
+    this.appDefaults = this.appDefaults.some((d) => d.key === key)
+      ? this.appDefaults.map((d) => (d.key === key ? optimistic : d))
+      : [...this.appDefaults, optimistic];
+    this.notify();
+    api
+      .upsertAppDefault(key, value)
+      .then(() => this.refreshAfter(['appDefaults'], false))
+      .catch((err) => {
+        console.error('[CloudStore] setAppDefault cloud error:', err);
+        this.refreshAfter(['appDefaults'], false);
+      });
+    return optimistic;
+  }
   public isBackendOnline(): boolean { return this.isServerOnline; }
   public getLastSyncTime(): string { return this.lastSyncTime; }
   public isSyncing(): boolean { return this.syncInProgress; }
@@ -1234,6 +1288,81 @@ class CloudStore {
     return false;
   }
 
+  // Consolidated sales invoices (one invoice = N sales orders)
+  public addSaleInvoice(payload: any): SaleInvoice {
+    const now = new Date().toISOString();
+    const invoiceId = `vinv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const optimistic: SaleInvoice = {
+      id: invoiceId,
+      invoiceNumber: payload.invoiceNumber || '—',
+      partyId: payload.partyId || '',
+      date: payload.date || now.split('T')[0],
+      notes: payload.notes,
+      subtotal: Number(payload.subtotal) || 0,
+      taxAmount: Number(payload.taxAmount) || 0,
+      totalAmount: Number(payload.totalAmount ?? payload.grandTotal) || 0,
+      transportCharges: payload.transportCharges ?? undefined,
+      // Document-only invoice (2026-10-28 client rule): members booked credit
+      // at creation — the invoice posts nothing of its own, so no settled
+      // figures are carried optimistically.
+      cashApplied: true,
+      settlementType: 'credit',
+      // Member links + flattened lines ride for the instant detail view —
+      // the server-minted invoice replaces this row on confirmation.
+      orders: (payload.saleIds || []).map((sid: string, i: number) => ({
+        id: `sio-opt-${invoiceId}-${i}`,
+        salesInvoiceId: invoiceId,
+        saleId: sid,
+        saleTotalAmount: 0,
+        createdAt: now,
+      })),
+      items: payload.items || [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.saleInvoices.unshift(optimistic);
+    // Members are now locked server-side (is_invoiced) — flip optimistically.
+    this.sales = this.sales.map((s) =>
+      (payload.saleIds || []).includes(s.id) ? { ...s, isInvoiced: true, status: 'completed' as const } : s
+    );
+    this.notify();
+    api
+      .createSaleInvoice(payload)
+      .then(async (res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.saleInvoices = this.saleInvoices.map((i) => (i.id === optimistic.id ? { ...created } : i));
+          this.notify();
+        }
+        await this.refreshAfter(SALE_INVOICE_TOUCH);
+      })
+      .catch((err) => {
+        console.error('[CloudStore] addSaleInvoice cloud error:', err);
+        // Roll the failed draft back — an optimistic row must not linger
+        this.saleInvoices = this.saleInvoices.filter((i) => i.id !== optimistic.id);
+        this.notify();
+        this.refreshAfter(SALE_INVOICE_TOUCH);
+      });
+    return optimistic;
+  }
+
+  public deleteSaleInvoice(id: string): boolean {
+    const exists = this.saleInvoices.some((i) => i.id === id);
+    if (!exists) return false;
+    // Optimistic: drop the invoice; released members arrive via refreshAfter
+    // (the server clears is_invoiced and its vouchers when deleting).
+    this.saleInvoices = this.saleInvoices.filter((i) => i.id !== id);
+    this.notify();
+    api
+      .deleteSaleInvoice(id)
+      .then(() => this.refreshAfter(SALE_INVOICE_TOUCH))
+      .catch((err) => {
+        console.error('[CloudStore] deleteSaleInvoice cloud error:', err);
+        this.refreshAfter(SALE_INVOICE_TOUCH);
+      });
+    return true;
+  }
+
   // Purchases
   public addPurchase(payload: any): Purchase {
     const now = new Date().toISOString();
@@ -1726,6 +1855,87 @@ class CloudStore {
           await this.refreshAfter(['vehicleEmiEntries', 'accounts']);
         })
         .catch((err) => console.error('[CloudStore] deleteVehicleEmiEntry cloud error:', err));
+      return true;
+    }
+    return false;
+  }
+
+  public getVehicleExpenses(vehicleId?: string): VehicleExpenseEntry[] {
+    const list = (this.vehicleExpenses || [])
+      .filter((e) => (vehicleId ? e.vehicleId === vehicleId : true))
+      .map((e) => ({
+        ...e,
+        vehicleNo: this.vehicles.find((v) => v.id === e.vehicleId)?.vehicleNo || e.vehicleNo,
+        accountName: this.accounts.find((a) => a.id === e.accountId)?.name || e.accountName,
+      }))
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(b.createdAt).localeCompare(String(a.createdAt)));
+    return list;
+  }
+
+  public addVehicleExpenseEntry(entry: Partial<VehicleExpenseEntry>): VehicleExpenseEntry {
+    const newEntry: VehicleExpenseEntry = {
+      id: `vxe-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      entryType: (entry.entryType as any) || 'expense',
+      vehicleId: entry.vehicleId || '',
+      accountId: entry.accountId || '',
+      date: entry.date || new Date().toISOString().split('T')[0],
+      amount: Number(entry.amount) || 0,
+      notes: entry.notes || undefined,
+      createdAt: new Date().toISOString(),
+      ...entry,
+    } as VehicleExpenseEntry;
+    const stored = { ...newEntry } as any;
+    // documentIds ride the create payload (staged uploads link on the server
+    // via extractDocumentIds → linkExpenseDocuments) — never hydrated fields
+    delete stored.vehicleNo;
+    delete stored.accountName;
+    this.vehicleExpenses.unshift(newEntry);
+    this.notify();
+    api
+      .createVehicleExpenseEntry(stored)
+      .then(async (res) => {
+        if (res?.data?.id) {
+          this.vehicleExpenses = this.vehicleExpenses.map((e) => (e.id === newEntry.id ? res.data : e));
+          this.notify();
+        }
+        await this.refreshAfter(['vehicleExpenses', 'accounts']);
+      })
+      .catch((err) => console.error('[CloudStore] addVehicleExpenseEntry cloud error:', err));
+    return newEntry;
+  }
+
+  public updateVehicleExpenseEntry(id: string, updates: Partial<VehicleExpenseEntry>): VehicleExpenseEntry | null {
+    let updated: VehicleExpenseEntry | null = null;
+    this.vehicleExpenses = this.vehicleExpenses.map((e) => {
+      if (e.id === id) {
+        updated = { ...e, ...updates };
+        return updated;
+      }
+      return e;
+    });
+    if (updated) {
+      this.notify();
+      api
+        .updateVehicleExpenseEntry(id, updates)
+        .then(async () => {
+          await this.refreshAfter(['vehicleExpenses', 'accounts']);
+        })
+        .catch((err) => console.error('[CloudStore] updateVehicleExpenseEntry cloud error:', err));
+    }
+    return updated;
+  }
+
+  public deleteVehicleExpenseEntry(id: string): boolean {
+    const exists = this.vehicleExpenses.some((e) => e.id === id);
+    if (exists) {
+      this.vehicleExpenses = this.vehicleExpenses.filter((e) => e.id !== id);
+      this.notify();
+      api
+        .deleteVehicleExpenseEntry(id)
+        .then(async () => {
+          await this.refreshAfter(['vehicleExpenses', 'accounts']);
+        })
+        .catch((err) => console.error('[CloudStore] deleteVehicleExpenseEntry cloud error:', err));
       return true;
     }
     return false;

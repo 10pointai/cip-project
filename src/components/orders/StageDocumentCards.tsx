@@ -86,20 +86,27 @@ export function SaleStageDocCard({ doc, order, currencyCode, onOpenDocument, onV
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--color-outline-variant)]/50">
-            {doc.items.map((i, idx) => (
-              <tr key={idx}>
-                <td className="py-1.5 px-2 font-semibold text-[var(--color-on-surface)] truncate max-w-[220px]">
-                  {i.itemCode ? `${i.itemCode} (${i.itemName})` : i.itemName}
-                </td>
-                <td className="py-1.5 px-2 text-[var(--color-on-surface-variant)] font-medium">{i.location || 'Default Yard'}</td>
-                <td className="py-1.5 px-2 text-right font-bold text-[var(--color-on-surface)]">{i.quantity.toLocaleString('en-IN')} {i.unit}</td>
-                <td className="py-1.5 px-2 text-right text-[var(--color-on-surface-variant)]">{formatCurrency2(i.rate)}</td>
-                <td className="py-1.5 px-2 text-right text-[var(--color-on-surface-variant)]">{i.gstRate ?? 0}%</td>
-                <td className="py-1.5 px-2 text-right font-bold text-[var(--color-on-surface)]">{formatCurrency2(i.amount)}</td>
-              </tr>
-            ))}
+            {doc.items.map((i, idx) => {
+              // Amount = qty × rate WITH the line's own GST included (user rule:
+              // the GST column shown beside it is part of the line's worth)
+              const lineBase = i.amount ?? (Number(i.quantity) || 0) * (Number(i.rate) || 0);
+              const lineAmount = round2(lineBase + (lineBase * (Number(i.gstRate) || 0)) / 100);
+              return (
+                <tr key={idx}>
+                  <td className="py-1.5 px-2 font-semibold text-[var(--color-on-surface)] truncate max-w-[220px]">
+                    {i.itemCode ? `${i.itemCode} (${i.itemName})` : i.itemName}
+                  </td>
+                  <td className="py-1.5 px-2 text-[var(--color-on-surface-variant)] font-medium">{i.location || 'Default Yard'}</td>
+                  <td className="py-1.5 px-2 text-right font-bold text-[var(--color-on-surface)]">{i.quantity.toLocaleString('en-IN')} {i.unit}</td>
+                  <td className="py-1.5 px-2 text-right text-[var(--color-on-surface-variant)]">{formatCurrency2(i.rate)}</td>
+                  <td className="py-1.5 px-2 text-right text-[var(--color-on-surface-variant)]">{i.gstRate ?? 0}%</td>
+                  <td className="py-1.5 px-2 text-right font-bold text-[var(--color-on-surface)]">{formatCurrency2(lineAmount)}</td>
+                </tr>
+              );
+            })}
             {/* Transport / Fleet cost row — shows when the sale INCLUDED the
-                transport cost (priced w × d × rate with its own GST slab) */}
+                transport cost (priced w × d × rate with its own GST slab, which
+                rides INSIDE the row's amount like the item lines above) */}
             {order && Number(order.transportCharges) > 0 && (
               <tr>
                 <td className="py-1.5 px-2 font-semibold text-[var(--color-on-surface)]">
@@ -119,7 +126,7 @@ export function SaleStageDocCard({ doc, order, currencyCode, onOpenDocument, onV
                 </td>
                 <td className="py-1.5 px-2 text-right text-[var(--color-on-surface-variant)]">{Number((order as any).freightGstRate) || 0}%</td>
                 <td className="py-1.5 px-2 text-right font-bold text-[var(--color-on-surface)]">
-                  {formatCurrency2(Number(order.transportCharges))}
+                  {formatCurrency2(Number(order.transportCharges) + Math.round(((Number(order.transportCharges) || 0) * (Number((order as any).freightGstRate) || 0) / 100) * 100) / 100)}
                 </td>
               </tr>
             )}
@@ -127,20 +134,9 @@ export function SaleStageDocCard({ doc, order, currencyCode, onOpenDocument, onV
         </table>
       </div>
 
-      {/* Doc totals — when transport was included, the GST strip reconciles:
-          item tax + GST on the fleet-cost row (total already carries both) */}
+      {/* Doc total — single final row (subtotal/GST/transport breakdowns removed,
+          user rule 2026-10-28: the line Amounts above already carry their GST) */}
       <div className="px-4 py-2.5 border-t border-[var(--color-outline-variant)]/60 flex items-center justify-end gap-4 text-[11px]">
-        <span className="text-[var(--color-on-surface-variant)]">Subtotal: <strong className="text-[var(--color-on-surface)]">{formatCurrency2(doc.subtotal)}</strong></span>
-        <span className="text-[var(--color-on-surface-variant)]">
-          GST: <strong className="text-[var(--color-on-surface)]">
-            {formatCurrency2(doc.taxAmount + (order && Number(order.transportCharges) > 0
-              ? Math.round((Number(order.transportCharges) * (Number((order as any).freightGstRate) || 0) / 100) * 100) / 100
-              : 0))}
-          </strong>
-        </span>
-        <span className="text-[var(--color-on-surface-variant)]">
-          Transport: <strong className="text-[var(--color-on-surface)]">{formatCurrency2(Number(order?.transportCharges) || 0)}</strong>
-        </span>
         <span className="text-[var(--color-on-surface-variant)]">Total: <strong className="text-[var(--color-primary)]">{formatCurrency2(doc.totalAmount)}</strong></span>
       </div>
 

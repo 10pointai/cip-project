@@ -30,7 +30,7 @@ import { UploadProgressBar, UploadRowState } from './UploadProgressBar';
  * document rows keep a status flag for a future soft-delete policy).
  */
 
-export type DocumentsFeature = 'sale' | 'purchase' | 'party' | 'item' | 'employee' | 'vehicle';
+export type DocumentsFeature = 'sale' | 'purchase' | 'party' | 'item' | 'employee' | 'vehicle' | 'vehicle-expense';
 
 export interface StagedDocument {
   id: string;
@@ -58,6 +58,7 @@ const FEATURE_CONFIG: Record<DocumentsFeature, FeatureConfig> = {
   item: { s3Feature: 'inventory_documents', root: 'Inventory', noun: 'item' },
   employee: { s3Feature: 'employee_documents', root: 'Employee', noun: 'employee' },
   vehicle: { s3Feature: 'vehicle_documents', root: 'Vehicle', noun: 'vehicle' },
+  'vehicle-expense': { s3Feature: 'vehicle_expense_documents', root: 'VehicleExpense', noun: 'expense' },
 };
 
 /** What an upload row holds once the file reached AWS S3 but has no name yet */
@@ -134,6 +135,8 @@ export function EntityDocumentsSection({ feature, entityId, staged = [], onStage
         ? api.getEmployeeDocuments(entityId)
         : feature === 'vehicle'
         ? api.getVehicleDocuments(entityId)
+        : feature === 'vehicle-expense'
+        ? api.getExpenseDocuments(entityId)
         : api.getItemDocuments(entityId);
     loader
       .then((res) => {
@@ -286,6 +289,8 @@ export function EntityDocumentsSection({ feature, entityId, staged = [], onStage
             ? await api.linkEmployeeDocuments(entityId, [rec.data.id])
             : feature === 'vehicle'
             ? await api.linkVehicleDocuments(entityId, [rec.data.id])
+            : feature === 'vehicle-expense'
+            ? await api.linkExpenseDocuments(entityId, [rec.data.id])
             : await api.linkItemDocuments(entityId, [rec.data.id]);
         if (linkRes.success) {
           setDocs((prev) => [rec.data as AppDocument, ...prev]);

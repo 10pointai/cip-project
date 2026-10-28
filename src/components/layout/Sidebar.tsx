@@ -118,35 +118,37 @@ export function Sidebar({
       id: 'parties',
       label: 'Parties',
       icon: Users,
-      badge: partiesCount,
+      // Count badges REMOVED (2026-10-28 user directive) — no numbers against
+      // sidebar features; the counts machinery (props above) is kept for revert.
+      badge: null,
       permissionCheck: (has) => has('manage_parties') || has('record_payments'),
     },
     {
       id: 'cash-bank',
       label: 'Cash & Bank',
       icon: Landmark,
-      badge: accountsCount > 0 ? accountsCount : null,
+      badge: null,
       permissionCheck: (has) => has('manage_cash_bank'),
     },
     {
       id: 'items',
       label: 'Inventory',
       icon: Boxes,
-      badge: itemsCount,
+      badge: null,
       permissionCheck: (has) => has('manage_inventory'),
     },
     {
       id: 'sales',
       label: 'Sales',
       icon: ArrowUpRight,
-      badge: salesCount > 0 ? salesCount : null,
+      badge: null,
       permissionCheck: (has) => has('manage_sales'),
     },
     {
       id: 'purchases',
       label: 'Purchases',
       icon: ArrowDownLeft,
-      badge: purchasesCount > 0 ? purchasesCount : null,
+      badge: null,
       permissionCheck: (has) => has('manage_purchases'),
     },
     {
@@ -174,7 +176,8 @@ export function Sidebar({
       id: 'employees',
       label: 'Employees',
       icon: Contact,
-      badge: employeesCount > 0 ? employeesCount : null,
+      // Count badge removed (user directive — no numbers against features)
+      badge: null,
       permissionCheck: (has) => has('manage_employees'),
     },
     // {
