@@ -41,6 +41,7 @@ import { PartyStatementLedger } from './PartyStatementLedger';
 import { PaymentVoucherDetailModal } from './PaymentVoucherDetailModal';
 import { OrderDetailModal } from '../orders/OrderDetailModal';
 import { SaleInvoiceDetailModal } from '../orders/SaleInvoiceDetailModal';
+import { SaleInvoicesView } from '../orders/SaleInvoicesView';
 import { saleToDisplay, purchaseToDisplay, OrderDisplay } from '../orders/orderDisplay';
 import { EntityDocumentsSection } from '../common/EntityDocumentsSection';
 
@@ -86,7 +87,7 @@ export function PartyDetailView({
   const canRecordPayments = hasPermission('record_payments');
 
   const currencySymbol = settings.currency.symbol;
-  const [activeMainTab, setActiveMainTab] = useState<'ledger' | 'evidence'>('ledger');
+  const [activeMainTab, setActiveMainTab] = useState<'ledger' | 'invoices' | 'evidence'>('ledger');
   const [isPrintOpen, setIsPrintOpen] = useState(false);
   /** The ledger row currently opened for its detail story */
   const [detailEntry, setDetailEntry] = useState<PartyLedgerEntry | null>(null);
@@ -101,8 +102,17 @@ export function PartyDetailView({
         sales: sales || localDb.getSales(),
         purchases: purchases || localDb.getPurchases(),
         transactions,
+        saleInvoices,
       }),
-    [party, sales, purchases, transactions],
+    [party, sales, purchases, transactions, saleInvoices],
+  );
+
+  // The party's consolidated sales invoices — the Invoices tab's documents
+  // (kept OUT of the ledger: the statement builder drops invoice-stamped
+  // vouchers; the receivable rides on the member orders' journals).
+  const partyInvoices = useMemo(
+    () => (saleInvoices || []).filter((si) => si.partyId === party.id),
+    [saleInvoices, party.id],
   );
 
   // Clean WhatsApp phone number
@@ -337,7 +347,20 @@ export function PartyDetailView({
           }`}
         >
           <FileText className="w-4 h-4" />
-          <span>Statement of Account & Ledger ({statement.rows.length})</span>
+          <span>Party Ledger ({statement.rows.length})</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveMainTab('invoices')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-full text-xs font-bold transition-all ${
+            activeMainTab === 'invoices'
+              ? 'bg-[var(--color-primary)] text-white shadow-xs'
+              : 'bg-[var(--color-surface-container-low)] text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)]'
+          }`}
+        >
+          <FileCheck className="w-4 h-4" />
+          <span>Invoices ({partyInvoices.length})</span>
         </button>
 
         <button
@@ -350,7 +373,7 @@ export function PartyDetailView({
           }`}
         >
           <FolderOpen className="w-4 h-4" />
-          <span>Documents & Evidence Vault (📁)</span>
+          <span>Documents (📁)</span>
         </button>
       </div>
 
@@ -363,20 +386,30 @@ export function PartyDetailView({
           onOpenOrder={(entry) => setDetailEntry(entry)}
           onOpenVoucher={(entry) => setDetailEntry(entry)}
         />
-      ) : (
-        /* EVIDENCE & DOCUMENTS VAULT TAB */
-        <EvidenceManager
-          initialEntityType="party"
-          initialEntityId={party.id}
-          initialEntityName={party.name}
-          title={`Evidence & Files Vault: ${party.name}`}
-          isEmbedded={true}
+      ) : activeMainTab === 'invoices' ? (
+        /* CONSOLIDATED SALES INVOICES — the party's CINV documents, in the
+           same table (and with the same detail story) as the Sales feature's
+           Invoices tab */
+        <SaleInvoicesView
+          invoices={partyInvoices}
+          sales={sales || localDb.getSales()}
+          parties={[party]}
+          settings={settings}
         />
+      ) : (
+        /* EVIDENCE & DOCUMENTS VAULT TAB — the party's S3 document uploads
+            live here too; only visible while this tab is active */
+        <>
+          <EntityDocumentsSection feature="party" entityId={party.id} />
+          <EvidenceManager
+            initialEntityType="party"
+            initialEntityId={party.id}
+            initialEntityName={party.name}
+            title={`Evidence & Files Vault: ${party.name}`}
+            isEmbedded={true}
+          />
+        </>
       )}
-
-      {/* Party documents (S3 upload feature) — uploads link to the party
-          immediately; shown beneath the tabs regardless of which is active */}
-      <EntityDocumentsSection feature="party" entityId={party.id} />
 
       {/* Click-through: sale/purchase → THE orders module's details modal
           (same presentation + actions). Issue/edit actions deep-link into the
@@ -452,6 +485,7 @@ export function PartyDetailView({
                 onClose={() => setDetailEntry(null)}
                 invoice={invoice}
                 settings={settings}
+                sales={sales || localDb.getSales()}
               />
             );
           }

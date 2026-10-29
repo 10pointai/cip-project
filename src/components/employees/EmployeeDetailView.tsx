@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   ArrowLeft,
   BadgeCheck,
@@ -26,7 +26,6 @@ import { Employee, AppDocument, Vehicle } from '../../types';
 import { api } from '../../services/api';
 import { useDatabase } from '../../hooks/useDatabase';
 import { formatCurrency } from '../../utils/formatters';
-import { SearchableSelect } from '../orders/SearchableSelect';
 import { EmployeeLedgerView, employeeLedgerBalance, LedgerTxnModal } from './EmployeeLedgerView';
 import { EmployeeMonthlyTimesheetView } from './EmployeeMonthlyTimesheetModal';
 
@@ -66,10 +65,36 @@ export function EmployeeDetailView({
   // slot is held by ANOTHER driver asks first (inline bar, no window.confirm);
   // removing is the ✕ on the held-vehicle chips.
   const [pendingOccupied, setPendingOccupied] = useState<Vehicle | null>(null);
+  // The FLEET'S dropdown pattern (same as the vehicle form's driver picker):
+  // a closed picker button opens a searchable vehicle list under it.
+  const [vehPickerOpen, setVehPickerOpen] = useState(false);
+  const [vehPickerQuery, setVehPickerQuery] = useState('');
+  const vehPickerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setPendingOccupied(null);
+    setVehPickerOpen(false);
+    setVehPickerQuery('');
   }, [employee?.id]);
+
+  useEffect(() => {
+    if (!vehPickerOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (vehPickerRef.current && !vehPickerRef.current.contains(e.target as Node)) {
+        setVehPickerOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [vehPickerOpen]);
+
+  /** Vehicle-status chip tones inside the picker (fleet parity) */
+  const vehStatusTone: Record<string, string> = {
+    available: 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]',
+    on_trip: 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]',
+    maintenance: 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]',
+    out_of_service: 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]',
+  };
 
   /** The vehicles this driver currently holds (FK lives on the vehicle —
    *  currentDriverId — so the assignment resolves from the fleet master). */
@@ -426,44 +451,159 @@ export function EmployeeDetailView({
                 <Truck className="w-3.5 h-3.5" /> Assigned Fleet Vehicle{heldVehicles.length === 1 ? '' : 's'}
               </h4>
 
-              {/* Currently held — one clear, removable chip per vehicle */}
-              {heldVehicles.length === 0 ? (
-                <p className="text-xs text-[var(--color-on-surface-variant)] mb-3">No vehicle assigned to this driver yet.</p>
-              ) : (
-                <div className="flex flex-wrap gap-2 mb-3">
-                  {heldVehicles.map((v) => (
-                    <span
-                      key={v.id}
-                      className="inline-flex items-center gap-2 pl-3 pr-1.5 py-1 rounded-full bg-[var(--color-secondary-container)]/50 border border-[var(--color-secondary)]/20"
-                    >
-                      <span className="font-mono text-[11px] font-black text-[var(--color-on-secondary-container)]">{v.vehicleNo}</span>
-                      <span className="text-[9px] font-bold uppercase text-[var(--color-on-secondary-container)]/80">{v.type}</span>
-                      <button
-                        type="button"
-                        onClick={() => releaseAssignedVehicle(v.id)}
-                        className="p-1 rounded-full hover:bg-[var(--color-surface-container-highest)] text-[var(--color-on-surface-variant)] hover:text-[var(--color-error)] transition-colors"
-                        title={`Remove ${v.vehicleNo} from this driver`}
-                        aria-label={`Remove ${v.vehicleNo}`}
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
-
-              {/* One-interaction assign: pick → assigned; occupied asks inline */}
-              <div className="max-w-xs">
-                <SearchableSelect
-                  value=""
-                  onChange={handlePickVehicle}
-                  placeholder="Select a vehicle to assign..."
-                  options={assignableVehicles.map((v) => ({
-                    value: v.id,
-                    label: v.vehicleNo,
-                    sub: `${v.type}${v.status === 'on_trip' ? ' · ON TRIP' : ''}${v.currentDriverId ? ` — with ${employeeNameById.get(v.currentDriverId) || 'another driver'}` : ' — free'}`,
-                  }))}
-                />
+              {/* One-interaction assign — the FLEET'S dropdown pattern (same as
+                  the vehicle form's driver picker): the closed button shows the
+                  driver's assigned vehicle as the FILLED VALUE; opening offers
+                  an UNASSIGN row per held vehicle on top, then the searchable
+                  assign list below (occupied ones ask inline). */}
+              <div className="max-w-xs" ref={vehPickerRef}>
+                {vehPickerOpen ? (
+                  <div className="space-y-1.5">
+                    <input
+                      type="text"
+                      autoFocus
+                      placeholder="Search vehicles by number, type or driver…"
+                      value={vehPickerQuery}
+                      onChange={(e) => setVehPickerQuery(e.target.value)}
+                      className="w-full p-2.5 border border-[var(--color-primary)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                    />
+                    <div className="max-h-48 overflow-y-auto rounded-xl border border-[var(--color-outline-variant)] bg-[var(--color-surface-container-lowest)] divide-y divide-[var(--color-outline-variant)] shadow-lg">
+                      {(() => {
+                        const q = vehPickerQuery.trim().toLowerCase();
+                        const matchFn = (v: Vehicle) => {
+                          if (!q) return true;
+                          const holder = v.currentDriverId ? employeeNameById.get(v.currentDriverId) || '' : '';
+                          return (
+                            v.vehicleNo.toLowerCase().includes(q) ||
+                            (v.type || '').toLowerCase().includes(q) ||
+                            holder.toLowerCase().includes(q)
+                          );
+                        };
+                        const heldMatches = heldVehicles.filter(matchFn);
+                        // Rows above the divider: the driver's HELD vehicles —
+                        // clicking releases the vehicle (the unassign option)
+                        const unassignRows = heldMatches.map((v) => (
+                          <button
+                            key={`un-${v.id}`}
+                            type="button"
+                            onClick={() => {
+                              setVehPickerOpen(false);
+                              setVehPickerQuery('');
+                              releaseAssignedVehicle(v.id);
+                            }}
+                            title={`Unassign ${v.vehicleNo} from ${employee.name}`}
+                            className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left transition-colors hover:bg-[var(--color-error-container)]/30"
+                          >
+                            <span className="flex items-center gap-2 min-w-0">
+                              <span className="w-6 h-6 rounded-full bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)] flex items-center justify-center shrink-0">
+                                <Truck className="w-3.5 h-3.5" />
+                              </span>
+                              <span className="min-w-0">
+                                <span className="font-mono text-xs font-black text-[var(--color-on-surface)] block truncate">{v.vehicleNo}</span>
+                                <span className="text-[10px] text-[var(--color-on-surface-variant)] block truncate capitalize">{v.type || 'vehicle'}</span>
+                              </span>
+                            </span>
+                            <span className="flex items-center gap-1.5 shrink-0">
+                              <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded-full bg-[var(--color-success-container)] text-[var(--color-on-success-container)]">
+                                Assigned ✓
+                              </span>
+                              <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded-full bg-[var(--color-error-container)] text-[var(--color-error)] flex items-center gap-1">
+                                <X className="w-2.5 h-2.5" /> Unassign
+                              </span>
+                            </span>
+                          </button>
+                        ));
+                        const matches = assignableVehicles
+                          .filter(matchFn)
+                          .sort((a, b) => a.vehicleNo.localeCompare(b.vehicleNo));
+                        if (matches.length === 0 && heldMatches.length === 0) {
+                          return (
+                            <div className="p-4 text-center">
+                              <Truck className="h-6 w-6 text-[var(--color-outline)] mx-auto mb-1.5" />
+                              <p className="text-xs font-bold text-[var(--color-on-surface)]">No vehicles match</p>
+                              <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
+                                Nothing matches "{vehPickerQuery.trim()}".
+                              </p>
+                            </div>
+                          );
+                        }
+                        return (
+                          <>
+                            {heldMatches.length > 0 && heldMatches.length < heldVehicles.length && (
+                              <div className="px-3 py-1 text-[9px] font-black uppercase tracking-wider text-[var(--color-outline)] bg-[var(--color-surface-container)]/70">
+                                Show only matches — clear the search to unassign
+                              </div>
+                            )}
+                            {[...heldMatches].sort((a, b) => a.vehicleNo.localeCompare(b.vehicleNo)).length > 0 &&
+                              unassignRows}
+                            {matches.length > 0 && (
+                              <div className="px-3 py-1 text-[9px] font-black uppercase tracking-wider text-[var(--color-outline)] bg-[var(--color-surface-container)]/70">
+                                Assign a vehicle
+                              </div>
+                            )}
+                            {matches.map((v) => {
+                          const holder = v.currentDriverId ? employeeNameById.get(v.currentDriverId) : undefined;
+                          return (
+                            <button
+                              key={v.id}
+                              type="button"
+                              onClick={() => {
+                                setVehPickerOpen(false);
+                                setVehPickerQuery('');
+                                handlePickVehicle(v.id);
+                              }}
+                              className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-container)]"
+                            >
+                              <span className="flex items-center gap-2 min-w-0">
+                                <span className="w-6 h-6 rounded-full bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)] flex items-center justify-center shrink-0">
+                                  <Truck className="w-3.5 h-3.5" />
+                                </span>
+                                <span className="min-w-0">
+                                  <span className="font-mono text-xs font-black text-[var(--color-on-surface)] block truncate">{v.vehicleNo}</span>
+                                  <span className="text-[10px] text-[var(--color-on-surface-variant)] block truncate capitalize">{v.type || 'vehicle'}</span>
+                                </span>
+                              </span>
+                              <span className="flex items-center gap-1.5 shrink-0">
+                                {holder && (
+                                  <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded-full bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)] whitespace-nowrap">
+                                    With {holder}
+                                  </span>
+                                )}
+                                <span className={`text-[9px] font-black uppercase px-1.5 py-0.5 rounded-full ${vehStatusTone[v.status] || vehStatusTone.available}`}>
+                                  {v.status === 'on_trip' ? 'On Trip' : (v.status || 'available')}
+                                </span>
+                              </span>
+                            </button>
+                          );
+                        })}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => { setVehPickerOpen(true); setVehPickerQuery(''); }}
+                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm text-left flex items-center justify-between gap-2 bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] transition-colors"
+                  >
+                    {heldVehicles.length > 0 ? (
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className="font-mono text-xs font-black text-[var(--color-on-surface)] truncate">
+                          {heldVehicles[0].vehicleNo}
+                        </span>
+                        {heldVehicles.length > 1 && (
+                          <span className="text-[10px] font-bold text-[var(--color-on-surface-variant)] shrink-0">
+                            +{heldVehicles.length - 1} more
+                          </span>
+                        )}
+                      </span>
+                    ) : (
+                      <span className="text-[var(--color-on-surface-variant)]">Search &amp; assign a vehicle…</span>
+                    )}
+                    <Truck className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
+                  </button>
+                )}
               </div>
 
               {/* Inline confirmation — only when the picked truck is held by

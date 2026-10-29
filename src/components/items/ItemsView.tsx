@@ -44,7 +44,7 @@ import { ItemFormModal } from './ItemFormModal';
 import { CategoryManagerModal } from './CategoryManagerModal';
 import { UnitManagerModal } from './UnitManagerModal';
 import { LocationManagerModal } from './LocationManagerModal';
-import { ItemDetailModal } from './ItemDetailModal';
+import { ItemDetailPage } from './ItemDetailPage';
 import { StockAdjustmentModal } from './StockAdjustmentModal';
 
 interface ItemsViewProps {
@@ -98,7 +98,10 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
   const [isCategoriesOpen, setIsCategoriesOpen] = useState(false);
   const [isUnitsOpen, setIsUnitsOpen] = useState(false);
   const [isLocationsOpen, setIsLocationsOpen] = useState(false);
-  const [viewingItem, setViewingItem] = useState<Item | null>(null);
+  // ITEM PROFILE PAGE state — the item's id is held (not the object) so the
+  // profile stays LIVE: the fresh row resolves from items on every store tick
+  const [detailItemId, setDetailItemId] = useState<string | null>(null);
+  const detailItem = detailItemId ? items.find((i) => i.id === detailItemId) || null : null;
   const [isStockAdjustmentModalOpen, setIsStockAdjustmentModalOpen] = useState(false);
   const [adjustmentTargetItemId, setAdjustmentTargetItemId] = useState<string | undefined>(undefined);
 
@@ -294,8 +297,8 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
       )
     ) {
       localDb.deleteItem(item.id);
-      if (viewingItem?.id === item.id) {
-        setViewingItem(null);
+      if (detailItemId === item.id) {
+        setDetailItemId(null);
       }
     }
   };
@@ -412,6 +415,19 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
+      {/* ITEM PROFILE PAGE — like the party/employee/fleet profiles: clicking a
+          catalog row REPLACES the tab content with the item's full page (Back
+          returns to the catalog list) */}
+      {detailItem ? (
+        <ItemDetailPage
+          item={detailItem}
+          category={categories.find((c) => c.id === detailItem.categoryId)}
+          currencySymbol={currencySymbol}
+          onBack={() => setDetailItemId(null)}
+          onEdit={handleEdit}
+        />
+      ) : (
+        <>
       {/* Top Header & Navigation Switcher */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[var(--color-outline-variant)] pb-4">
         {/* Subtab Segmented Switcher */}
@@ -706,11 +722,16 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
               </button>
             </div>
           ) : viewMode === 'table' ? (
-            /* Tabular Layout */
-            <div className="bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs overflow-hidden">
-              <div className="overflow-x-auto">
+            /* Tabular Layout — SAME STICKY-HEADER PARITY as the sales table
+                (OrdersView): the card clips rounded corners (overflow-clip) and
+                the table wraps in a PLAIN div — never overflow-x-auto, a nested
+                scroll container breaks the sticky top-16 thead (it would pin to
+                the wrapper instead of the viewport and leave a white band) so
+                the page itself scrolls under the sticky header. */
+            <div className="bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs overflow-clip">
+              <div>
                 <table className="w-full text-left border-collapse text-xs min-w-[980px]">
-                  <thead>
+                  <thead className="sticky top-16 z-20">
                     <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
                       <th className="py-3.5 px-4 min-w-[240px]">Item Details & SKU</th>
                       <th className="py-3.5 px-3">Type & Category</th>
@@ -751,7 +772,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                         <tr
                           key={item.id}
                           className="hover:bg-[var(--color-surface-container)]/60 transition-colors group cursor-pointer"
-                          onClick={() => setViewingItem(item)}
+                          onClick={() => setDetailItemId(item.id)}
                         >
                           {/* Name & Code */}
                           <td className="py-3 px-4">
@@ -947,7 +968,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                 return (
                   <div
                     key={item.id}
-                    onClick={() => setViewingItem(item)}
+                    onClick={() => setDetailItemId(item.id)}
                     className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs hover:shadow-md transition-all hover:border-[var(--color-primary)]/40 cursor-pointer flex flex-col justify-between space-y-3"
                   >
                     {/* Card Top */}
@@ -1053,7 +1074,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                     >
                       <button
                         type="button"
-                        onClick={() => setViewingItem(item)}
+                        onClick={() => setDetailItemId(item.id)}
                         className="text-xs font-bold text-[var(--color-primary)] hover:underline flex items-center gap-0.5"
                       >
                         View Specs <ChevronRight className="w-3 h-3" />
@@ -1428,6 +1449,9 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
         </div>
       )}
 
+        </>
+      )}
+
       {/* ========================================================================= */}
       {/* MODALS                                                                    */}
       {/* ========================================================================= */}
@@ -1483,21 +1507,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
           locations={locations}
           items={items}
           onClose={() => setIsLocationsOpen(false)}
-        />
-      )}
-
-      {viewingItem && (
-        <ItemDetailModal
-          item={viewingItem}
-          category={categories.find((c) => c.id === viewingItem.categoryId)}
-          currencySymbol={currencySymbol}
-          onClose={() => setViewingItem(null)}
-          onEdit={(itm) => {
-            setViewingItem(null);
-            handleEdit(itm);
-          }}
-          onDelete={(itm) => handleDelete(itm)}
-          onGoToInventory={onNavigateToInventory}
         />
       )}
     </div>

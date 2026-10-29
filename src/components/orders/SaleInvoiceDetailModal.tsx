@@ -1,12 +1,15 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { X, Receipt, Layers } from 'lucide-react';
-import { SaleInvoice, CompanySettings } from '../../types';
+import { Sale, SaleInvoice, CompanySettings } from '../../types';
 
 interface SaleInvoiceDetailModalProps {
   isOpen: boolean;
   onClose: () => void;
   invoice: SaleInvoice | null;
   settings: CompanySettings;
+  /** Member sales orders — source of each order's freight GST slab. Omitting
+   *  it keeps the transport base row but hides the GST-on-transport row. */
+  sales?: Sale[];
 }
 
 /**
@@ -18,7 +21,7 @@ interface SaleInvoiceDetailModalProps {
  * (clicking the invoice's journal-voucher row opens THIS, not the generic
  * payment-voucher modal).
  */
-export function SaleInvoiceDetailModal({ isOpen, onClose, invoice, settings }: SaleInvoiceDetailModalProps) {
+export function SaleInvoiceDetailModal({ isOpen, onClose, invoice, settings, sales }: SaleInvoiceDetailModalProps) {
   const detail = invoice;
 
   const formatCurrency = (amount: number) =>
@@ -28,6 +31,24 @@ export function SaleInvoiceDetailModal({ isOpen, onClose, invoice, settings }: S
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     }).format(amount || 0);
+
+  // Transportation split: the base fleet cost is the invoice's roll-up, and
+  // each member order carries its OWN freight GST slab (freightGstRate % of
+  // its transportCharges, rounded per member — matching the server's stage
+  // math). The % shown is each member's slab resolved against the base: a
+  // uniform slab prints that slab, mixed slabs print the blended rate.
+  const transportSplit = useMemo(() => {
+    const base = Number(detail?.transportCharges) || 0;
+    let freightGst = 0;
+    for (const lk of detail?.orders || []) {
+      const sale = sales?.find((s) => s.id === lk.saleId);
+      if (!sale) continue;
+      freightGst += Math.round(((Number(sale.transportCharges) || 0) * (Number(sale.freightGstRate) || 0)) / 100 * 100) / 100;
+    }
+    freightGst = Math.round(freightGst * 100) / 100;
+    const pct = base > 0 ? Math.round((freightGst / base) * 10000) / 100 : 0;
+    return { base, freightGst, pct };
+  }, [detail, sales]);
 
   const settlementChip = (inv: SaleInvoice) => null
     
@@ -71,6 +92,7 @@ export function SaleInvoiceDetailModal({ isOpen, onClose, invoice, settings }: S
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="text-[10px] uppercase tracking-wider text-[var(--color-on-surface-variant)] border-b border-[var(--color-outline-variant)]/50 bg-[var(--color-surface-container)]">
+                  <th className="py-2 px-2">RST No.</th>
                   <th className="py-2 px-3">Material</th>
                   <th className="py-2 px-2">Qty</th>
                   <th className="py-2 px-2">Rate</th>
@@ -81,6 +103,7 @@ export function SaleInvoiceDetailModal({ isOpen, onClose, invoice, settings }: S
               <tbody className="divide-y divide-[var(--color-outline-variant)]/40">
                 {(detail.items || []).map((li) => (
                   <tr key={li.id} className="text-xs">
+                    <td className="py-2 px-2 font-semibold text-[var(--color-on-surface)]">{li.saleNumber || '—'}</td>
                     <td className="py-2 px-3 font-semibold text-[var(--color-on-surface)]">
                       {li.itemName || '—'}
                       {li.itemCode && <span className="text-[10px] text-[var(--color-on-surface-variant)] ml-1.5">{li.itemCode}</span>}
@@ -130,10 +153,16 @@ export function SaleInvoiceDetailModal({ isOpen, onClose, invoice, settings }: S
                 <span>GST</span>
                 <span className="font-semibold">{formatCurrency(detail.taxAmount)}</span>
               </div>
-              {(detail.transportCharges ?? 0) > 0 && (
+              {(transportSplit.base > 0 || transportSplit.freightGst > 0) && (
                 <div className="flex justify-between text-[var(--color-on-surface-variant)]">
-                  <span>Total Transportation Cost <span className="text-[9px]">(from the sales orders)</span></span>
-                  <span className="font-semibold">{formatCurrency(detail.transportCharges)}</span>
+                  <span>Transportation Cost <span className="text-[9px]">(from the sales orders)</span></span>
+                  <span className="font-semibold">{formatCurrency(transportSplit.base)}</span>
+                </div>
+              )}
+              {transportSplit.freightGst > 0 && (
+                <div className="flex justify-between text-[var(--color-on-surface-variant)]">
+                  <span>GST on Transportation <span className="text-[9px]">@ {transportSplit.pct % 1 === 0 ? transportSplit.pct : transportSplit.pct.toFixed(2)}%</span></span>
+                  <span className="font-semibold">{formatCurrency(transportSplit.freightGst)}</span>
                 </div>
               )}
               <div className="flex justify-between text-sm border-t border-[var(--color-outline-variant)] pt-2">

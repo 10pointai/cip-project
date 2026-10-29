@@ -649,7 +649,9 @@ export const TyreManagementView: React.FC = () => {
       {/* 3. TYRE REGISTRATION / INSPECTION MODAL */}
       {isTyreModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-scrim)]/40 backdrop-blur-xs p-4 overflow-y-auto">
-          <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-xl border border-[var(--color-outline-variant)] max-w-lg w-full overflow-hidden my-8">
+          {/* my-auto (not my-8): centres when short, collapses to 0 on overflow
+              so the card never clips its top on a short window */}
+          <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-xl border border-[var(--color-outline-variant)] max-w-lg w-full overflow-hidden my-auto">
             <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
               <div>
                 <h3 className="font-extrabold text-[var(--color-on-surface)] text-sm uppercase tracking-tight flex items-center gap-1.5">

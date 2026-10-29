@@ -49,10 +49,10 @@ export function PartyStatementSummaryCards({ party, statement, currencySymbol }:
   }, [statement.rows]);
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
       {/* Card 1: Outstanding Balance */}
       <div
-        className={`p-5 rounded-[24px] border shadow-xs flex flex-col justify-between ${
+        className={`p-4 rounded-[18px] border shadow-xs flex flex-col justify-between ${
           isReceivable
             ? 'bg-[var(--color-primary-container)] border-[var(--color-primary)]/20 text-[var(--color-on-primary-container)]'
             : isPayable
@@ -65,7 +65,7 @@ export function PartyStatementSummaryCards({ party, statement, currencySymbol }:
             <p className="text-[11px] font-bold uppercase tracking-wider opacity-80">
               Outstanding Balance
             </p>
-            <p className="text-2xl sm:text-3xl font-black mt-1 tracking-tight">
+            <p className="text-lg sm:text-xl font-black mt-1 tracking-tight">
               {formatCurrency(Math.abs(party.currentBalance), currencySymbol)}
             </p>
           </div>
@@ -91,14 +91,14 @@ export function PartyStatementSummaryCards({ party, statement, currencySymbol }:
       </div>
 
       {/* Card 2: Credit Terms & Limit */}
-      <div className="p-5 rounded-[24px] bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] shadow-xs flex flex-col justify-between">
+      <div className="p-4 rounded-[18px] bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] shadow-xs flex flex-col justify-between">
         <div>
           <div className="flex justify-between items-center text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
             <span>Credit Terms & Limit</span>
             <Clock className="w-4 h-4 text-[var(--color-outline)]" />
           </div>
-          <div className="mt-2 flex items-baseline gap-2">
-            <p className="text-2xl font-black text-[var(--color-on-surface)]">{party.paymentTermsDays} Days</p>
+          <div className="mt-1.5 flex items-baseline gap-2">
+            <p className="text-lg font-black text-[var(--color-on-surface)]">{party.paymentTermsDays} Days</p>
             <span className="text-xs text-[var(--color-on-surface-variant)] font-medium">
               Limit: {formatCurrency(party.creditLimit, currencySymbol)}
             </span>
@@ -132,17 +132,17 @@ export function PartyStatementSummaryCards({ party, statement, currencySymbol }:
       </div>
 
       {/* Card 3: Total Invoiced Turnover */}
-      <div className="p-5 rounded-[24px] bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] shadow-xs flex flex-col justify-between">
+      <div className="p-4 rounded-[18px] bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] shadow-xs flex flex-col justify-between">
         <div className="flex items-center justify-between">
           <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
             Total Invoiced Turnover
           </span>
-          <div className="w-8 h-8 rounded-full bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)] flex items-center justify-center">
-            <FileText className="w-4 h-4" />
+          <div className="w-7 h-7 rounded-full bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)] flex items-center justify-center">
+            <FileText className="w-3.5 h-3.5" />
           </div>
         </div>
-        <div className="mt-2">
-          <p className="text-2xl font-black text-[var(--color-primary)] tracking-tight">
+        <div className="mt-1.5">
+          <p className="text-lg font-black text-[var(--color-primary)] tracking-tight">
             {formatCurrency(kpis.salesBilled + kpis.purchasesBilled, currencySymbol)}
           </p>
           <p className="text-xs text-[var(--color-on-surface-variant)] mt-1">
@@ -156,17 +156,17 @@ export function PartyStatementSummaryCards({ party, statement, currencySymbol }:
       </div>
 
       {/* Card 4: Total Payments Settled */}
-      <div className="p-5 rounded-[24px] bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] shadow-xs flex flex-col justify-between">
+      <div className="p-4 rounded-[18px] bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] shadow-xs flex flex-col justify-between">
         <div className="flex items-center justify-between">
           <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
             Total Payments Cleared
           </span>
-          <div className="w-8 h-8 rounded-full bg-[var(--color-success-container)] text-[var(--color-on-success-container)] flex items-center justify-center">
-            <Receipt className="w-4 h-4" />
+          <div className="w-7 h-7 rounded-full bg-[var(--color-success-container)] text-[var(--color-on-success-container)] flex items-center justify-center">
+            <Receipt className="w-3.5 h-3.5" />
           </div>
         </div>
-        <div className="mt-2">
-          <p className="text-2xl font-black text-[var(--color-success)] tracking-tight">
+        <div className="mt-1.5">
+          <p className="text-lg font-black text-[var(--color-success)] tracking-tight">
             {formatCurrency(kpis.paymentsIn + kpis.paymentsOut, currencySymbol)}
           </p>
           <p className="text-xs text-[var(--color-on-surface-variant)] mt-1">

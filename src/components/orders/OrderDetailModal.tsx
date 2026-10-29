@@ -126,9 +126,13 @@ export function OrderDetailModal({
 
   return (
     <div className="fixed inset-0 z-50 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="bg-[var(--color-surface)] rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl border border-[var(--color-outline-variant)] animate-in fade-in zoom-in-95 duration-150">
+      {/* MODAL BOUNDS RULE — the card NEVER grows past the viewport: capped at
+          90vh as a flex column, header/footer pinned (shrink-0), BODY SCROLLS
+          (no matter how many stage documents/lines pile up). Same shell every
+          other modal in the app uses. */}
+      <div className="bg-[var(--color-surface)] rounded-3xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl border border-[var(--color-outline-variant)] animate-in fade-in zoom-in-95 duration-150">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
+        <div className="px-6 py-4 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)] shrink-0">
           <div>
             <span
               className={`inline-block px-2.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider mb-1 ${
@@ -159,8 +163,8 @@ export function OrderDetailModal({
           </div>
         </div>
 
-        {/* Body */}
-        <div className="p-6 space-y-5">
+        {/* Body — the scrollable region */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-5">
           {/* Party (plain — no card) */}
           <div>
             <p className="text-xs font-black text-[var(--color-on-surface)]">
@@ -449,8 +453,11 @@ export function OrderDetailModal({
             entityId={selectedOrder.id}
           />
 
-          {/* Actions Footer */}
-          <div className="flex items-center justify-end pt-3 border-t border-[var(--color-outline-variant)]">
+        </div>
+
+        {/* Actions Footer — pinned BELOW the scroll region (always reachable,
+            no matter how far the body is scrolled) */}
+        <div className="flex items-center justify-end px-6 py-3 border-t border-[var(--color-outline-variant)] shrink-0">
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -474,7 +481,6 @@ export function OrderDetailModal({
                 </button>
               )}
             </div>
-          </div>
         </div>
       </div>
 

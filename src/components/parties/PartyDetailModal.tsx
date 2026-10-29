@@ -74,9 +74,10 @@ export function PartyDetailModal({
             sales: sales || localDb.getSales(),
             purchases: purchases || localDb.getPurchases(),
             transactions,
+            saleInvoices,
           })
         : { party: party as Party, openingBalance: 0, rows: [] },
-    [party, sales, purchases, transactions],
+    [party, sales, purchases, transactions, saleInvoices],
   );
 
   if (!isOpen || !party) return null;
@@ -403,12 +404,13 @@ export function PartyDetailModal({
           );
           if (invoice) {
             return (
-              <SaleInvoiceDetailModal
-                isOpen
-                onClose={() => setDetailEntry(null)}
-                invoice={invoice}
-                settings={settings}
-              />
+            <SaleInvoiceDetailModal
+              isOpen
+              onClose={() => setDetailEntry(null)}
+              invoice={invoice}
+              settings={settings}
+              sales={sales || localDb.getSales()}
+            />
             );
           }
           const accountName = detailEntry.transaction.accountId

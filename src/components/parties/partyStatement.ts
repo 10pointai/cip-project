@@ -1,4 +1,4 @@
-import { Party, Purchase, Sale, Transaction } from '../../types';
+import { Party, Purchase, Sale, SaleInvoice, Transaction } from '../../types';
 
 /**
  * PARTY STATEMENT ROW MODEL — the document-centric party ledger.
@@ -99,12 +99,15 @@ function resolveOrderVouchers(
 
 const isActive = (t?: Transaction) => !!t && t.status !== 'cancelled';
 
-function itemSummary(items?: Array<{ quantity: number; unit?: string; itemName?: string; rate?: number }>): string {
+function itemSummary(
+  items?: Array<{ quantity: number; unit?: string; itemName?: string; itemCode?: string }>,
+): string {
   if (!items || items.length === 0) return '';
   const MAX = 3;
+  // Sales-table parity: `itemName (qty unit)` per line
   const parts = items.slice(0, MAX).map((li) => {
-    const name = li.itemName || 'Item';
-    return `${li.quantity.toLocaleString('en-IN')}${li.unit ? ` ${li.unit}` : ''} ${name}`;
+    const qty = `${li.quantity.toLocaleString('en-IN')}${li.unit ? ` ${li.unit}` : ''}`;
+    return `${li.itemName || 'Item'} (${qty})`;
   });
   if (items.length > MAX) parts.push(`+${items.length - MAX} more`);
   return parts.join(', ');
@@ -121,6 +124,11 @@ export function buildPartyStatement(input: {
   sales?: Sale[];
   purchases?: Purchase[];
   transactions?: Transaction[];
+  /** Consolidated sales invoices (CINV) — pure documents, NOT ledger rows.
+   *  Any invoice-stamped voucher that would otherwise fall through to the
+   *  standalone-voucher path is dropped here; the party view's Invoices tab
+   *  presents the documents instead. */
+  saleInvoices?: SaleInvoice[];
 }): PartyStatement {
   const { party } = input;
   const sales = (input.sales || []).filter((s) => s.partyId === party.id);
@@ -245,8 +253,28 @@ export function buildPartyStatement(input: {
     internalVoucherIds.add(`txn-${p.id}-bill`);
     internalVoucherIds.add(`txn-${p.id}-pay`);
   }
+  // Consolidated sales invoices are NOT ledger rows (the invoice document is
+  // a pure entry — each member order's sale_invoice journal already carries
+  // the receivable). Invoice-stamped vouchers that reach the standalone path
+  // (legacy/manual journal entries referencing a CINV number) are excluded
+  // below; payment-type receipts the invoice produced stay visible — money
+  // received is a ledger event.
+  const invoiceNumbers = new Set(
+    (input.saleInvoices || []).map((si) => si.invoiceNumber).filter(Boolean),
+  );
+  const invoiceVoucherIds = new Set<string>();
+  for (const si of input.saleInvoices || []) {
+    if (si.invoiceVoucherId) invoiceVoucherIds.add(si.invoiceVoucherId);
+    invoiceVoucherIds.add(`txn-${si.id}-inv`);
+  }
+  const isInvoiceVoucher = (t: Transaction) =>
+    t.type === 'sale_invoice' &&
+    (invoiceVoucherIds.has(t.id) ||
+      invoiceNumbers.has(t.referenceNumber || '') ||
+      invoiceNumbers.has(t.voucherNumber || ''));
+
   const otherTxns = transactions.filter(
-    (t) => t.partyId === party.id && !internalVoucherIds.has(t.id),
+    (t) => t.partyId === party.id && !internalVoucherIds.has(t.id) && !isInvoiceVoucher(t),
   );
 
   for (const t of otherTxns) {
@@ -383,6 +411,32 @@ export function ledgerMoneySplit(entry: PartyLedgerEntry): LedgerMoneySplit {
   if (entry.kind === 'sale') return { sale: entry.documentAmount, purchase: 0, paidIn: 0, paidOut: 0 };
   if (entry.kind === 'purchase') return { sale: 0, purchase: entry.documentAmount, paidIn: 0, paidOut: 0 };
   return { sale: 0, purchase: 0, paidIn: 0, paidOut: 0 };
+}
+
+/** The row's DOC ID — the number the ledger's Doc Id column shows, mirroring
+ *  the sales list table: the CURRENT stage's own number for orders (sales
+ *  labels bare serials `RST 0001` and quotation-stage rows `Quotation <num>`;
+ *  purchases show their stage number verbatim — RFQ/PO/GRN/bare serial, RST is
+ *  a sales term); payment / manual-voucher rows show their receipt/voucher
+ *  number. */
+export function entryDocId(entry: PartyLedgerEntry): string {
+  if (entry.kind === 'sale' || entry.kind === 'purchase') {
+    const lines = entryStageLines(entry);
+    const latest = lines[lines.length - 1];
+    if (!latest || !latest.number) return entry.documentNumber;
+    const sn = latest.number;
+    if (entry.kind === 'sale') {
+      if (latest.stageType === 'sales_order') {
+        return /^\d+$/.test(String(sn)) ? `RST ${sn}` : sn;
+      }
+      if (latest.stageType === 'quotation') {
+        return `Quotation ${sn}`;
+      }
+      return sn; // legacy proforma/invoice-stage rows: verbatim
+    }
+    return sn; // purchase: own stage number, verbatim
+  }
+  return entry.documentNumber;
 }
 
 /** One line of the ledger's STACKED Stages column: every stage the

@@ -1,23 +1,19 @@
 import React, { useMemo, useState } from 'react';
 import {
   Search,
-  FileText,
-  ArrowDownLeft,
-  ArrowUpRight,
   Building2,
-  Receipt,
-  ClipboardList,
   ChevronRight,
 } from 'lucide-react';
 import { Party } from '../../types';
 import { formatCurrency, formatDate, formatDateTime } from '../../utils/formatters';
-import { PartyLedgerEntry, PartyStatement, formatLedgerBalance, entryStageLines, ledgerMoneySplit, registeredAtTs } from './partyStatement';
+import { PartyLedgerEntry, PartyStatement, formatLedgerBalance, entryStageLines, entryDocId, ledgerMoneySplit, registeredAtTs } from './partyStatement';
 
 /**
- * Statement of Account & Ledger — the doc-centric party list. One row per
- * sale, purchase and payment (plus standalone vouchers), each row
- * click-through to its full story; the opening-balance row seeds the Dr/Cr
- * running balance.
+ * Statement of Account & Ledger — the doc-centric party list, shaped like the
+ * sales list table: Doc Id (number + registration date/time), Stage, the
+ * item lines (sales-table format), then Amount / Payment / Running Balance.
+ * Each row click-through to its full story; the opening-balance row seeds
+ * the Dr/Cr running balance.
  */
 interface PartyStatementLedgerProps {
   party: Party;
@@ -42,24 +38,6 @@ const FILTER_TABS: Array<{ id: FilterChip; label: string }> = [
   { id: 'payments_in', label: 'Payments In' },
   { id: 'payments_out', label: 'Payments Out' },
 ];
-
-/** Row-level icon + tint per document kind/type */
-function rowVisual(entry: PartyLedgerEntry): { Icon: any; tone: string } {
-  if (entry.kind === 'sale') return { Icon: FileText, tone: 'text-[var(--color-primary)]' };
-  if (entry.kind === 'purchase') return { Icon: ClipboardList, tone: 'text-[var(--color-secondary)]' };
-  if (entry.kind === 'payment') {
-    return entry.transaction?.type === 'payment_in'
-      ? { Icon: ArrowDownLeft, tone: 'text-[var(--color-success)]' }
-      : { Icon: ArrowUpRight, tone: 'text-[var(--color-error)]' };
-  }
-  const type = entry.transaction?.type;
-  if (type === 'payment_in' || type === 'payment_out') {
-    return type === 'payment_in'
-      ? { Icon: ArrowDownLeft, tone: 'text-[var(--color-success)]' }
-      : { Icon: ArrowUpRight, tone: 'text-[var(--color-error)]' };
-  }
-  return { Icon: Receipt, tone: 'text-[var(--color-on-surface-variant)]' };
-}
 
 // Per-stage-category color coding of the Stages column (user rule):
 //   Quotation / RFQ          -> light blue
@@ -128,8 +106,8 @@ export function PartyStatementLedger({
     <div className="bg-[var(--color-surface-container-lowest)] rounded-[24px] border border-[var(--color-outline-variant)] shadow-xs overflow-clip space-y-3">
       {/* Table Header Controls — heading, then the search + filter row */}
       <div className="p-4 border-b border-[var(--color-outline-variant)] flex flex-col gap-3">
-        <h3 className="text-sm font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
-          Statement of Account & Ledger
+          <h3 className="text-sm font-bold text-[var(--color-on-surface)] uppercase tracking-wider">
+          Party Ledger
         </h3>
 
         <div className="flex items-center gap-3 flex-wrap">
@@ -145,23 +123,18 @@ export function PartyStatementLedger({
             />
           </div>
 
-          {/* Filter Pills */}
-          <div className="flex items-center gap-1 bg-[var(--color-surface-container)] p-0.5 rounded-full border border-[var(--color-outline-variant)] text-xs overflow-x-auto max-w-full">
+          {/* Filter dropdown (was a pill row) */}
+          <select
+            value={filterType}
+            onChange={(e) => setFilterType(e.target.value as FilterChip)}
+            className="px-3.5 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-semibold text-[var(--color-on-surface-variant)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] shrink-0 self-start cursor-pointer"
+          >
             {FILTER_TABS.map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setFilterType(tab.id)}
-                className={`px-3 py-1 rounded-full font-semibold transition-colors whitespace-nowrap ${
-                  filterType === tab.id
-                    ? 'bg-[var(--color-surface-container-lowest)] text-[var(--color-primary)] shadow-xs'
-                    : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
-                }`}
-              >
+              <option key={tab.id} value={tab.id}>
                 {tab.label}
-              </button>
+              </option>
             ))}
-          </div>
+          </select>
         </div>
       </div>
 
@@ -171,10 +144,9 @@ export function PartyStatementLedger({
         <table className="w-full text-left text-xs border-collapse min-w-[1000px]">
           <thead className={`sticky ${stickyHeaderOffset} z-20`}>
             <tr className="bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-              <th className="py-3 px-3 w-[150px]">Type</th>
+              <th className="py-3 px-4">Doc Id</th>
+              <th className="py-3 px-3 w-[170px]">Stage</th>
               <th className="py-3 px-3">Particulars</th>
-              <th className="py-3 px-3">Stages</th>
-              <th className="py-3 px-3">Reference</th>
               <th className="py-3 px-3 text-right w-[112px]">Amount</th>
               <th className="py-3 px-3 text-right w-[112px]">Payment</th>
               <th className="py-3 px-3 text-right">Running Balance</th>
@@ -185,7 +157,7 @@ export function PartyStatementLedger({
             {/* Document-ledger rows */}
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={8} className="py-10 text-center text-xs text-[var(--color-on-surface-variant)] italic">
+                <td colSpan={7} className="py-10 text-center text-xs text-[var(--color-on-surface-variant)] italic">
                   {statement.rows.length === 0
                     ? 'No sales, purchases or payments recorded for this party yet.'
                     : 'No documents found matching your search or active filter.'}
@@ -197,7 +169,6 @@ export function PartyStatementLedger({
                 // running balance is sequenced in (partyStatement.ts).
                 .sort((a, b) => registeredAtTs(b) - registeredAtTs(a))
                 .map((entry) => {
-                const { Icon, tone } = rowVisual(entry);
                 const isOrder = entry.kind === 'sale' || entry.kind === 'purchase';
                 const stageLines = entryStageLines(entry);
                 const money = ledgerMoneySplit(entry);
@@ -261,15 +232,15 @@ export function PartyStatementLedger({
                     onClick={() => (isOrder ? onOpenOrder(entry) : onOpenVoucher(entry))}
                     className="hover:bg-[var(--color-surface-container)]/50 transition-colors cursor-pointer group"
                   >
-                    {/* Type (icon + label — kept its own column, apart from the
-                        particulars text) */}
-                    <td className="py-3 px-3">
-                      <span className={`inline-flex items-center gap-1.5 font-bold text-[11px] uppercase tracking-wide ${tone}`}>
-                        <Icon className="w-3.5 h-3.5 shrink-0" />
-                        {entry.typeLabel}
-                      </span>
-                      {/* The row's creation timestamp (date + time) rides
-                          under the type label */}
+                    {/* Doc Id — the row's document number (sales-table parity):
+                        the current stage's own number for orders (`RST 0001`,
+                        `Quotation QUO-…`, purchase stage numbers verbatim) and
+                        the receipt/voucher number for payments; the
+                        registration timestamp rides beneath it */}
+                    <td className="py-3 px-4">
+                      <div className="font-bold text-[var(--color-on-surface)] truncate max-w-[220px]">
+                        {entryDocId(entry)}
+                      </div>
                       <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
                         {formatDateTime(
                           entry.sale?.createdAt || entry.purchase?.createdAt || entry.transaction?.createdAt,
@@ -277,16 +248,32 @@ export function PartyStatementLedger({
                         )}
                       </p>
                     </td>
-                    <td className="py-3 px-3 text-[var(--color-on-surface)] max-w-xs">
-                      <p className="font-medium text-[var(--color-on-surface)] truncate">
-                        {entry.particulars || '—'}
-                      </p>
-                    </td>
-                    {/* Stages — every issued stage with its document number,
-                        stacked; "—" for payments / standalone vouchers */}
-                    <td className="py-3 px-3 align-top">
+                    {/* Stage — every issued stage as stacked pills (orders);
+                        payments show their own Payment In / Payment Out chip */}
+                    <td className="py-3 px-3 align-top w-[170px] max-w-[200px]">
                       {stageLines.length === 0 ? (
-                        <span className="text-[var(--color-on-surface-variant)] font-mono">—</span>
+                        (() => {
+                          const type = entry.transaction?.type;
+                          const cls =
+                            type === 'payment_in'
+                              ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)] border border-[var(--color-success)]/20'
+                              : type === 'payment_out'
+                              ? 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)] border border-[var(--color-error)]/20'
+                              : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] border border-[var(--color-outline-variant)]';
+                          const label =
+                            type === 'payment_in'
+                              ? 'Payment In'
+                              : type === 'payment_out'
+                              ? 'Payment Out'
+                              : entry.typeLabel;
+                          return (
+                            <span
+                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider whitespace-nowrap ${cls}`}
+                            >
+                              {label}
+                            </span>
+                          );
+                        })()
                       ) : (
                         <div className="space-y-1">
                           {stageLines.map((s, idx) => {
@@ -295,7 +282,10 @@ export function PartyStatementLedger({
                             const tonePill = stagePillTone(s.stageType);
                             if (isCurrent) {
                               // The LATEST stage gets the filled highlight pill in
-                              // its category tone (blue / orange / green)
+                              // its category tone (blue / orange / green).
+                              // Sales Order pills show no number (user rule —
+                              // the Doc Id column already carries the RST).
+                              const showNumber = s.stageType !== 'sales_order' && !!s.number;
                               return (
                                 <span
                                   key={`${s.stageType}-${s.number}-${idx}`}
@@ -303,41 +293,75 @@ export function PartyStatementLedger({
                                   className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border whitespace-nowrap shadow-2xs ${tonePill} border-[var(--color-outline-variant)]/40`}
                                 >
                                   <span className="w-1.5 h-1.5 rounded-full bg-current shrink-0 animate-pulse"></span>
-                                  <span className="text-[10px] font-black tracking-wide truncate max-w-[52px]">
+                                  <span className="text-[10px] font-black tracking-wide truncate max-w-[110px]">
                                     {label}
                                   </span>
-                                  <span className="opacity-60">·</span>
-                                  <span className="font-mono text-[10px] font-black truncate max-w-[62px]">
-                                    {s.number}
-                                  </span>
+                                  {showNumber && (
+                                    <>
+                                      <span className="opacity-60">·</span>
+                                      <span className="font-mono text-[10px] font-black truncate max-w-[62px]">
+                                        {s.number}
+                                      </span>
+                                    </>
+                                  )}
                                 </span>
                               );
                             }
-                            // Earlier stages: same category tone, softened
+                            // Earlier stages: same category tone, softened.
+                            // Sales Order pills show no number either — the
+                            // Doc Id column carries the RST.
                             return (
                               <span
                                 key={`${s.stageType}-${s.number}-${idx}`}
                                 title={`${s.label} — issued ${s.date}`}
                                 className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full whitespace-nowrap overflow-hidden opacity-55 ${tonePill}`}
                               >
-                                <span className="text-[9px] font-semibold tracking-wide truncate max-w-[50px]">
+                                <span className="text-[9px] font-semibold tracking-wide truncate max-w-[104px]">
                                   {label}
                                 </span>
-                                <span className="opacity-60">·</span>
-                                <span className="font-mono text-[9px] font-semibold truncate max-w-[60px]">
-                                  {s.number}
-                                </span>
+                                {s.stageType !== 'sales_order' && !!s.number && (
+                                  <>
+                                    <span className="opacity-60">·</span>
+                                    <span className="font-mono text-[9px] font-semibold truncate max-w-[60px]">
+                                      {s.number}
+                                    </span>
+                                  </>
+                                )}
                               </span>
                             );
                           })}
                         </div>
                       )}
                     </td>
-                    <td className="py-3 px-3 font-mono text-[var(--color-on-surface-variant)] max-w-[140px] truncate">
-                      {entry.reference || '—'}
+                    {/* Particulars — order rows list their MATERIALS in the
+                        sales-table format: itemName (qty unit) + location chip;
+                        payments / vouchers keep their description */}
+                    <td className="py-3 px-3 max-w-xs">
+                      {isOrder ? (
+                        <div className="space-y-0.5 max-w-[240px]">
+                          {(entry.sale?.items || entry.purchase?.items || []).map((li, index) => (
+                            <div key={index} className="text-[var(--color-on-surface)] font-medium truncate flex items-center gap-1.5">
+                              <span>{li.itemName}</span>
+                              <span className="text-[10px] text-[var(--color-on-surface-variant)] font-bold">
+                                ({(Number(li.quantity) || 0).toLocaleString('en-IN')} {li.unit || ''})
+                              </span>
+                              {li.location && (
+                                <span
+                                  className="text-[9px] font-semibold px-1.5 py-0.2 rounded-md bg-[var(--color-surface-container-high)] text-[var(--color-secondary)] truncate max-w-[90px]"
+                                  title={li.location}
+                                >
+                                  {li.location}
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="font-medium text-[var(--color-on-surface)] truncate">
+                          {entry.particulars || '—'}
+                        </p>
+                      )}
                     </td>
-                    {/* Amount — Sales (Dr, green) and Purchases (Cr, red)
-                        clubbed into one column; color carries the side */}
                     <td className="py-3 px-2.5 text-right">
                       {(() => {
                         const val = money.sale || money.purchase;
@@ -383,20 +407,21 @@ export function PartyStatementLedger({
             )}
             {/* Opening Balance Row */}
             <tr className="bg-[var(--color-surface-container)]/40 font-semibold">
-              <td className="py-3 px-3">
-                <span className="inline-flex items-center gap-1 font-bold text-[var(--color-on-surface)]">
-                  <Building2 className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-                  Opening Balance
-                </span>
+              <td className="py-3 px-4">
+                <div className="font-bold text-[var(--color-on-surface)]">
+                  <span className="inline-flex items-center gap-1.5">
+                    <Building2 className="w-3.5 h-3.5 text-[var(--color-primary)]" />
+                    Opening Balance
+                  </span>
+                </div>
                 <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
                   {formatDate(party.createdAt)}
                 </p>
               </td>
+              <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">—</td>
               <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">
                 Initial balance registered ({party.openingBalanceType === 'to_receive' ? 'Receivable from Party' : 'Payable to Party'})
               </td>
-              <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">—</td>
-              <td className="py-3 px-3 font-mono text-[var(--color-outline)]">—</td>
               <td className="py-3 px-2.5 text-right font-mono text-[var(--color-surface-container-highest)]">—</td>
               <td className="py-3 px-2.5 text-right font-mono text-[var(--color-surface-container-highest)]">—</td>
               <td

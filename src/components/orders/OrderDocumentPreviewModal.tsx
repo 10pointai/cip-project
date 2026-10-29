@@ -91,7 +91,10 @@ export function OrderDocumentPreviewModal({
 
   return (
     <div id="printable-document-content-parent" className="fixed inset-0 z-50 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-      <div className="bg-[var(--color-surface)] rounded-3xl w-full max-w-4xl shadow-2xl border border-[var(--color-outline-variant)] flex flex-col my-8 animate-in fade-in zoom-in-95 duration-150">
+      {/* AUTO margins (my-auto): centre the card when it fits the viewport,
+          collapse to 0 margins when it's taller — every line of a long
+          document stays scroll-reachable (fixed my-8 cuts the top off). */}
+      <div className="bg-[var(--color-surface)] rounded-3xl w-full max-w-4xl shadow-2xl border border-[var(--color-outline-variant)] flex flex-col my-auto animate-in fade-in zoom-in-95 duration-150">
         {/* Top Bar (Non-Printable) */}
         <div className="px-6 py-4 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)] print:hidden">
           <div className="flex items-center gap-2">

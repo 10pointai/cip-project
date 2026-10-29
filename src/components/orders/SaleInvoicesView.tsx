@@ -131,6 +131,7 @@ export function SaleInvoicesView({ invoices, sales, parties, settings }: SaleInv
         onClose={() => setDetailId(null)}
         invoice={detail}
         settings={settings}
+        sales={sales}
       />
     </div>
   );

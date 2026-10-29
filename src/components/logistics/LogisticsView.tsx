@@ -763,15 +763,16 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
     <div className="space-y-6">
       {/* VEHICLE PROFILE PAGE — like the party/employee profiles: selecting a
           vehicle REPLACES the tab content with its full page (Back returns) */}
+      {/* VEHICLE PROFILE stays OPEN on Edit Vehicle — the profile resolves the
+          FRESH vehicle row from the fleet list every render (keyed on the held
+          id), so an edit saved from the modal updates the open page in place
+          (LIVE pattern, same as ItemDetailPage holding a detailItemId). */}
       {detailVehicle ? (
         <VehicleDetailPage
-          vehicle={detailVehicle}
+          vehicle={vehicles.find((v) => v.id === detailVehicle.id) || detailVehicle}
           sales={sales}
           onBack={() => setDetailVehicle(null)}
-          onEdit={(v) => {
-            setDetailVehicle(null);
-            handleOpenVehicleModal(v);
-          }}
+          onEdit={(v) => handleOpenVehicleModal(v)}
           onOpenRst={(saleId) => setViewingOrderSaleId(saleId)}
         />
       ) : (
@@ -1962,6 +1963,13 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
           </div>
         </div>
       )}
+      </>
+      )}
+
+      {/* Overlays BELOW mount OUTSIDE the branch — every section below is a
+          gated modal/overlay (vehicle edit, tyre inspector, EMI,expenses), so
+          they render while the VEHICLE PROFILE is open too: Edit Vehicle from
+          the profile keeps the profile behind the modal. */}
 
       {/* 3. ADD / EDIT VEHICLE & FINANCING MODAL */}
       {isVehicleModalOpen && (
@@ -2432,7 +2440,9 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
       {/* 6. VEHICLE MOUNTED TYRES DETAILED INSPECTOR */}
       {selectedVehicleForTyres && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-scrim)]/40 backdrop-blur-xs p-4 overflow-y-auto">
-          <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-xl border border-[var(--color-outline-variant)] max-w-2xl w-full overflow-hidden my-8">
+          {/* my-auto (not my-8): centres when short, collapses to 0 on overflow
+              so the card never clips its top on a short window */}
+          <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-xl border border-[var(--color-outline-variant)] max-w-2xl w-full overflow-hidden my-auto">
             <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
               <div className="text-left">
                 <h3 className="font-extrabold text-[var(--color-on-surface)] text-sm uppercase tracking-tight flex items-center gap-1.5">
@@ -3009,8 +3019,6 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
             </div>
           </div>
         </div>
-      )}
-      </>
       )}
       {/* LINKED SALE DETAILS — mounted OUTSIDE the detailVehicle branch: a RST
           opened from the vehicle profile shows ABOVE it, never behind */}
