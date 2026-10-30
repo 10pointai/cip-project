@@ -29,8 +29,9 @@ import {
   Layers,
   ChevronDown,
   Info,
+  MapPin,
 } from 'lucide-react';
-import { AppUser, UserRole, UserStatus, UserPermissions } from '../../types';
+import { AppUser, UserRole, UserStatus, UserPermissions, ItemLocation } from '../../types';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../common/Toast';
@@ -112,11 +113,85 @@ const PRESETS: Record<string, { label: string; permissions: Partial<UserPermissi
   },
 };
 
+/** Sub-permission picker: per-user inventory location assignment (2026-10-30).
+ *  Carried as permissions.inventory_location_ids on the user object. Empty
+ *  selection = FULL access to every location (backwards compatible); one or
+ *  more selections = the user's inventory view (items, stats, adjustments)
+ *  is restricted to those locations. Server enforces the same list. */
+const InventoryLocationScopeSection: React.FC<{
+  locations: ItemLocation[];
+  selectedIds: string[];
+  show: boolean;
+  onChange: (ids: string[]) => void;
+}> = ({ locations, selectedIds, show, onChange }) => {
+  if (!show || locations.length === 0) return null;
+  const isRestricted = selectedIds.length > 0;
+  const toggle = (id: string) => {
+    onChange(selectedIds.includes(id) ? selectedIds.filter((x) => x !== id) : [...selectedIds, id]);
+  };
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-1">
+        <h4 className="text-xs font-extrabold uppercase tracking-wider text-[var(--color-primary)] flex items-center gap-1.5">
+          <MapPin className="w-3.5 h-3.5" />
+          Inventory Location Access
+          <span className="text-[9px] font-mono text-[var(--color-on-surface-variant)] tracking-normal normal-case">SUB‑PERMISSION</span>
+        </h4>
+        <span
+          className={`px-2 py-0.5 rounded-full text-[9px] font-extrabold uppercase ${
+            isRestricted
+              ? 'bg-[var(--color-warning-container)] text-[var(--color-warning)]'
+              : 'bg-[var(--color-success-container)] text-[var(--color-success)]'
+          }`}
+        >
+          {isRestricted ? `${selectedIds.length} location${selectedIds.length === 1 ? '' : 's'} assigned` : 'All locations'}
+        </span>
+      </div>
+      <p className="text-[10px] text-[var(--color-on-surface-variant)] leading-snug">
+        {isRestricted
+          ? 'Restricted scope — only inventory at the assigned locations (stock, stats, adjustments) is visible to this user.'
+          : 'Leave all unchecked to grant this user access to every location.'}
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-40 overflow-y-auto p-1 border border-[var(--color-outline-variant)] rounded-xl">
+        {locations.map((loc) => {
+          const checked = selectedIds.includes(loc.id);
+          return (
+            <label
+              key={loc.id}
+              className={`flex items-start gap-2.5 p-2.5 rounded-xl border transition-all cursor-pointer ${
+                checked
+                  ? 'bg-[var(--color-primary-container)]/30 border-[var(--color-primary)]/40 text-[var(--color-on-surface)]'
+                  : 'bg-[var(--color-surface-container-low)] border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] opacity-70'
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={() => toggle(loc.id)}
+                className="mt-0.5 rounded text-[var(--color-primary)] focus:ring-[var(--color-primary)]"
+              />
+              <div className="min-w-0">
+                <p className="text-xs font-bold leading-tight truncate">{loc.name}</p>
+                {loc.code && (
+                  <p className="text-[10px] opacity-80 leading-tight mt-0.5 font-mono">{loc.code}</p>
+                )}
+              </div>
+            </label>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
 export function UserManagementView() {
   const { currentUser, hasPermission } = useAuth();
   const { showToast } = useToast();
 
   const [users, setUsers] = useState<AppUser[]>([]);
+  // Inventory location master — feeds the per-user location sub-permission
+  // picker (2026-10-30). Loaded once alongside the user directory.
+  const [locations, setLocations] = useState<ItemLocation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState<string>('all');
@@ -157,6 +232,7 @@ export function UserManagementView() {
     suggestedUsername: '',
     suggestedCode: '',
     permissions: { ...PRESETS.full_admin.permissions } as UserPermissions,
+    inventory_location_ids: [] as string[],
     notes: '',
   });
 
@@ -186,6 +262,14 @@ export function UserManagementView() {
 
     // Refresh every time the user visits this feature
     fetchUsers(false);
+    // Location master for the inventory sub-permission picker (non-fatal on
+    // failure — the picker simply renders empty).
+    api
+      .getLocations()
+      .then((res) => {
+        if (res.success) setLocations(res.data);
+      })
+      .catch((err) => console.warn('[UserManagement] Failed to load locations:', err));
 
     // Refresh when user returns to window/tab
     const handleFocus = () => {
@@ -246,7 +330,9 @@ export function UserManagementView() {
         role: formData.role,
         // USER & ACCESS CONTROL LOCK: manage_users is never grantable from this
         // UI (Super Admin only) — belt-and-braces before the server's own strip.
-        permissions: { ...formData.permissions, manage_users: false },
+        // inventory_location_ids is a sub-permission payload, not a boolean
+        // matrix switch — carried on the same permissions object.
+        permissions: { ...formData.permissions, manage_users: false, inventory_location_ids: formData.inventory_location_ids },
         notes: formData.notes.trim(),
         // HONEST PREVIEW: whatever the identifier card is showing right now
         // (custom-typed name, or the last server suggestion) is what we ask the
@@ -286,7 +372,7 @@ export function UserManagementView() {
           : {
               role: formData.role,
               // USER & ACCESS CONTROL LOCK: never grantable from this UI
-              permissions: { ...formData.permissions, manage_users: false },
+              permissions: { ...formData.permissions, manage_users: false, inventory_location_ids: formData.inventory_location_ids },
             }),
         notes: formData.notes.trim(),
       });
@@ -352,6 +438,7 @@ export function UserManagementView() {
       suggestedUsername: 'user.adm' + Math.floor(1000 + Math.random() * 9000),
       suggestedCode: 'ACT-' + Math.random().toString(36).substring(2, 8).toUpperCase(),
       permissions: { ...PRESETS.full_admin.permissions } as UserPermissions,
+      inventory_location_ids: [] as string[],
       notes: '',
     });
     setIsCreateModalOpen(true);
@@ -396,6 +483,7 @@ export function UserManagementView() {
       suggestedUsername: user.username,
       suggestedCode: user.activationCode || '',
       permissions: { ...user.permissions },
+      inventory_location_ids: [...(user.permissions.inventory_location_ids || [])],
       notes: user.notes || '',
     });
     setIsEditModalOpen(true);
@@ -581,7 +669,19 @@ export function UserManagementView() {
                 </tr>
               ) : (
                 filteredUsers.map((user) => {
-                  const activePermCount = Object.values(user.permissions || {}).filter(Boolean).length;
+                  // Count BOOLEAN matrix switches only — inventory_location_ids
+                  // rides on the same object but is a sub-permission array,
+                  // not a feature grant.
+                  const activePermCount = ALL_PERMISSION_KEYS.filter(
+                    (p) => !!user.permissions?.[p.key]
+                  ).length;
+                  // Location sub-permission readout: null = super admin (role
+                  // bypasses every scope), empty = all locations.
+                  const locIds = user.role === 'super_admin' ? null : (user.permissions?.inventory_location_ids || []);
+                  const locationScopeText =
+                    locIds && locIds.length > 0
+                      ? `${locIds.length} location${locIds.length === 1 ? '' : 's'} assigned`
+                      : 'All locations';
                   const isCurrentSessionUser = currentUser?.id === user.id;
 
                   return (
@@ -708,6 +808,14 @@ export function UserManagementView() {
                         </div>
                         <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
                           {user.role === 'super_admin' ? 'Full unrestricted root' : 'Granular module access'}
+                          {user.role !== 'super_admin' && (
+                            <>
+                              {' · '}
+                              <span className={locIds && locIds.length > 0 ? 'font-bold text-[var(--color-warning)]' : ''}>
+                                {locationScopeText}
+                              </span>
+                            </>
+                          )}
                         </p>
                       </td>
 
@@ -1078,10 +1186,19 @@ export function UserManagementView() {
                     );
                   })}
                 </div>
+
+                {/* Sub-permission: inventory location assignment (2026-10-30) —
+                    only meaningful when the Inventory & Stock feature is granted. */}
+                <InventoryLocationScopeSection
+                  locations={locations}
+                  selectedIds={formData.inventory_location_ids}
+                  show={!!formData.permissions.manage_inventory}
+                  onChange={(ids) => setFormData({ ...formData, inventory_location_ids: ids })}
+                />
               </div>
 
               {/* Notes */}
-             
+
 
               {/* Modal Footer */}
               <div className="pt-4 border-t border-[var(--color-outline-variant)] flex items-center justify-end gap-2.5">
@@ -1209,8 +1326,9 @@ export function UserManagementView() {
                       type="button"
                       onClick={() => setFormData({
                         ...formData,
-                        // manage_users stays forced-false — it is not grantable here
-                        permissions: ALL_PERMISSION_KEYS.reduce((acc, p) => ({ ...acc, [p.key]: p.key !== 'manage_users' }), {} as UserPermissions),
+                        // manage_users stays forced-false — it is not grantable here;
+                        // location scope ids ride along untouched (sub-permission).
+                        permissions: { ...ALL_PERMISSION_KEYS.reduce((acc, p) => ({ ...acc, [p.key]: p.key !== 'manage_users' }), {} as UserPermissions), inventory_location_ids: formData.inventory_location_ids },
                       })}
                       className="text-[10px] text-[var(--color-primary)] hover:underline font-bold"
                     >
@@ -1222,7 +1340,7 @@ export function UserManagementView() {
                       onClick={() => setFormData({
                         ...formData,
                         // clear-all is total (manage_users is anyway never grantable)
-                        permissions: ALL_PERMISSION_KEYS.reduce((acc, p) => ({ ...acc, [p.key]: false }), {} as UserPermissions),
+                        permissions: { ...ALL_PERMISSION_KEYS.reduce((acc, p) => ({ ...acc, [p.key]: false }), {} as UserPermissions), inventory_location_ids: formData.inventory_location_ids },
                       })}
                       className="text-[10px] text-[var(--color-on-surface-variant)] hover:underline font-bold"
                     >
@@ -1275,6 +1393,18 @@ export function UserManagementView() {
                     );
                   })}
                 </div>
+
+                {/* Sub-permission: inventory location assignment (2026-10-30).
+                    Hidden for Super Admin targets — their role bypasses every
+                    scope server-side and their matrix is server-managed. */}
+                {editingUser?.role !== 'super_admin' && (
+                  <InventoryLocationScopeSection
+                    locations={locations}
+                    selectedIds={formData.inventory_location_ids}
+                    show={!!formData.permissions.manage_inventory}
+                    onChange={(ids) => setFormData({ ...formData, inventory_location_ids: ids })}
+                  />
+                )}
               </div>
 
               {/* Notes removed from the edit modal (user rule) — formData.notes

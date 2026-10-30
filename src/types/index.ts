@@ -890,6 +890,13 @@ export interface UserPermissions {
   manage_evidence: boolean;
   manage_users: boolean;
   manage_settings: boolean;
+  /** Sub-permission: inventory location scoping (2026-10-30). The list holds
+   *  item_locations ids the user may see/operate on. ABSENT or EMPTY array =
+   *  FULL access to every location (backwards compatible — existing users have
+   *  no entries). super_admin is always unrestricted regardless of this list.
+   *  Enforced server-side on items / locations / stock-adjustments reads and
+   *  writes; item aggregates are recomputed from the allowed mapping rows. */
+  inventory_location_ids?: string[];
 }
 
 export interface AppUser {

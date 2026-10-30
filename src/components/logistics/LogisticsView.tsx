@@ -941,8 +941,9 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                 <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
                   {/* Slip No column REMOVED (2026-10-28) — details/thermal ticket keep it */}
                   <th className="py-3.5 px-4">Date &amp; Time</th>
-                  <th className="py-3.5 px-3">RST Number</th>
+                  <th className="py-3.5 px-3 min-w-[100px] max-w-[120px]">RST Number</th>
                   <th className="py-3.5 px-3 min-w-[150px]">Vehicle</th>
+                  <th className="py-3.5 px-3 min-w-[150px]">Driver</th>
                   <th className="py-3.5 px-3">Party</th>
                   <th className="py-3.5 px-3 text-right">Load (MT)</th>
                   <th className="py-3.5 px-3 text-right">Distance (km)</th>
@@ -956,7 +957,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
               <tbody className="divide-y divide-[var(--color-outline-variant)]">
                 {filteredSlips.length === 0 ? (
                   <tr>
-                    <td colSpan={11} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                    <td colSpan={12} className="py-12 text-center text-[var(--color-on-surface-variant)]">
                       <FileText className="h-8 w-8 text-[var(--color-outline)] mx-auto mb-2" />
                       <p className="text-xs font-bold uppercase">No trip slips found matching filters</p>
                     </td>
@@ -983,7 +984,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                           {slip.date}
                           <span className="text-[10px] block font-medium">@ {slip.time}</span>
                         </td>
-                        <td className="py-3.5 px-3 min-w-[140px]">
+                        <td className="py-3.5 px-3 min-w-[100px] max-w-[120px]">
                           {hasOrderLink ? (
                             <button
                               type="button"
@@ -1010,7 +1011,9 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                         </td>
                         <td className="py-3.5 px-3 min-w-[150px]">
                           <span className="font-mono font-black text-[var(--color-primary)] whitespace-nowrap block">{slip.vehicleNo}</span>
-                          <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)] flex items-center gap-1 whitespace-nowrap">
+                        </td>
+                        <td className="py-3.5 px-3 min-w-[150px]">
+                          <span className="font-semibold text-[var(--color-on-surface)] flex items-center gap-1 whitespace-nowrap">
                             <User className="h-3 w-3 text-[var(--color-outline)] shrink-0" />
                             {slip.driverName || '—'}
                           </span>

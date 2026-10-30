@@ -25,6 +25,13 @@ import { getConnectionStatus, isMysqlConfigured, testMysqlConnection } from './s
 import { runMysqlMigrations } from './server/mysql/migrations';
 import { getStorageStatus } from './server/services/storage';
 import { resolveTokenUser } from './server/middleware/auth';
+import {
+  resolveInventoryScope,
+  filterItemsForScope,
+  filterLocationsForScope,
+  filterStockAdjustmentsForScope,
+  type InventoryScope,
+} from './server/services/locationScope';
 import { startEmiScheduler } from './server/services/emiScheduler';
 
 const app = express();
@@ -132,13 +139,29 @@ app.get('/api/sync', async (req, res) => {
     }
 
     const refreshedSnapshot = serverDb.getFullSnapshot();
+    // LOCATION SCOPE (user rule 2026-10-30): the per-user inventory scoping is
+    // applied on the synced snapshot as well, so clients hydrated through the
+    // legacy sync path can never hold items / locations / adjustments from an
+    // unassigned location. (Unauthenticated callers only receive `settings`.)
+    let snapshotData: Record<string, unknown> = {
+      ...refreshedSnapshot,
+      users: refreshedSnapshot.users.map(({ passwordHash: _ph, activationCode: _ac, ...safeUser }) => safeUser),
+    };
+    const scope: InventoryScope = resolveInventoryScope(tokenUser);
+    if (scope.restricted) {
+      snapshotData = {
+        ...snapshotData,
+        items: filterItemsForScope(refreshedSnapshot.items, scope),
+        locations: filterLocationsForScope(refreshedSnapshot.locations, scope),
+        stockAdjustments: refreshedSnapshot.stockAdjustments
+          ? filterStockAdjustmentsForScope(refreshedSnapshot.stockAdjustments as any, scope)
+          : refreshedSnapshot.stockAdjustments,
+      };
+    }
     res.json({
       success: true,
       timestamp: new Date().toISOString(),
-      data: {
-        ...refreshedSnapshot,
-        users: refreshedSnapshot.users.map(({ passwordHash: _ph, activationCode: _ac, ...safeUser }) => safeUser),
-      },
+      data: snapshotData,
     });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });

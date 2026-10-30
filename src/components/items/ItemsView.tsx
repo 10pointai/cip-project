@@ -492,15 +492,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
           )}
 
           {/* Quick Adjust Stock Button */}
-          <button
-            type="button"
-            onClick={() => handleOpenAdjustmentModal()}
-            className="flex items-center gap-1.5 px-3.5 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] hover:bg-[var(--color-surface-container)] text-[var(--color-on-surface)] font-bold text-xs rounded-full shadow-xs transition-colors hover:border-[var(--color-primary)]/50"
-            title="Adjust Material Stock (Wastage / Audit / Correction)"
-          >
-            <SlidersHorizontal className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-            <span>Adjust Stock</span>
-          </button>
+          
 
           <button
             type="button"
@@ -651,32 +643,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                   </select>
                 </div>
 
-                <div className="flex items-center bg-[var(--color-surface-container)] p-0.5 rounded-full border border-[var(--color-outline-variant)]">
-                  <button
-                    type="button"
-                    onClick={() => setViewMode('table')}
-                    className={`p-1.5 rounded-full transition-colors ${
-                      viewMode === 'table'
-                        ? 'bg-[var(--color-surface-container-lowest)] text-[var(--color-primary)] shadow-xs'
-                        : 'text-[var(--color-outline)] hover:text-[var(--color-on-surface)]'
-                    }`}
-                    title="Table View"
-                  >
-                    <ListIcon className="w-4 h-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setViewMode('cards')}
-                    className={`p-1.5 rounded-full transition-colors ${
-                      viewMode === 'cards'
-                        ? 'bg-[var(--color-surface-container-lowest)] text-[var(--color-primary)] shadow-xs'
-                        : 'text-[var(--color-outline)] hover:text-[var(--color-on-surface)]'
-                    }`}
-                    title="Cards View"
-                  >
-                    <LayoutGrid className="w-4 h-4" />
-                  </button>
-                </div>
 
                 <div className="flex items-center gap-1">
                   <button

@@ -6,6 +6,16 @@ import { DEFAULT_USER_PERMISSIONS } from '../seedData';
 
 export const usersRouter = Router();
 
+// Sanitize the inventory-location sub-permission (2026-10-30) — coerced to a
+// deduped string[]; any non-array payload is DROPPED so a malformed request
+// can never persist junk (and dropping reverts to "full access", never to a
+// broken scope).
+function sanitizeInventoryLocationIds(permissions: unknown): string[] | undefined {
+  const raw = (permissions as any)?.inventory_location_ids;
+  if (!Array.isArray(raw)) return undefined;
+  return Array.from(new Set(raw.filter((v): v is string => typeof v === 'string' && v.length > 0)));
+}
+
 // Protect all user management endpoints
 usersRouter.use(authenticateToken);
 usersRouter.use(requirePermission('manage_users'));
@@ -85,6 +95,10 @@ usersRouter.post('/', async (req: AuthenticatedRequest, res: Response) => {
       ...(permissions || DEFAULT_USER_PERMISSIONS),
       manage_users: false as boolean,
     };
+    const sanitizedLocationIds = sanitizeInventoryLocationIds(permissions);
+    if (sanitizedLocationIds) {
+      requestedPermissions.inventory_location_ids = sanitizedLocationIds;
+    }
 
     const newUser = await serverDb.createUserAsync({
       fullName,
@@ -147,6 +161,14 @@ usersRouter.put('/:id', async (req: AuthenticatedRequest, res: Response) => {
         : permissions !== undefined
         ? { ...permissions, manage_users: false as boolean }
         : existing.permissions;
+    // Sub-permission hygiene: normalize (or drop, reverting to full access) the
+    // location ids on an incoming matrix update; an omitted array keeps the
+    // previously stored assignment.
+    if (existing.role !== 'super_admin' && permissions !== undefined && safePermissions !== existing.permissions) {
+      const sanitizedLocationIds = sanitizeInventoryLocationIds(permissions);
+      (safePermissions as any).inventory_location_ids =
+        sanitizedLocationIds ?? existing.permissions?.inventory_location_ids;
+    }
 
     const updated = await serverDb.updateUserAsync(id, {
       fullName: fullName !== undefined ? fullName : existing.fullName,
