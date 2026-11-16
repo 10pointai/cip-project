@@ -51,7 +51,91 @@ export type VoucherType =
   | 'debit_note'
   | 'credit_note';
 
-export type ItemType = 'product' | 'service';
+export type ItemType = 'product' | 'service' | 'asset';
+
+/**
+ * TRACKABLE INVENTORY UNIT (2026-11-13) — one row per PHYSICAL unit of an
+ * `asset`-type item (a tyre, a battery, a paver machine). The asset item is
+ * the catalog header (serial-register of its units below); units themselves
+ * carry every fact. GOLDEN RULE §2: references are FKs only (item_id,
+ * location_id, vehicle_id, party_id / supplier, sale_id) — display strings
+ * (itemName, vehicleNo, supplierName, locationName) are JOINed at read time.
+ * Aggregate stock NEVER applies to asset items: the register IS the count
+ * (COUNT units WHERE status = 'in_stock'), computed by JOIN.
+ */
+export type InventoryUnitStatus = 'in_stock' | 'deployed' | 'maintenance' | 'sold' | 'scrapped';
+
+/**
+ * USER-DEFINED ATTRIBUTE KEY (serialized inventory, 2026-11-16): a serialized
+ * item (tyre, battery, machinery...) declares WHICH per-unit fields exist on
+ * its register. Fixed facts stay columns (serial, supplier, purchase date,
+ * cost); everything else is a key the item creator adds — each key is typed
+ * (text/number/date/select) and optionally required per unit entry.
+ */
+export interface ItemAttributeKey {
+  key: string; // stable slug — the unit's attribute map key
+  label: string; // form + column header label
+  type: 'text' | 'number' | 'date' | 'select';
+  options?: string[]; // select only — the pick-list values
+  required?: boolean; // mandatory when adding/editing a unit entry
+}
+
+export interface InventoryUnit {
+  id: string;
+  itemId: string; // FK items (type 'asset' only)
+  serialNumber: string; // unique within the item master (per-item scope)
+  status: InventoryUnitStatus; // lifecycle: entered → deployed/maintenance → sold|scrapped
+  // Storage / deployment context (FKs; at most one active context per status)
+  locationId?: string; // FK item_locations — where it sits when in stock
+  vehicleId?: string; // FK vehicles — mounted/serviced by (deployed units)
+  position?: string; // mount position: FL / FR / RL / RR / spare / cab-wiper...
+  fitOdometer?: number; // vehicle odometer at fitment (numeric snapshot)
+  // Procurement facts (numeric snapshots per documentation §2)
+  supplierId?: string; // FK parties
+  purchaseDate?: string;
+  purchaseCost?: number;
+  warrantyExpiry?: string;
+  // USER-DEFINED ATTRIBUTES (2026-11-16): values keyed by the owning item's
+  // declared ItemAttributeKey list (tyre → brand/size, battery → volts...)
+  attributes?: Record<string, string | number>;
+  // Purchase linkage (FK to the purchase that received this unit; 2026-11-16)
+  purchaseId?: string;
+  // Sale linkage (FK sales) — set when the unit leaves via the sale ladder
+  saleId?: string;
+  // Condition + narrative
+  condition?: 'excellent' | 'good' | 'worn' | 'damaged';
+  notes?: string;
+  createdAt: string;
+  updatedAt?: string;
+
+  // Display copies — JOIN-resolved at read time, display-only, never
+  // authoritative (Golden Rule §2: renames propagate on every read).
+  itemName?: string;
+  itemCode?: string;
+  locationName?: string;
+  vehicleNo?: string;
+  supplierName?: string;
+  saleNumber?: string;
+}
+
+/** Append-only lifecycle log for a unit (mirrors the movements ledger). */
+export type InventoryUnitEventType = 'entered' | 'deployed' | 'returned' | 'maintenance' | 'scrapped' | 'sold' | 'restored';
+
+export interface InventoryUnitEvent {
+  id: string;
+  unitId: string; // FK inventory_units
+  date: string; // event timestamp (ISO)
+  type: InventoryUnitEventType;
+  notes?: string; // narrative (renames never break it)
+  // Context facts as of the event (FKs + numeric snapshots)
+  vehicleId?: string;
+  position?: string;
+  odometer?: number;
+  locationId?: string;
+  saleId?: string;
+  supplierId?: string;
+  createdAt: string;
+}
 
 export interface ItemCategory {
   id: string;
@@ -84,7 +168,7 @@ export interface ItemLocation {
 export interface StockMovementLog {
   id: string;
   date: string;
-  type: 'purchase_inward' | 'production_output' | 'production_consumed' | 'sale_dispatch' | 'opening' | 'reconciliation_in' | 'reconciliation_out' | 'adjustment_increase' | 'adjustment_decrease' | 'dispatch_reversal' | 'inward_reversal';
+  type: 'purchase_inward' | 'production_output' | 'production_consumed' | 'production_consumed_reversal' | 'sale_dispatch' | 'opening' | 'reconciliation_in' | 'reconciliation_out' | 'adjustment_increase' | 'adjustment_decrease' | 'dispatch_reversal' | 'inward_reversal';
   quantity: number; // positive for additions, negative for deductions
   balanceAfter: number;
   // Actual-cost snapshots (facts-as-of-event; numeric snapshots per documentation §2):
@@ -97,6 +181,8 @@ export interface StockMovementLog {
   valuationRateAfter?: number;
   referenceNumber?: string;
   referenceId?: string; // FK to the source document master (sale/purchase id)
+  locationId?: string; // FK to the item_locations master (resolved server-side)
+  locationName?: string; // display resolved with a JOIN at read time
   sourcePartyOrBatch?: string;
   notes?: string;
 }
@@ -125,6 +211,9 @@ export interface Item {
   taxRateGst: number; // e.g. 0, 5, 12, 18, 28
   salePrice: number; // Default selling rate
   purchasePrice?: number; // Legacy or computed procurement rate
+  /** SERIALIZED item (type 'asset') only: the per-unit attribute keys this
+   *  register tracks (2026-11-16). Values live on each InventoryUnit. */
+  attributes?: ItemAttributeKey[];
 
   // FIFO actual-cost valuation, computed server-side from the stock
   // movements ledger at read time (never persisted on the items row).
@@ -278,6 +367,43 @@ export interface ItemStockAdjustment {
   createdAt: string;
 }
 
+// ============================================================================
+// BATCH MIX (RECIPE) — the production feature's recipe master (2026-11-12)
+// A mix says: produce <outputItem> using these ingredient items. EACH
+// ingredient row independently picks its own sizing basis:
+//   - 'quantity':   absolute qty in the item's OWN unit; one mix of the
+//                   quantity-basis quantities yields referenceOutputQty of the
+//                   output item. A production run of X scales every
+//                   quantity row by (X / referenceOutputQty).
+//   - 'percentage': a % of the PRODUCED output qty — e.g. "bitumen 5%"
+//                   consumed 5 units on a 100-unit run.
+// The two mix freely on one recipe (bitumen in %, LDO in MT). Mixing is
+// per-ROW, never a recipe-level selector (2026-11-12 client correction).
+// FK-ONLY storage (Golden Rule §2): items are referenced by id and ALL display
+// names/units JOIN (resolve live) from the items master at read time.
+// ============================================================================
+export interface BatchMixIngredient {
+  id?: string; // server-minted row id (ingredient rows are fully replaced per save)
+  itemId: string; // FK — the required item
+  basis: 'quantity' | 'percentage'; // THIS ROW's sizing basis (independent)
+  quantity?: number; // 'quantity' basis: absolute qty in the item's own unit
+  percentage?: number; // 'percentage' basis: % of the produced output qty
+}
+
+export interface BatchMix {
+  id: string;
+  mixNumber: string; // server-minted (BM-26/NNN)
+  name: string;
+  outputItemId: string; // FK — what one mix produces (never the output item's name copy)
+  /** @deprecated legacy recipe-level basis (pre per-row sizing); kept only so old rows still map */
+  basis?: 'quantity' | 'percentage';
+  referenceOutputQty?: number; // the yield of ONE mix — scales the quantity-basis rows
+  ingredients: BatchMixIngredient[];
+  notes?: string;
+  isActive?: boolean; // inactive mixes: kept, hidden from the Run picker
+  createdAt: string;
+}
+
 export interface ProductionBatchRun {
   id: string;
   batchNumber: string;
@@ -289,10 +415,27 @@ export interface ProductionBatchRun {
   unit: string;
   rawMaterialsConsumed: Array<{
     itemId: string;
-    itemName: string;
+    itemName?: string; // legacy rows carry a name copy; new rows are FK + qty only (resolved live)
     quantity: number;
-    unit: string;
+    unit?: string; // legacy; resolved from the items master for new rows
+    percentage?: number; // % of produced output when the run's mix was on the % basis
+    locationId?: string; // FK: the stock location this qty left (server may fill the id from the item's breakdown)
+    locationName?: string; // display snapshot as issued on the run (resolved live for display when id is present)
   }>;
+  // Recipe ancestry + costing snapshots (numeric facts, documentation §2):
+  // batchMixId is the FK; mixName is a display-only live view the UI resolves
+  // from the batchMixes master (never authoritative).
+  batchMixId?: string;
+  mixName?: string;
+  /** PRODUCE & SELL DIRECTLY (2026-11-16): FKs to the sale this run was
+   *  recorded from — the run skips the output-lot inward (its output sells
+   *  straight off the run; raw-material consumption still posts). */
+  saleId?: string;
+  saleItemId?: string;
+  /** True when the output never entered stock (direct-to-sale run) */
+  directSale?: boolean;
+  outputRate?: number; // blended cost per unit charged into the output lot
+  outputValue?: number; // total value consumed into this run (the output lot's value)
   supervisorName: string;
   mixTemperatureCelsius?: number; // e.g. 165°C
   notes?: string;
@@ -319,6 +462,9 @@ export interface OrderItem {
   shortageQuantity?: number; // Discrepancy (quantity - receivedQuantity)
   overageQuantity?: number; // Excess quantity if received > ordered
   itemNotes?: string;
+  /** PRODUCE & SELL DIRECTLY: output manufactured by a sale-bound run (see
+   *  SalesOrderItem.produceDirect) — never dispatched from yard stock. */
+  produceDirect?: boolean;
 }
 
 export type PaymentMode = 'bank_transfer' | 'cheque' | 'cash' | 'upi' | 'neft_rtgs';
@@ -954,6 +1100,26 @@ export interface SalesOrderItem {
   /** Load weight of THIS line in metric tonnes — summing across the sale's
    *  lines gives the trip-load weight carried on the dispatch trip slip. */
   weightTonnes?: number;
+  /** TRACKABLE (asset) lines: FKs to the register units sold here — the
+   *  line's quantity equals unitIds.length (server-dermived). */
+  unitIds?: string[];
+  /** PRODUCE & SELL DIRECTLY (2026-11-16): this line's output is manufactured
+   *  by a production run bound to THIS sale and never enters stockyard stock —
+   *  the sale dispatch posts no outward for it. The linked run carries saleId
+   *  + saleItemId. */
+  produceDirect?: boolean;
+}
+
+/** One-shot produce-and-sell-directly run configuration taken from the sales
+ *  order form (NOT persisted on the line — the production_batches run row is
+ *  the record; these fields ride the creation/edit payload only). */
+export interface SaleDirectRunInput {
+  date?: string;
+  supervisorName?: string;
+  mixTemperatureCelsius?: number;
+  notes?: string;
+  /** WHERE each material ingredient's qty leaves stock (FK-based sourcing) */
+  itemLocations?: Array<{ itemId: string; locationId?: string; locationName?: string }>;
 }
 
 export interface SalesOrderStage {
@@ -1145,6 +1311,14 @@ export interface PurchaseOrderItem {
   shortageQuantity?: number;
   overageQuantity?: number;
   itemNotes?: string;
+  /** SERIALIZED line (asset item; 2026-11-16): the ONE unit this line enters —
+   *  quantity is fixed at 1, the serial + declared-key values ride here, and
+   *  the register unit is created against the purchase (supplier = the
+   *  purchase's vendor, date = the stage date, cost = the line rate). */
+  unitEntry?: {
+    serialNumber: string;
+    attributes?: Record<string, string | number>;
+  };
 }
 
 export interface PurchaseOrderStage {
@@ -1243,10 +1417,24 @@ export interface SalesOrderItemInput {
   itemNotes?: string;
   /** Line load weight in metric tonnes (dispatch trip planning) */
   weightTonnes?: number;
+  /** TRACKABLE lines: the chosen register units (quantity derives from these) */
+  unitIds?: string[];
+  /** PRODUCE & SELL DIRECTLY: create a production run for THIS sale's line —
+   *  run qty is locked to the line qty; output never touches stock. */
+  produceDirect?: boolean;
+  /** Run configuration for a produceDirect line (one-shot input; see
+   *  SaleDirectRunInput — the run row persists it, not the sale line). */
+  production?: SaleDirectRunInput;
 }
 
 export interface PurchaseOrderItemInput extends SalesOrderItemInput {
   receivedQuantity?: number;
+  /** SERIALIZED line (asset item): the ONE unit this line enters (serial +
+   *  the item's declared-key values); quantity is fixed at 1. */
+  unitEntry?: {
+    serialNumber: string;
+    attributes?: Record<string, string | number>;
+  };
 }
 
 

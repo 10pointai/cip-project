@@ -342,12 +342,13 @@ export function ItemDetailPage({ item, category, currencySymbol, onBack, onEdit 
             </p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-left min-w-[980px] border-collapse">
+              <table className="w-full text-left min-w-[1140px] border-collapse">
                 <thead>
                   <tr className="text-[9px] uppercase tracking-wider text-[var(--color-on-surface-variant)] border-b border-[var(--color-outline-variant)]/50 bg-[var(--color-surface-container)]">
                     <th className="py-2 px-4">Doc &amp; Ref</th>
                     <th className="py-2 px-3">Stage</th>
                     <th className="py-2 px-3">Party / Source</th>
+                    <th className="py-2 px-3">Location</th>
                     <th className="py-2 px-3 text-right">In / Out</th>
                     <th className="py-2 px-3 text-right">Rate ({currencySymbol})</th>
                     <th className="py-2 px-3 text-right">Value ({currencySymbol})</th>
@@ -395,6 +396,16 @@ export function ItemDetailPage({ item, category, currencySymbol, onBack, onEdit 
                                 {mov.notes}
                               </span>
                             )}
+                          </td>
+                          {/* Location — where the qty left/landed; the ledger
+                              row resolves the name server-side by JOIN
+                              (falls back to the item's breakdown by FK). */}
+                          <td className="py-2.5 px-3">
+                            <span className="font-semibold text-[var(--color-on-surface)] block max-w-[160px] truncate" title={mov.locationName}>
+                              {mov.locationName
+                                || (item.locations || []).find((l) => l.locationId && l.locationId === mov.locationId)?.locationName
+                                || '—'}
+                            </span>
                           </td>
                           <td className="py-2.5 px-3 text-right font-bold">
                             <span className={isAddition ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]'}>

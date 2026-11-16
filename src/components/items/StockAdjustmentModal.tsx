@@ -44,6 +44,8 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
   onSubmit,
 }) => {
   // Only physical products can have stock adjustments
+  // Aggregate stock applies to PRODUCTS only — asset/trackable items keep
+  // their serial register (per-unit lifecycle), never a stock bucket.
   const productItems = items.filter((i) => i.type === 'product');
 
   const [selectedItemId, setSelectedItemId] = useState<string>(

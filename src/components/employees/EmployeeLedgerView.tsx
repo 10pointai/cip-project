@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useDatabase } from '../../hooks/useDatabase';
 import { Employee, EmployeeLedgerTransaction, EmployeePayment, CashBankAccount } from '../../types';
+import { employeeLedgerBalance } from '../../utils/employeeLedger';
 import { formatCurrency } from '../../utils/formatters';
 import { SearchableSelect } from '../orders/SearchableSelect';
 
@@ -67,26 +68,6 @@ const TYPE_LABELS: Record<LedgerTxnType, string> = {
 };
 function typeLabel(type: LedgerTxnType): string {
   return TYPE_LABELS[type];
-}
-
-/** One employee's current ledger balance — the same fold the ledger table
- *  shows: master opening + accruals/adds (+), paid-to-employee (−) and legacy
- *  payroll payouts (−); direct rows are balance-neutral. */
-export function employeeLedgerBalance(
-  emp: Employee,
-  txns: EmployeeLedgerTransaction[],
-  payments: EmployeePayment[]
-): number {
-  let bal = Number(emp.openingBalance) || 0;
-  txns.forEach((t) => {
-    if (t.employeeId !== emp.id) return;
-    if (t.type === 'wage_accrual' || t.type === 'add_balance') bal += t.amount;
-    else if (t.type === 'reduce_balance') bal -= t.amount;
-  });
-  payments.forEach((p) => {
-    if (p.employeeId === emp.id) bal -= Number(p.amount) || 0;
-  });
-  return Math.round(bal * 100) / 100;
 }
 
 export function EmployeeLedgerView({ employees, focusedEmpId }: EmployeeLedgerViewProps) {

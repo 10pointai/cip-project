@@ -3,21 +3,14 @@ import {
   X,
   Package,
   Wrench,
-  Layers,
-  Scale,
-  Percent,
+  ScanBarcode,
   Check,
   AlertCircle,
   FileText,
-  Warehouse,
-  IndianRupee,
   Plus,
-  ArrowUpRight,
-  Trash2,
-  MapPin,
   Lock,
 } from 'lucide-react';
-import { Item, ItemCategory, ItemUnit, ItemLocation, ItemType, ItemLocationStock } from '../../types';
+import { Item, ItemCategory, ItemUnit, ItemLocation, ItemType } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { EntityDocumentsSection, StagedDocument } from '../common/EntityDocumentsSection';
 
@@ -26,6 +19,10 @@ interface ItemFormModalProps {
   categories: ItemCategory[];
   units: ItemUnit[];
   locations?: ItemLocation[];
+  /** WHAT the new item is, picked by WHERE the form opens from (2026-11-16):
+   *  'product' (Basic Inventory, default) or 'asset' (Serialized Inventory —
+   *  the catalog header of a trackable unit register). No tabs to choose. */
+  defaultType?: ItemType;
   currencySymbol?: string;
   onClose: () => void;
   onOpenCategories?: () => void;
@@ -33,101 +30,36 @@ interface ItemFormModalProps {
   onOpenLocations?: () => void;
 }
 
-interface FormLocationEntry {
-  locationId?: string;
-  locationName: string;
-  openingStock: string;
-  minStockLevel: string;
-  maxCapacity: string;
-  currentStock?: number;
-  isNewRow?: boolean;
-}
-
-const GST_RATES = [0, 5, 12, 18, 28];
-
 export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   initialItem,
   categories,
   units,
-  locations = [],
+  defaultType,
   currencySymbol = '₹',
   onClose,
   onOpenCategories,
   onOpenUnits,
-  onOpenLocations,
 }) => {
-  const [type, setType] = useState<ItemType>(initialItem?.type || 'product');
+  // 2026-11-16: type is NOT chosen in this form anymore — the tab selector is
+  // gone. The type comes from WHERE the form was opened: 'product' from Basic
+  // Inventory (default), 'asset' from Serialized Inventory; an EXISTING item
+  // keeps its stored type without any way to convert it.
+  const type: ItemType = initialItem?.type || defaultType || 'product';
   const [name, setName] = useState(initialItem?.name || '');
   const [code, setCode] = useState(initialItem?.code || '');
   const [categoryId, setCategoryId] = useState(
     initialItem?.categoryId || (categories.length > 0 ? categories[0].id : '')
   );
-  const [unit, setUnit] = useState(initialItem?.unit || 'MT');
-  const [hsnSacCode, setHsnSacCode] = useState(initialItem?.hsnSacCode || '');
-  const [taxRateGst, setTaxRateGst] = useState<number>(initialItem?.taxRateGst ?? 18);
-  const [salePrice, setSalePrice] = useState(initialItem ? String(initialItem.salePrice) : '');
-  const [technicalSpecs, setTechnicalSpecs] = useState(initialItem?.technicalSpecs || '');
-  const [remarks, setRemarks] = useState(initialItem?.remarks || '');
-  
-  // Multi-location state
-  const getInitialLocations = (): FormLocationEntry[] => {
-    if (initialItem?.locations && initialItem.locations.length > 0) {
-      return initialItem.locations.map((l) => ({
-        locationId: l.locationId,
-        locationName: l.locationName,
-        openingStock: String(l.openingStock !== undefined ? l.openingStock : 0),
-        minStockLevel: String(l.minStockLevel !== undefined ? l.minStockLevel : (initialItem.minStockLevel || 0)),
-        maxCapacity: l.maxCapacity !== undefined && l.maxCapacity !== null ? String(l.maxCapacity) : '',
-        currentStock: l.currentStock,
-      }));
-    }
-    if (initialItem?.stockLocation) {
-      const parts = initialItem.stockLocation.split(',').map((s) => s.trim()).filter(Boolean);
-      const uniqueParts = Array.from(new Set(parts.map((p) => p.toLowerCase()))).map(
-        (lower) => parts.find((p) => p.toLowerCase() === lower)!
-      );
-      if (uniqueParts.length > 0) {
-        return uniqueParts.map((p, idx) => ({
-          locationName: p,
-          openingStock: String(idx === 0 && initialItem.openingStock !== undefined ? initialItem.openingStock : 0),
-          minStockLevel: String(idx === 0 && initialItem.minStockLevel !== undefined ? initialItem.minStockLevel : 0),
-          maxCapacity: '',
-          currentStock: idx === 0 ? initialItem.currentStock : 0,
-        }));
-      }
-    }
-    if (locations && locations.length > 0) {
-      return [{
-        locationId: locations[0].id,
-        locationName: locations[0].name,
-        openingStock: initialItem?.openingStock !== undefined ? String(initialItem.openingStock) : '0',
-        minStockLevel: initialItem?.minStockLevel !== undefined ? String(initialItem.minStockLevel) : '0',
-        maxCapacity: '',
-        currentStock: initialItem?.currentStock,
-      }];
-    }
-    return [];
-  };
-
-  const [formLocations, setFormLocations] = useState<FormLocationEntry[]>(getInitialLocations);
-
-  React.useEffect(() => {
-    if (type === 'product' && formLocations.length === 0 && locations.length > 0) {
-      setFormLocations([{
-        locationId: locations[0].id,
-        locationName: locations[0].name,
-        openingStock: initialItem?.openingStock !== undefined ? String(initialItem.openingStock) : '0',
-        minStockLevel: initialItem?.minStockLevel !== undefined ? String(initialItem.minStockLevel) : '0',
-        maxCapacity: '',
-      }]);
-    }
-  }, [locations, type, formLocations.length, initialItem]);
-
-  const [openingStockPrice, setOpeningStockPrice] = useState(
-    initialItem && initialItem.openingStockPrice !== undefined
-      ? String(initialItem.openingStockPrice)
-      : (initialItem?.purchasePrice ? String(initialItem.purchasePrice) : '')
+  // Trackable items are counted per physical unit — pieces, never tonnes
+  const [unit, setUnit] = useState(
+    initialItem?.unit || (type === 'asset' ? 'NOS' : 'MT')
   );
+  const [hsnSacCode, setHsnSacCode] = useState(initialItem?.hsnSacCode || '');
+  // 2026-11-16: NO master pricing / GST / locations / specs / remarks inputs in
+  // this form — sale lines carry their own rate and slab, stock placement
+  // belongs to the physical stock, and the catalog row is identification-only.
+  // A legacy item's stored values pass through untouched on edit (fields are
+  // OMITTED from the update payload); new items save neutral values.
   const [isActive, setIsActive] = useState(initialItem?.isActive ?? true);
   const [error, setError] = useState('');
   // DOCUMENTS (S3 upload feature): staged while creating a NEW item (the
@@ -136,67 +68,32 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   // upload IMMEDIATELY (section runs in entityId mode).
   const [stagedItemDocs, setStagedItemDocs] = useState<StagedDocument[]>([]);
 
-  // Calculate opening valuation preview
-  const totalAllocatedOpeningStock = formLocations.reduce(
-    (sum, l) => sum + (parseFloat(l.openingStock) || 0),
-    0
+  // DYNAMIC ATTRIBUTE KEYS (serialized inventory, 2026-11-16): a trackable
+  // item declares WHICH per-unit fields exist (brand, size, volts...). Draft
+  // rows are label + typed input + (select) options + required; the server
+  // derives stable keys from the labels. Prefilled on EDIT of a trackable
+  // item; existing units keep their saved values when keys change.
+  const [attrKeys, setAttrKeys] = useState<Array<{
+    label: string;
+    type: 'text' | 'number' | 'date' | 'select';
+    options: string;
+    required: boolean;
+  }>>(
+    initialItem?.type === 'asset' && Array.isArray(initialItem.attributes)
+      ? initialItem.attributes.map((def) => ({
+          label: def.label,
+          type: def.type,
+          options: (def.options || []).join(', '),
+          required: Boolean(def.required),
+        }))
+      : []
   );
-  const totalAllocatedMinSafetyStock = formLocations.reduce(
-    (sum, l) => sum + (parseFloat(l.minStockLevel) || 0),
-    0
-  );
-  const numOpeningStockPrice = parseFloat(openingStockPrice) || 0;
-  const calculatedOpeningValuation = totalAllocatedOpeningStock * numOpeningStockPrice;
-  const handleAddLocationRow = () => {
-    if (locations.length === 0) {
-      if (onOpenLocations) onOpenLocations();
-      return;
-    }
-    const usedNames = new Set(formLocations.map((l) => l.locationName.toLowerCase().trim()));
-    const nextAvailable = locations.find((l) => !usedNames.has(l.name.toLowerCase().trim()));
-    if (!nextAvailable) return; // every master location is already assigned in the list
-    const newLoc = nextAvailable;
-    setFormLocations([
-      ...formLocations,
-      {
-        locationId: newLoc?.id,
-        locationName: newLoc?.name || '',
-        openingStock: '0',
-        minStockLevel: '0',
-        maxCapacity: '',
-        isNewRow: true,
-      },
-    ]);
-  };
 
-  const handleRemoveLocationRow = (index: number) => {
-    if (formLocations.length <= 1) return;
-    setFormLocations(formLocations.filter((_, i) => i !== index));
-  };
-
-  const handleLocationChange = (
-    index: number,
-    field: 'locationName' | 'openingStock' | 'minStockLevel' | 'maxCapacity',
-    val: string
-  ) => {
-    const updated = [...formLocations];
-    if (field === 'locationName') {
-      const matched = locations.find((l) => l.name === val || l.id === val);
-      updated[index] = {
-        ...updated[index],
-        locationName: matched ? matched.name : val,
-        locationId: matched ? matched.id : undefined,
-      };
-    } else {
-      updated[index] = { ...updated[index], [field]: val };
-    }
-    setFormLocations(updated);
-  };
-
-  // Filter categories matching current item type
-  const matchingCategories = categories.filter(
-    (c) => c.type === 'both' || c.type === type
-  );
+  // Filter categories matching current item type (asset/trackable items are
+  // goods — they pick from every product/both-category, like products do)
+  const matchingCategories = type === 'asset'
+    ? categories.filter((c) => c.type === 'both' || c.type === 'product')
+    : categories.filter((c) => c.type === 'both' || c.type === type);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -217,63 +114,28 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
       return;
     }
 
-    // Verify location names are filled
-    if (type === 'product') {
-      if (locations.length === 0) {
-        setError('No storage locations found in system. Please configure locations first using Manage Locations.');
-        return;
-      }
-      if (formLocations.length === 0) {
-        setError('Please allocate at least one storage location for this product.');
-        return;
-      }
-      const emptyLoc = formLocations.some((l) => !l.locationName.trim());
-      if (emptyLoc) {
-        setError('Please select a storage location from the dropdown for each entry.');
-        return;
+    const selectedCategory = categories.find((c) => c.id === categoryId);
+
+    // DYNAMIC ATTRIBUTE KEYS: validate + shape for trackable items
+    if (type === 'asset') {
+      for (const row of attrKeys) {
+        if (!row.label.trim()) {
+          setError('Every attribute key needs a label (or remove the empty row).');
+          return;
+        }
+        if (row.type === 'select' && !row.options.split(',').map((o) => o.trim()).filter(Boolean).length) {
+          setError(`Attribute key "${row.label}" is a pick-list — add at least one option (comma separated).`);
+          return;
+        }
       }
     }
 
-    const sPrice = parseFloat(salePrice) || 0;
-    const opPrice = openingStockPrice ? parseFloat(openingStockPrice) || 0 : undefined;
-
-    const selectedCategory = categories.find((c) => c.id === categoryId);
-
-    // Build mapped locations
-    const mappedLocations: ItemLocationStock[] = formLocations.map((l) => {
-      const locOpening = parseFloat(l.openingStock) || 0;
-      const locMinSafety = parseFloat(l.minStockLevel) || 0;
-      const locMaxCapacity = l.maxCapacity ? parseFloat(l.maxCapacity) : undefined;
-      const matchedMaster = locations.find((loc) => loc.name === l.locationName);
-      const locCurrent = initialItem
-        ? (l.currentStock !== undefined ? l.currentStock : locOpening)
-        : locOpening;
-      return {
-        locationId: l.locationId || matchedMaster?.id,
-        locationName: l.locationName.trim(),
-        openingStock: locOpening,
-        minStockLevel: locMinSafety,
-        maxCapacity: locMaxCapacity,
-        currentStock: locCurrent,
-      };
-    });
-
-    // Deduplicate mapped locations
-    const seenNames = new Set<string>();
-    const deduplicatedLocations = mappedLocations.filter((l) => {
-      const lower = l.locationName.trim().toLowerCase();
-      if (!lower || seenNames.has(lower)) return false;
-      seenNames.add(lower);
-      return true;
-    });
-
-    const totalOpeningStock = deduplicatedLocations.reduce((sum, l) => sum + (l.openingStock || 0), 0);
-    const totalMinSafetyStock = deduplicatedLocations.reduce((sum, l) => sum + (l.minStockLevel || 0), 0);
-    const totalCurrentStock = deduplicatedLocations.reduce((sum, l) => sum + (l.currentStock || 0), 0);
-    const locationNames = deduplicatedLocations.map((l) => l.locationName);
-    const combinedLocationStr = locationNames.join(', ');
-
     try {
+      // 2026-11-16: identification-only payload. NO pricing, GST slab,
+      // locations, stock aggregates, technical specs or remarks are sent —
+      // an EXISTING item keeps every stored value (updateItem merges, and the
+      // server recalculates nothing it was not given); a NEW item is born
+      // unplaced with zero stock.
       if (initialItem) {
         localDb.updateItem(initialItem.id, {
           name: name.trim(),
@@ -283,22 +145,21 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
           categoryName: selectedCategory?.name || 'General',
           unit: unit.trim().toUpperCase(),
           hsnSacCode: hsnSacCode.trim(),
-          taxRateGst,
-          salePrice: sPrice,
-          technicalSpecs: technicalSpecs.trim(),
-          remarks: remarks.trim(),
           isActive,
-          ...(type === 'product' ? {
-            openingStock: totalOpeningStock,
-            openingStockPrice: opPrice,
-            openingStockDate: new Date().toISOString().split('T')[0],
-            purchasePrice: opPrice,
-            minStockLevel: totalMinSafetyStock,
-            currentStock: totalCurrentStock,
-            locations: deduplicatedLocations,
-            stockLocations: locationNames,
-            stockLocation: combinedLocationStr,
-          } : {})
+          // SERIALISED item: the (possibly edited) per-unit key list — values
+          // already stored on units survive under keys that stay declared
+          ...(type === 'asset' ? {
+            attributes: attrKeys
+              .filter((row) => row.label.trim())
+              .map((row) => ({
+                label: row.label.trim(),
+                type: row.type,
+                ...(row.type === 'select'
+                  ? { options: row.options.split(',').map((o) => o.trim()).filter(Boolean) }
+                  : {}),
+                ...(row.required ? { required: true } : {}),
+              })),
+          } : {}),
         });
       } else {
         localDb.addItem({
@@ -309,26 +170,24 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
           categoryName: selectedCategory?.name || 'General',
           unit: unit.trim().toUpperCase(),
           hsnSacCode: hsnSacCode.trim(),
-          taxRateGst,
-          salePrice: sPrice,
-          technicalSpecs: technicalSpecs.trim(),
-          remarks: remarks.trim(),
           isActive,
+          // SERIALISED item: the per-unit attribute keys it tracks
+          ...(type === 'asset' ? {
+            attributes: attrKeys
+              .filter((row) => row.label.trim())
+              .map((row) => ({
+                label: row.label.trim(),
+                type: row.type,
+                ...(row.type === 'select'
+                  ? { options: row.options.split(',').map((o) => o.trim()).filter(Boolean) }
+                  : {}),
+                ...(row.required ? { required: true } : {}),
+              })),
+          } : {}),
           // Staged documents (new-item flow) — the server links them in the
           // same create flow and moves each S3 object from Pending/ under
           // Inventory/<id>/
           ...(stagedItemDocs.length > 0 ? { documentIds: stagedItemDocs.map((d) => d.id) } : {}),
-          ...(type === 'product' ? {
-            openingStock: totalOpeningStock,
-            openingStockPrice: opPrice,
-            openingStockDate: new Date().toISOString().split('T')[0],
-            purchasePrice: opPrice,
-            minStockLevel: totalMinSafetyStock,
-            currentStock: totalCurrentStock,
-            locations: deduplicatedLocations,
-            stockLocations: locationNames,
-            stockLocation: combinedLocationStr,
-          } : {})
         });
       }
       onClose();
@@ -344,14 +203,16 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-[var(--color-primary-container)] text-[var(--color-primary)] flex items-center justify-center font-bold">
-              {type === 'product' ? <Package className="w-5 h-5" /> : <Wrench className="w-5 h-5" />}
+              {type === 'product' ? <Package className="w-5 h-5" /> : type === 'asset' ? <ScanBarcode className="w-5 h-5" /> : <Wrench className="w-5 h-5" />}
             </div>
             <div>
               <h2 className="text-base sm:text-lg font-extrabold text-[var(--color-on-surface)]">
                 {initialItem ? 'Edit Item Master' : 'Add Item to Master Catalog'}
               </h2>
               <p className="text-xs text-[var(--color-on-surface-variant)]">
-                Master specifications, GST rates, unit definitions, and pricing parameters
+                {type === 'asset'
+                  ? 'Serialized item — the catalog header; every physical unit carries its own serial in the register'
+                  : 'Master identification — name, code, category, unit & HSN/SAC code'}
               </p>
             </div>
           </div>
@@ -371,6 +232,11 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
               <span>{error}</span>
             </div>
           )}
+
+          {/* Item TYPE tabs REMOVED (2026-11-16, serialized-inventory prep):
+              new items are always Stock Items; an EXISTING item keeps its own
+              stored type — the form never converts product/service/asset
+              (legacy semantics stay stable). */}
 
           {/* Basic Item Info */}
           <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-4">
@@ -420,6 +286,19 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                     <Lock className="w-3 h-3" /> Item code is locked once the item is created.
                   </p>
                 ) : null}
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
+                  {type === 'service' ? 'SAC Code (Services)' : 'HSN Code (Goods)'}
+                </label>
+                <input
+                  type="text"
+                  placeholder={type === 'service' ? 'e.g. 997312' : 'e.g. 27150090'}
+                  value={hsnSacCode}
+                  onChange={(e) => setHsnSacCode(e.target.value.trim())}
+                  className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-mono uppercase text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                />
               </div>
             </div>
 
@@ -492,323 +371,121 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
             </div>
           </div>
 
-          {/* Pricing & GST Tax Compliance */}
-          <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-4">
-            <h3 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-2">
-              <IndianRupee className="w-4 h-4 text-[var(--color-success)]" />
-              Pricing & GST Tax Rates
-            </h3>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div>
-                <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                  Selling Rate ({currencySymbol} / {unit || 'Unit'}) *
-                </label>
-                <div className="relative">
-                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[var(--color-outline)] font-bold text-xs">
-                    {currencySymbol}
-                  </span>
-                  <input
-                    type="number"
-                    step="any"
-                    placeholder="0.00"
-                    value={salePrice}
-                    onChange={(e) => setSalePrice(e.target.value)}
-                    className="w-full pl-8 pr-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                  {type === 'product' ? 'HSN Code (Goods)' : 'SAC Code (Services)'}
-                </label>
-                <input
-                  type="text"
-                  placeholder={type === 'product' ? 'e.g. 27150090' : 'e.g. 997312'}
-                  value={hsnSacCode}
-                  onChange={(e) => setHsnSacCode(e.target.value.trim())}
-                  className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-mono uppercase text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                  GST Tax Slab (%)
-                </label>
-                <select
-                  value={taxRateGst}
-                  onChange={(e) => setTaxRateGst(Number(e.target.value))}
-                  className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+          {/* PRICING & GST TAX RATES + ASSIGNED STOCK LOCATIONS + TECHNICAL
+              SPECS + REMARKS ALL REMOVED (2026-11-16): nothing per-item-specific
+              (price, slab, placement, opening stock, specs, remarks) is captured
+              on the CATALOG MASTER anymore — sale/purchase lines carry their own
+              rate and slab, and stock placement belongs to the physical
+              (serialized) stock, not the catalog row.
+              EXISTING items keep their stored values untouched through edits
+              (the update omits these fields); NEW items are born unplaced with
+              zero stock and grow location data through GRN / the register. */}
+          {/* DYNAMIC ATTRIBUTE KEYS (trackable items; 2026-11-16): the per-unit
+              fields EVERY entry of this serialized item will carry (fixed ones
+              — serial, supplier, purchase date, cost — stay columns
+              automatically). Editing an item keeps its existing keys. */}
+          {type === 'asset' && (
+            <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-2">
+                  <ScanBarcode className="w-4 h-4 text-[var(--color-primary)]" />
+                  Attribute Keys (fields on every unit entry)
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setAttrKeys((prev) => [...prev, { label: '', type: 'text', options: '', required: false }])}
+                  className="flex items-center gap-1 text-[11px] font-bold text-[var(--color-primary)] hover:opacity-80"
                 >
-                  {GST_RATES.map((rate) => (
-                    <option key={rate} value={rate}>
-                      {rate}% {rate === 0 ? '(Exempt / Nil VAT)' : `GST (${rate / 2}% CGST + ${rate / 2}% SGST)`}
-                    </option>
-                  ))}
-                </select>
+                  <Plus className="w-3.5 h-3.5" /> Add Key
+                </button>
               </div>
-
-              {type === 'product' && (
-                <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                    Procured Cost Rate ({currencySymbol} / {unit || 'Unit'})
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[var(--color-outline)] font-bold text-xs">
-                      {currencySymbol}
-                    </span>
-                    <input
-                      type="number"
-                      step="any"
-                      placeholder="0.00"
-                      value={openingStockPrice}
-                      onChange={(e) => setOpeningStockPrice(e.target.value)}
-                      className="w-full pl-8 pr-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                    />
-                  </div>
-                  <p className="text-[9px] text-[var(--color-outline)] mt-1 ml-2">Baseline valuation rate</p>
+              <p className="text-[10px] text-[var(--color-on-surface-variant)]">
+                e.g. for a Tyre: Brand (pick-list), Size (text). Fixed on every unit regardless: Serial Number,
+                Supplier, Purchase Date, Purchase Cost.
+              </p>
+              {attrKeys.length === 0 ? (
+                <p className="text-[10px] text-[var(--color-on-surface-variant)] italic px-1">No attribute keys yet — the register will only track the fixed facts.</p>
+              ) : (
+                <div className="space-y-2">
+                  {attrKeys.map((row, idx) => (
+                    <div key={idx} className="p-3 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] flex flex-col sm:flex-row sm:items-end gap-2.5">
+                      <div className="flex-1 space-y-1">
+                        <label className="block text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase">Key label *</label>
+                        <input
+                          type="text"
+                          value={row.label}
+                          onChange={(e) => {
+                            const next = [...attrKeys];
+                            next[idx] = { ...row, label: e.target.value };
+                            setAttrKeys(next);
+                          }}
+                          placeholder="e.g. Brand / Size / Voltage"
+                          className="w-full px-3 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-semibold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                        />
+                      </div>
+                      <div className="w-full sm:w-32 space-y-1">
+                        <label className="block text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase">Input type</label>
+                        <select
+                          value={row.type}
+                          onChange={(e) => {
+                            const next = [...attrKeys];
+                            next[idx] = { ...row, type: e.target.value as typeof row.type };
+                            setAttrKeys(next);
+                          }}
+                          className="w-full px-3 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-semibold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                        >
+                          <option value="text">Text</option>
+                          <option value="number">Number</option>
+                          <option value="date">Date</option>
+                          <option value="select">Pick-list</option>
+                        </select>
+                      </div>
+                      {row.type === 'select' && (
+                        <div className="w-full sm:w-40 space-y-1">
+                          <label className="block text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase">Options (comma sep.) *</label>
+                          <input
+                            type="text"
+                            value={row.options}
+                            onChange={(e) => {
+                              const next = [...attrKeys];
+                              next[idx] = { ...row, options: e.target.value };
+                              setAttrKeys(next);
+                            }}
+                            placeholder="MRF, CEAT, JK"
+                            className="w-full px-3 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-semibold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          />
+                        </div>
+                      )}
+                      <label className="flex items-center gap-1.5 pb-2 shrink-0 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={row.required}
+                          onChange={(e) => {
+                            const next = [...attrKeys];
+                            next[idx] = { ...row, required: e.target.checked };
+                            setAttrKeys(next);
+                          }}
+                          className="w-3.5 h-3.5 text-[var(--color-primary)] rounded border-[var(--color-outline-variant)] focus:ring-[var(--color-primary)]"
+                        />
+                        <span className="text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase">Required</span>
+                      </label>
+                      <div className="pb-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setAttrKeys(attrKeys.filter((_, i) => i !== idx))}
+                          className="p-1.5 text-[var(--color-error)] hover:bg-[var(--color-error-container)]/30 rounded-full transition-colors"
+                          title="Remove this key"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
-          </div>
-
-          {/* Assigned Stock Locations (Products Only) */}
-          {type === 'product' && (
-            <div className="space-y-2.5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-bold text-[var(--color-on-surface)] flex items-center gap-1.5">
-                    <MapPin className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-                    Assigned Stock Locations ({formLocations.length})
-                  </span>
-                  {totalAllocatedOpeningStock > 0 && numOpeningStockPrice > 0 && (
-                    <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-bold bg-[var(--color-tertiary-container)] text-[var(--color-on-tertiary-container)] border border-[var(--color-outline-variant)]">
-                      Opening Value: {currencySymbol}{calculatedOpeningValuation.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </span>
-                  )}
-                </div>
-                {onOpenLocations && (
-                  <button
-                    type="button"
-                    onClick={onOpenLocations}
-                    className="text-[11px] font-bold text-[var(--color-primary)] hover:underline flex items-center gap-1"
-                  >
-                    <Plus className="w-3 h-3" /> Manage Master Locations
-                  </button>
-                )}
-              </div>
-
-              {locations.length === 0 ? (
-                  <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-dashed border-[var(--color-outline-variant)] text-center space-y-3">
-                    <div className="w-10 h-10 rounded-full bg-[var(--color-primary-container)] text-[var(--color-primary)] flex items-center justify-center mx-auto">
-                      <Warehouse className="w-5 h-5" />
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-bold text-[var(--color-on-surface)]">No Storage Locations Available</h4>
-                      <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                        No storage locations or stockyards are defined yet. Configure locations in master setup to assign stock and safety levels.
-                      </p>
-                    </div>
-                    {onOpenLocations && (
-                      <button
-                        type="button"
-                        onClick={onOpenLocations}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold shadow-xs hover:opacity-90 transition-opacity"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        <span>Manage & Create Locations</span>
-                      </button>
-                    )}
-                  </div>
-                ) : (
-                  <>
-                    <div className="space-y-2">
-                      {formLocations.map((locRow, idx) => (
-                        <div
-                          key={idx}
-                          className="p-3.5 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] flex flex-col sm:flex-row sm:items-end gap-3 transition-all hover:border-[var(--color-primary)]/40"
-                        >
-                          {/* Location Dropdown (locked for existing rows while editing) */}
-                          <div className="flex-1 space-y-1">
-                            <label className="block text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-                              Location #{idx + 1} *
-                            </label>
-                            <select
-                              value={locRow.locationName}
-                              onChange={(e) => handleLocationChange(idx, 'locationName', e.target.value)}
-                              disabled={!!initialItem && !locRow.isNewRow}
-                              title={initialItem && !locRow.isNewRow ? 'Existing location assignment is locked while editing. Remove this row and add a new one to change it.' : undefined}
-                              required
-                              className={`w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-semibold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${initialItem && !locRow.isNewRow ? 'opacity-50 cursor-not-allowed' : ''}`}
-                            >
-                              <option value="">-- Choose Storage Location --</option>
-                              {locations
-                                .filter(
-                                  (loc) =>
-                                    loc.name === locRow.locationName ||
-                                    !formLocations.some(
-                                      (other, otherIdx) =>
-                                        otherIdx !== idx &&
-                                        (other.locationName || '').trim().toLowerCase() === loc.name.trim().toLowerCase()
-                                    )
-                                )
-                                .map((loc) => (
-                                  <option key={loc.id} value={loc.name}>
-                                    {loc.name} {loc.capacity ? `(${loc.capacity})` : ''}
-                                  </option>
-                                ))}
-                            </select>
-                          </div>
-
-                          {/* Opening Stock (rows from DB are fixed; new rows editable) */}
-                          <div className="w-full sm:w-28 space-y-1">
-                            <label className="block text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-                              Opening Stock ({unit || 'Unit'})
-                            </label>
-                            <input
-                              type="number"
-                              step="any"
-                              min="0"
-                              placeholder="0.00"
-                              value={locRow.openingStock}
-                              onChange={(e) => handleLocationChange(idx, 'openingStock', e.target.value)}
-                              disabled={!!initialItem && !locRow.isNewRow}
-                              title={initialItem && !locRow.isNewRow ? 'Opening stock is fixed for locations saved with this item. Use Stock Adjustments to modify stock.' : undefined}
-                              className={`w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${initialItem && !locRow.isNewRow ? 'opacity-50 cursor-not-allowed' : ''}`}
-                            />
-                          </div>
-
-                          {/* Min Safety Stock at this Location */}
-                          <div className="w-full sm:w-28 space-y-1">
-                            <label className="block text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-                              Min Safety Stock ({unit || 'Unit'})
-                            </label>
-                            <input
-                              type="number"
-                              step="any"
-                              min="0"
-                              placeholder="0.00"
-                              value={locRow.minStockLevel}
-                              onChange={(e) => handleLocationChange(idx, 'minStockLevel', e.target.value)}
-                              className="w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                            />
-                          </div>
-
-                          {/* Max Stock Capacity at this Location */}
-                          <div className="w-full sm:w-28 space-y-1">
-                            <label className="block text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-                              Max Capacity ({unit || 'Unit'})
-                            </label>
-                            <input
-                              type="number"
-                              step="any"
-                              min="0"
-                              placeholder="∞"
-                              value={locRow.maxCapacity}
-                              onChange={(e) => handleLocationChange(idx, 'maxCapacity', e.target.value)}
-                              className="w-full px-3.5 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                            />
-                          </div>
-
-                          {/* Current Stock Preview if editing */}
-                          {initialItem && locRow.currentStock !== undefined && (
-                            <div className="text-right sm:w-28 shrink-0">
-                              <span className="text-[10px] text-[var(--color-on-surface-variant)] block font-medium">Current Stock</span>
-                              <span className="text-xs font-black text-[var(--color-primary)]">
-                                {Number(locRow.currentStock).toLocaleString('en-IN')} {unit}
-                              </span>
-                            </div>
-                          )}
-
-                          {/* Remove Location Button (DB-saved locations are protected while editing) */}
-                          {!(initialItem && !locRow.isNewRow) && (
-                            <div className="flex sm:items-center sm:self-end pt-1 sm:pt-0">
-                              <button
-                                type="button"
-                                disabled={formLocations.length <= 1}
-                                onClick={() => handleRemoveLocationRow(idx)}
-                                className="p-2 text-[var(--color-outline)] hover:text-[var(--color-error)] hover:bg-[var(--color-error-container)]/30 rounded-full transition-colors disabled:opacity-30 disabled:hover:text-[var(--color-outline)] disabled:hover:bg-transparent"
-                                title="Remove this location"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Add Location Button & Live Totals */}
-                    <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-1">
-                      <button
-                        type="button"
-                        onClick={handleAddLocationRow}
-                        disabled={
-                          locations.filter(
-                            (loc) => !formLocations.some(
-                              (l) => (l.locationName || '').trim().toLowerCase() === loc.name.trim().toLowerCase()
-                            )
-                          ).length === 0
-                        }
-                        title={formLocations.length >= locations.length ? 'All master locations are already assigned' : undefined}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-[var(--color-surface-container-high)] text-[var(--color-primary)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold transition-all shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed hover:bg-[var(--color-surface-container-highest)]"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        <span>Add Another Location</span>
-                      </button>
-
-                      <div className="flex flex-wrap items-center gap-4 text-right text-xs">
-                        <div>
-                          <span className="text-[var(--color-on-surface-variant)] font-medium">Total Starting Stock: </span>
-                          <strong className="text-[var(--color-on-surface)] font-black text-sm">
-                            {totalAllocatedOpeningStock.toLocaleString('en-IN')} {unit || 'Units'}
-                          </strong>
-                        </div>
-                        <div className="border-l border-[var(--color-outline-variant)] pl-4">
-                          <span className="text-[var(--color-on-surface-variant)] font-medium">Total Safety Threshold: </span>
-                          <strong className="text-[var(--color-on-surface)] font-black text-sm">
-                            {totalAllocatedMinSafetyStock.toLocaleString('en-IN')} {unit || 'Units'}
-                          </strong>
-                        </div>
-                      </div>
-                    </div>
-                  </>
-                )}
-            </div>
           )}
 
-          {/* Technical Specs & Mix Formulation */}
-          <div>
-            <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-              Technical Specifications & Quality Compliance
-            </label>
-            <textarea
-              rows={2}
-              placeholder="e.g. MoRTH 5th Rev Section 505, VG-30 Bitumen Content 4.5%, 37.5mm max aggregate size, Marshall Stability > 12 kN"
-              value={technicalSpecs}
-              onChange={(e) => setTechnicalSpecs(e.target.value)}
-              className="w-full px-4 py-2.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-            />
-          </div>
-
-          {/* Remarks & Operational Notes */}
-          <div>
-            <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-              Remarks, Handling Guidelines & Dispatch Notes
-            </label>
-            <textarea
-              rows={2}
-              placeholder="e.g. Temperature at dispatch must be strictly maintained at 150°C - 160°C. Batch test certificate compulsory with every delivery challan."
-              value={remarks}
-              onChange={(e) => setRemarks(e.target.value)}
-              className="w-full px-4 py-2.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl text-xs text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-            />
-          </div>
-
-          {/* Documents (S3 upload feature): stage while creating; link
-              immediately when the item already exists */}
           <EntityDocumentsSection
             feature="item"
             entityId={initialItem?.id}

@@ -224,6 +224,71 @@ PRODUCERS of stock deltas:
   - Stock adjustments: ±qty with adjustment_* movement types; deleting a
     voucher auto-writes a compensating movement (REV-<number>).
 
+BATCH MIXES (RECIPES) — production feature (2026-11-12):
+  A batch mix is the recipe master; production runs are recorded AGAINST a mix
+  and are LOCKED to its math (no per-run quantity overrides).
+    batch_mixes               id, mix_number (BM-YYYY/NNNN, server-minted),
+                              name, output_item_id FK, reference_output_qty
+                              (the one-mix yield — anchors the quantity rows),
+                              notes, is_active, created_at
+                              (basis column LEGACY — per-row sizing shipped the
+                              same day; new mixes leave it NULL)
+    batch_mix_ingredients     id, batch_mix_id FK, item_id FK, basis
+                              ('quantity' | 'percentage' — PER ROW: bitumen
+                              in % and LDO in MT mix freely on ONE recipe),
+                              quantity | percentage (exactly one, by basis).
+                              Rows are FULLY REPLACED on every save.
+    production_batches        gains batch_mix_id FK + output_rate /
+                              output_value costing snapshots; consumed lines
+                              (raw_materials_consumed JSON) are FK + resolved
+                              quantity only — server-resolved, not editable.
+  RUN MATH (per row): 'quantity' rows consume stored
+  qty × (produced / referenceOutputQty); 'percentage' rows consume
+  percentage% × produced qty (e.g. bitumen 5% on a 100 MT run = 5 MT).
+  Service-type ingredients ride on the run document but post NO stock movement.
+  POSTING: consumption is FIFO outward at blended cost per input; the OUTPUT
+  lot is then created at rate = total consumed value / produced qty — the run
+  costs the output at exactly what it consumed (FIFO, no averaging, per the
+  user's costing directive). Server mints BTN-YYYY-NNNN run numbers.
+  Deletes: a mix used by recorded runs cannot be deleted (mark inactive);
+  deleting a RUN does NOT reverse stock (historic audit log, as before) —
+  EXCEPTION: runs bound to a live sale (see below) cannot be deleted here.
+  Endpoints: /api/batch-mixes CRUD (+/next-number prefill); POST /api/batches
+  now requires { batchMixId, targetQuantity } and resolves everything else.
+  ONE RECIPE PER OUTPUT ITEM (2026-11-16, strict): a batch mix binds ONE
+  output item; a SECOND ACTIVE mix for the same item is refused on create AND
+  edit (assertSingleActiveMixForItem) — the sales produce-direct flow resolves
+  "the" recipe by item alone. Inactive mixes coexist as history.
+
+PRODUCE & SELL DIRECTLY (2026-11-16 sales ↔ production bridge):
+  A sales-order line may carry produceDirect: the item is manufactured by a
+  run BOUND TO THE SALE (production_batches.sale_id + sale_item_id FKs) and
+  its output NEVER enters stockyard stock — it ships straight to the party.
+  Client rules enforced server-side:
+    - raw MATERIALS still leave stock (FIFO outward, like any run); ONLY the
+      output lot inward and the sale's own dispatch outward are skipped
+      (applySaleInventory skips produceDirect lines)
+    - run qty is LOCKED to the sales line qty (no overrides)
+    - a recipe-less item cannot be toggled on (UI disables + server refuses)
+  LIFECYCLE (runs are BOUND to the sale):
+    - created at the money-stage save (sales_order/invoice first save; the
+      sales_order stage issuance; the consolidated-invoice catch-up) —
+      consume-first, so a failed run aborts the whole sale (nothing half-posts)
+    - edits reconcile runs PER LINE via syncSaleDirectRuns: runs keep their
+      lines by id / (item,qty) fingerprint; changed/removed lines tear down
+      (production_consumed_reversal re-enters raw materials at the recorded
+      FIFO rate, keyed on the original movement id) and re-create; untouched
+      lines never churn their runs
+    - cancel/delete removes the runs (consumption reversed) — removeSaleDirectRuns
+  The run config (date, supervisor, mix temp, per-ingredient SOURCE LOCATIONS,
+  notes) rides the creation/edit payload ONCE (SalesOrderItemInput.production,
+  SaleDirectRunInput) and persists on the RUN row — never on the sale line.
+  MySQL: production_batches gains sale_id/sale_item_id; sales_order_items
+  gains produce_direct (idempotent ALTERs in migrations.ts). The UI (sales
+  form) renders a per-line Produce toggle + expandable run panel (recipe,
+  locked qty, ingredient sourcing) auto-fetching the item's recipe; stage
+  document cards badge direct-dispatch lines.
+
 Movement read-back: item.movements shown in the UI (item detail ledger) is
 HYDRATED from the ledger at read time (latest 100 per item, newest first) —
 see hydrateItemWithMovements (server/db.ts), loadAllFromMysql (azureSync.ts),

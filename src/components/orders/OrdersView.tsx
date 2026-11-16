@@ -35,7 +35,7 @@ import {
   CreditCard,
   Wallet,
 } from 'lucide-react';
-import { Order, OrderItem, OrderType, SalesStage, PurchaseStage, Party, Item, CompanySettings, Sale, SaleInvoice, Purchase, PaymentMode } from '../../types';
+import { Order, OrderItem, OrderType, SalesStage, PurchaseStage, Party, Item, CompanySettings, Sale, SaleInvoice, Purchase, PaymentMode, InventoryUnit, BatchMix, ProductionBatchRun } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { AddPurchaseModal } from './AddPurchaseModal';
 import { BulkSalesCreateModal } from './BulkSalesCreateModal';
@@ -86,6 +86,20 @@ function numberToWords(num: number): string {
   }
 }
 
+/**
+ * Produce-&-sell-directly run config captured per sales line (client draft).
+ * The server persists these on the production_batches run row (sale FKs) —
+ * never on the sale line itself. `sources` maps ingredient itemId → the
+ * stock location its consumption leaves from.
+ */
+interface DirectRunConfig {
+  date: string;
+  supervisorName: string;
+  temperature: string;
+  notes: string;
+  sources: Record<string, string>;
+}
+
 interface OrdersViewProps {
   sales: Sale[];
   /** Consolidated sales invoices (one invoice = N sales orders) */
@@ -94,6 +108,8 @@ interface OrdersViewProps {
   purchaseOrders: Purchase[];
   parties: Party[];
   items: Item[];
+  /** Trackable register (asset items' units) — the sale-line unit selector reads it */
+  inventoryUnits?: InventoryUnit[];
   settings: CompanySettings;
   onAddSale: (payload: any) => any;
   onUpdateSale: (id: string, updates: any) => any;
@@ -118,6 +134,7 @@ export function OrdersView({
   purchaseOrders,
   parties,
   items,
+  inventoryUnits = [],
   settings,
   onAddSale,
   onUpdateSale,
@@ -162,7 +179,13 @@ export function OrdersView({
   // Form states
   const [formDate, setFormDate] = useState(new Date().toISOString().split('T')[0]);
   const [formPartyId, setFormPartyId] = useState('');
-  const [formItems, setFormItems] = useState<Array<{ itemId: string; quantity: string; rate: string; location: string; gstRate: string }>>([
+  const [formItems, setFormItems] = useState<Array<{
+    itemId: string; quantity: string; rate: string; location: string; gstRate: string; unitIds?: string[];
+    /** PRODUCE & SELL DIRECTLY: run config captured per line (draft — the
+     *  server persists it on the production_batches run row, not the line) */
+    produceDirect?: boolean;
+    production?: DirectRunConfig;
+  }>>([
     { itemId: '', quantity: '', rate: '', location: '', gstRate: '' },
   ]);
   const [formNotes, setFormNotes] = useState('');
@@ -208,6 +231,88 @@ export function OrdersView({
   const accounts = useMemo(() => localDb.getAccounts(), [isFormOpen]);
   const registeredVehicles = useMemo(() => localDb.getVehicles(), [isFormOpen]);
   const availableLocations = useMemo(() => localDb.getLocations(), [isFormOpen]);
+
+  // --- PRODUCE & SELL DIRECTLY (2026-11-16) ---
+  // A sales line may be produced by a production run BOUND to this sale: the
+  // recipe resolves to the item's OWN batch mix (one recipe per output item is
+  // strict — the Production module enforces it), the run quantity stays locked
+  // to the line quantity, and the output never enters stockyard stock (raw
+  // materials still consume FIFO; the sale posts no dispatch outward).
+  const batchMixes = useMemo(() => localDb.getBatchMixes(), [isFormOpen, editingOrder]);
+  const activeMixByItem = useMemo(() => {
+    const map = new Map<string, BatchMix>();
+    for (const m of batchMixes) {
+      if (m.isActive !== false) map.set(m.outputItemId, m);
+    }
+    return map;
+  }, [batchMixes]);
+  // Direct-sale runs keyed by sale id — the edit form prefills run configs
+  // from the sale's existing bound runs (the run row is the config record).
+  const directRunsBySale = useMemo(() => {
+    const map = new Map<string, ProductionBatchRun[]>();
+    for (const b of localDb.getProductionBatches()) {
+      if (!b.directSale || !b.saleId) continue;
+      const list = map.get(b.saleId) || [];
+      list.push(b);
+      map.set(b.saleId, list);
+    }
+    return map;
+  }, [isFormOpen, editingOrder]);
+
+  /** Seed a run config for an item: the item's recipe + default sourcing
+   *  locations (first assigned per material ingredient). */
+  const defaultRunConfig = (itemId: string, date: string): DirectRunConfig | undefined => {
+    const mix = activeMixByItem.get(itemId);
+    if (!mix) return undefined;
+    const sources: Record<string, string> = {};
+    for (const ing of mix.ingredients || []) {
+      const ingItem = items.find((it) => it.id === ing.itemId);
+      if (!ingItem || ingItem.type === 'service') continue; // services carry no stock
+      const rawLocs = ingItem.locations && ingItem.locations.length > 0
+        ? ingItem.locations.map((l) => l.locationName?.trim() || '')
+        : (ingItem.stockLocation || '').split(',').map((s) => s.trim());
+      sources[ing.itemId] = rawLocs.filter(Boolean)[0] || '';
+    }
+    return { date, supervisorName: '', temperature: '', notes: '', sources };
+  };
+
+  const toggleProduceDirect = (idx: number) => {
+    const row = formItems[idx];
+    if (!row) return;
+    const updated = [...formItems];
+    if (row.produceDirect) {
+      updated[idx] = { ...row, produceDirect: false, production: undefined };
+    } else {
+      const cfg = defaultRunConfig(row.itemId, formDate);
+      if (!cfg) return; // recipe-less item — the toggle renders disabled
+      updated[idx] = { ...row, produceDirect: true, production: cfg };
+    }
+    setFormItems(updated);
+  };
+
+  const setRowIngredientSource = (idx: number, ingredientItemId: string, locationName: string) => {
+    const row = formItems[idx];
+    if (!row) return;
+    const base: DirectRunConfig = row.production || defaultRunConfig(row.itemId, formDate) || { date: formDate, supervisorName: '', temperature: '', notes: '', sources: {} };
+    const sources = { ...base.sources, [ingredientItemId]: locationName };
+    const updated = [...formItems];
+    updated[idx] = { ...row, production: { ...base, sources } };
+    setFormItems(updated);
+  };
+
+  /** Assigned locations of an item (display-resolved like the row's own picker). */
+  const itemLocationChoices = (item?: Item) => {
+    if (!item) return [] as string[];
+    const raw = item.locations && item.locations.length > 0
+      ? item.locations.map((l) => l.locationName?.trim() || '')
+      : (item.stockLocation || '').split(',').map((s) => s.trim());
+    const seen = new Set<string>();
+    return raw.filter((n) => {
+      if (!n || seen.has(n.toLowerCase())) return false;
+      seen.add(n.toLowerCase());
+      return true;
+    });
+  };
 
   // Close the vehicle picker popover when clicking outside it
   React.useEffect(() => {
@@ -371,6 +476,9 @@ export function OrdersView({
           rate: String(i.rate),
           location: i.location || '',
           gstRate: String(i.gstRate ?? prod?.taxRateGst ?? 0),
+          unitIds: i.unitIds || [],
+          produceDirect: i.produceDirect,
+          production: i.produceDirect ? defaultRunConfig(i.itemId, formDate) : undefined,
         };
       })
     );
@@ -409,10 +517,12 @@ export function OrdersView({
     return [...saleDisplays, ...purchaseDisplays];
   }, [sales, purchaseOrders, fixedType]);
 
-  // Filter physical items (products) for the order dropdown
+  // Filter physical items: PRODUCTS always; ASSET (trackable) items join for
+  // sales — their units ride the sale lines and flip to sold at the money
+  // stage. Purchases of asset items arrive via GRN serial capture instead.
   const productItems = useMemo(() => {
-    return items.filter((i) => i.type === 'product' && i.isActive);
-  }, [items]);
+    return items.filter((i) => i.isActive && (i.type === 'product' || (formType === 'sales' && i.type === 'asset')));
+  }, [items, formType]);
 
   // Calculate Order statistics
   const stats = useMemo(() => {
@@ -706,15 +816,49 @@ export function OrdersView({
     setFormSettlementType(order.cashApplied ? (order.settlementType || 'account') : 'none');
     setFormAccountId(order.settlementAccountId || '');
     setFormPaymentMode((order.paymentMode as any) || 'bank_transfer');
+    // Direct-sale run configs prefill from the sale's BOUND RUNS (the run row
+    // is the config record); a same-item line pool keeps the mapping stable
+    // when a sale has several produce-direct lines of one item.
+    const runPoolForEdit = new Map<string, ProductionBatchRun[]>();
+    for (const b of directRunsBySale.get(order.id || '') || []) {
+      const pool = runPoolForEdit.get(b.targetItemId) || [];
+      pool.push(b);
+      runPoolForEdit.set(b.targetItemId, pool);
+    }
+    const takeRunFor = (itemId: string, qty: number) => {
+      const exact = (runPoolForEdit.get(itemId) || []).find(
+        (b) => Math.abs(b.targetQuantity - qty) <= 0.0001
+      );
+      const pool = runPoolForEdit.get(itemId) || [];
+      const idx2 = exact ? pool.indexOf(exact) : 0;
+      return idx2 >= 0 && idx2 < pool.length ? pool.splice(idx2, 1)[0] : undefined;
+    };
+    const runConfigFrom = (run: ProductionBatchRun): DirectRunConfig => ({
+      date: run.date || order.date,
+      supervisorName: run.supervisorName === 'Plant Supervisor' ? '' : (run.supervisorName || ''),
+      temperature: run.mixTemperatureCelsius !== undefined && run.mixTemperatureCelsius !== null ? String(run.mixTemperatureCelsius) : '',
+      notes: '',
+      sources: Object.fromEntries(
+        (run.rawMaterialsConsumed || []).map((c) => [c.itemId, c.locationName || ''])
+      ),
+    });
     setFormItems(
       order.items.map((i) => {
         const prod = items.find((it) => it.id === i.itemId);
+        const boundRun = i.produceDirect ? takeRunFor(i.itemId, Number(i.quantity) || 0) : undefined;
         return {
           itemId: i.itemId,
           quantity: String(i.quantity),
           rate: String(i.rate),
           location: i.location || '',
           gstRate: String(i.gstRate ?? prod?.taxRateGst ?? 0),
+          unitIds: i.unitIds || [],
+          produceDirect: i.produceDirect,
+          production: i.produceDirect
+            ? (boundRun
+                ? runConfigFrom(boundRun)
+                : defaultRunConfig(i.itemId, order.date))
+            : undefined,
         };
       })
     );
@@ -725,7 +869,28 @@ export function OrdersView({
 
   // Handle row addition in items form
   const handleAddFormItemRow = () => {
-    setFormItems([...formItems, { itemId: '', quantity: '', rate: '', location: '', gstRate: '' }]);
+    setFormItems([...formItems, { itemId: '', quantity: '', rate: '', location: '', gstRate: '', unitIds: [] }]);
+  };
+
+  // TRACKABLE unit picker — one modal per line row (idx); toggling a serial
+  // updates the row (and the row's quantity state keeps the validators happy)
+  const [unitsPickerRow, setUnitsPickerRow] = useState<number | null>(null);
+  const [unitsPickerQuery, setUnitsPickerQuery] = useState('');
+  const toggleRowUnit = (idx: number, unitId: string) => {
+    const row = formItems[idx];
+    if (!row) return;
+    const picked = row.unitIds || [];
+    const next = picked.includes(unitId) ? picked.filter((u) => u !== unitId) : [...picked, unitId];
+    const updated = [...formItems];
+    updated[idx] = { ...row, unitIds: next, quantity: String(next.length) };
+    setFormItems(updated);
+  };
+  const setRowUnits = (idx: number, unitIdList: string[]) => {
+    const row = formItems[idx];
+    if (!row) return;
+    const updated = [...formItems];
+    updated[idx] = { ...row, unitIds: unitIdList, quantity: String(unitIdList.length) };
+    setFormItems(updated);
   };
 
   // Handle row removal in items form
@@ -746,6 +911,28 @@ export function OrdersView({
     // If item changed, auto-fill default rate and location
     if (field === 'itemId') {
       const selectedProduct = productItems.find((p) => p.id === value);
+      // TRACKABLE line reset: no storage location (the register unit carries
+      // its own context); unit selection starts empty (Units column).
+      if (selectedProduct?.type === 'asset') {
+        updated[index].rate = String(selectedProduct.salePrice);
+        updated[index].location = '';
+        updated[index].gstRate = String(selectedProduct.taxRateGst ?? 0);
+        updated[index].unitIds = [];
+        // Asset lines ship register units — production runs don't apply to them.
+        updated[index].produceDirect = false;
+        updated[index].production = undefined;
+        setFormItems(updated);
+        return;
+      }
+      updated[index].unitIds = undefined;
+      // Produce-direct follows the item: the run config re-seeds for the new
+      // item; a recipe-less item drops the toggle (the server refuses
+      // produce-direct lines with no recipe outright).
+      if (updated[index].produceDirect) {
+        const cfg = defaultRunConfig(value, formDate);
+        updated[index].produceDirect = Boolean(cfg);
+        updated[index].production = cfg;
+      }
       if (selectedProduct) {
         updated[index].rate = String(
           formType === 'sales'
@@ -850,6 +1037,37 @@ export function OrdersView({
       setFormError('Please add at least one valid item with a quantity greater than zero.');
       return;
     }
+    // TRACKABLE lines must ride their serial units
+    const missingUnits = validRows.find((row) => {
+      const item = items.find((i) => i.id === row.itemId);
+      return item?.type === 'asset' && (row.unitIds || []).length === 0;
+    });
+    if (missingUnits) {
+      setFormError(`Select the serial unit(s) for "${items.find((i) => i.id === missingUnits.itemId)?.name}" — a trackable item is sold per physical unit.`);
+      return;
+    }
+
+    // PRODUCE & SELL DIRECTLY: every produce-direct line needs its recipe (the
+    // toggle renders disabled without one) and every material ingredient needs
+    // a sourcing location when the ingredient item tracks assigned locations.
+    for (const row of validRows) {
+      if (!row.produceDirect) continue;
+      const lineItem = items.find((i) => i.id === row.itemId);
+      const mix = activeMixByItem.get(row.itemId);
+      if (!mix) {
+        setFormError(`No recipe (batch mix) exists for "${lineItem?.name || 'this item'}" — create one in the Production module first (one recipe per item).`);
+        return;
+      }
+      for (const ing of mix.ingredients || []) {
+        const ingItem = items.find((it) => it.id === ing.itemId);
+        if (!ingItem || ingItem.type === 'service') continue;
+        const ingLocs = itemLocationChoices(ingItem);
+        if (ingLocs.length > 0 && !row.production?.sources?.[ing.itemId]) {
+          setFormError(`Pick the sourcing location for ${ingItem.name} on the "${lineItem?.name}" production run.`);
+          return;
+        }
+      }
+    }
 
     // Dispatch & trip details (sales): every dispatched sale carries a trip —
     // an own fleet vehicle (FK) or an OUTSOURCED one (typed plate).
@@ -888,6 +1106,18 @@ export function OrdersView({
     // Map rows to item-input format (server resolves FKs: item/unit/location)
     const itemsList = validRows.map((row) => {
       const product = items.find((i) => i.id === row.itemId)!;
+      // TRACKABLE lines: quantity IS the picked unit count; no storage
+      // location applies (the register unit carries its own context).
+      if (product.type === 'asset') {
+        const unitIds = (row.unitIds || []).filter(Boolean);
+        return {
+          itemId: row.itemId,
+          quantity: unitIds.length,
+          rate: Number(row.rate),
+          gstRate: Number(row.gstRate) || 0,
+          unitIds,
+        };
+      }
       const qty = Number(row.quantity);
       const rate = Number(row.rate);
       const prodLocs = product.locations && product.locations.length > 0
@@ -896,6 +1126,13 @@ export function OrdersView({
           ? product.stockLocation.split(',').map((s) => ({ locationName: s.trim() }))
           : [];
       const assignedLoc = row.location?.trim() || prodLocs[0]?.locationName || undefined;
+      // PRODUCE & SELL DIRECTLY: the run config rides the payload once — the
+      // server records it on the run (recipe, locked qty, sourcing locations)
+      const runMix = row.produceDirect ? activeMixByItem.get(row.itemId) : undefined;
+      const runSources: Record<string, string> = row.production?.sources || {};
+      const runLocations = Object.entries(runSources)
+        .filter(([, loc]) => loc && loc.trim())
+        .map(([ingredientItemId, loc]) => ({ itemId: ingredientItemId, locationName: loc }));
       return {
         itemId: row.itemId,
         quantity: qty,
@@ -903,6 +1140,18 @@ export function OrdersView({
         gstRate: Number(row.gstRate) || 0,
         locationName: assignedLoc,
         receivedQuantity: (formType === 'purchase') ? qty : undefined,
+        produceDirect: runMix ? true : undefined,
+        production: runMix
+          ? {
+              date: row.production?.date || formDate,
+              supervisorName: row.production?.supervisorName?.trim() || undefined,
+              mixTemperatureCelsius: Number(row.production?.temperature) > 0
+                ? Number(row.production!.temperature)
+                : undefined,
+              notes: row.production?.notes?.trim() || undefined,
+              itemLocations: runLocations,
+            }
+          : undefined,
       };
     });
 
@@ -1946,6 +2195,9 @@ export function OrdersView({
                     <thead>
                       <tr className="bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] font-bold text-[10px] uppercase border-b border-[var(--color-outline-variant)]">
                         <th className="py-2.5 px-3 min-w-[240px] first:rounded-tl-2xl">Item / Product</th>
+                        {formType === 'sales' && (
+                          <th className="py-2.5 px-3 w-20 text-center">Produce</th>
+                        )}
                         <th className="py-2.5 px-3 w-44">{formType === 'sales' ? 'Dispatch Location' : 'Receiving Location'}</th>
                         <th className="py-2.5 px-3 w-28">Quantity</th>
                         <th className="py-2.5 px-3 w-28">Rate ({settings.currency?.symbol || '₹'})</th>
@@ -1958,6 +2210,11 @@ export function OrdersView({
                       {formItems.map((row, idx) => {
                         const selectedProd = productItems.find((p) => p.id === row.itemId);
                         const lineTotal = (Number(row.quantity) || 0) * (Number(row.rate) || 0);
+                        // TRACKABLE row: units ride the line, not yard stock
+                        const isAssetLine = selectedProd?.type === 'asset';
+                        const rowUnitIds = (row.unitIds || []) as string[];
+                        const rowUnitIdsSet = new Set(rowUnitIds);
+                        const rowUnits = rowUnitIds.map((uid) => inventoryUnits.find((u) => u.id === uid)).filter(Boolean) as InventoryUnit[];
 
                         // Multi-location options for this product
                         const rawItemLocs = selectedProd?.locations && selectedProd.locations.length > 0
@@ -1977,10 +2234,11 @@ export function OrdersView({
                         );
 
                         const currentLocStock = matchedLocStock ? Number(matchedLocStock.currentStock || 0) : (selectedProd?.currentStock || 0);
-                        const isStockInsufficient = formType === 'sales' && selectedProd && Number(row.quantity) > currentLocStock;
+                        const isStockInsufficient = !isAssetLine && formType === 'sales' && selectedProd && Number(row.quantity) > currentLocStock;
 
                         return (
-                          <tr key={idx} className="bg-[var(--color-surface-container-lowest)]">
+                          <React.Fragment key={idx}>
+                          <tr className="bg-[var(--color-surface-container-lowest)]">
                             {/* Material selection (typable, searchable by code or name) */}
                             <td className="py-2 px-3">
                               <SearchableSelect
@@ -1991,14 +2249,77 @@ export function OrdersView({
                                 options={productItems.map((p) => ({
                                   value: p.id,
                                   label: p.code,
-                                  sub: `(${p.name}) · Qty: ${p.currentStock || 0} ${p.unit}`,
+                                  sub: p.type === 'asset'
+                                    ? `(${p.name}) · Register: ${inventoryUnits.filter((u) => u.itemId === p.id && (u.status === 'in_stock' || u.status === 'deployed')).length} unit(s) available`
+                                    : `(${p.name}) · Qty: ${p.currentStock || 0} ${p.unit}`,
                                 }))}
                               />
                             </td>
 
-                            {/* Location selection (typable, searchable) */}
+                            {/* PRODUCE & SELL DIRECTLY (2026-11-16): the run
+                                toggle — ON records a production run bound to
+                                this sale (recipe-less items render it
+                                disabled); the output never enters stock */}
+                            {formType === 'sales' && (
+                              <td className="py-2 px-3 text-center align-top">
+                                {(() => {
+                                  if (isAssetLine) {
+                                    return <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)]">—</span>;
+                                  }
+                                  const lineMix = row.itemId ? activeMixByItem.get(row.itemId) : undefined;
+                                  const noRecipe = Boolean(row.itemId) && !lineMix;
+                                  return (
+                                    <div className="flex flex-col items-center gap-1">
+                                      <button
+                                        type="button"
+                                        role="switch"
+                                        aria-checked={Boolean(row.produceDirect)}
+                                        disabled={noRecipe}
+                                        title={noRecipe
+                                          ? 'No recipe (batch mix) exists for this item — create one in the Production module first.'
+                                          : row.produceDirect
+                                            ? 'Produce & sell directly is ON — the run ships straight to the party'
+                                            : 'Produce this item in a production run bound to this sale'}
+                                        onClick={() => toggleProduceDirect(idx)}
+                                        className={`relative w-9 h-5 rounded-full transition-colors ${row.produceDirect ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-outline-variant)]'} ${noRecipe ? 'opacity-40 cursor-not-allowed' : ''}`}
+                                      >
+                                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${row.produceDirect ? 'translate-x-4' : ''}`} />
+                                      </button>
+                                      {noRecipe && (
+                                        <span className="text-[8px] font-bold text-[var(--color-on-surface-variant)] leading-tight">No recipe</span>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+                              </td>
+                            )}
+
+                            {/* Location selection (typable, searchable) — or the
+                                UNIT PICKER for trackable lines */}
                             <td className="py-2 px-3">
-                              {!selectedProd ? (
+                              {isAssetLine ? (
+                                <div className="space-y-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setUnitsPickerRow(idx)}
+                                    className="px-3 py-1.5 rounded-full border border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[11px] font-bold text-[var(--color-primary)] hover:border-[var(--color-primary)]/50"
+                                  >
+                                    {rowUnitIds.length > 0 ? `Select Units (${rowUnitIds.length})` : 'Select Units'}
+                                  </button>
+                                  {rowUnits.length > 0 && (
+                                    <div className="flex flex-wrap gap-1 max-w-[220px]">
+                                      {rowUnits.map((u) => (
+                                        <span key={u.id} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[var(--color-primary-container)] text-[var(--color-primary)] text-[10px] font-bold font-mono">
+                                          {u.serialNumber}
+                                          <button type="button" onClick={() => toggleRowUnit(idx, u.id)} className="hover:text-[var(--color-error)]">
+                                            <X className="w-3 h-3" />
+                                          </button>
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              ) : !selectedProd ? (
                                 <SearchableSelect
                                   value=""
                                   onChange={() => {}}
@@ -2038,8 +2359,15 @@ export function OrdersView({
                               )}
                             </td>
 
-                            {/* Quantity */}
+                            {/* Quantity — derived from the picked units on a
+                                trackable row (readonly) */}
                             <td className="py-2 px-3">
+                              {isAssetLine ? (
+                                <div className="flex items-center gap-1">
+                                  <span className="text-xs font-black text-[var(--color-on-surface)]">{rowUnitIds.length}</span>
+                                  <span className="text-[10px] text-[var(--color-on-surface-variant)] font-semibold">{selectedProd?.unit || ''}</span>
+                                </div>
+                              ) : (
                               <div className="flex items-center gap-1">
                                 <input
                                   type="number"
@@ -2052,6 +2380,7 @@ export function OrdersView({
                                 />
                                 {selectedProd && <span className="text-[10px] text-[var(--color-on-surface-variant)] font-semibold">{selectedProd.unit}</span>}
                               </div>
+                              )}
                             </td>
 
                             {/* Rate */}
@@ -2105,6 +2434,69 @@ export function OrdersView({
                               </button>
                             </td>
                           </tr>
+
+                          {/* PRODUCE & SELL DIRECTLY: the run config row —
+                              minimum-space ingredient sourcing (recipe resolves
+                              by item; qty locked to the order qty). The row
+                              spans ONLY through the Qty column — it never
+                              stretches under Rate/GST/Total */}
+                          {row.produceDirect && activeMixByItem.get(row.itemId) && (() => {
+                            const mix = activeMixByItem.get(row.itemId)!;
+                            const runQty = Number(row.quantity) || 0;
+                            const refQty = Number(mix.referenceOutputQty) || 0;
+                            return (
+                              <tr>
+                                <td colSpan={4} className="px-3 pb-1.5">
+                                  <table className="table-fixed text-left text-[9px] align-middle">
+                                    <colgroup>
+                                      <col className="w-20" />
+                                      <col className="w-20" />
+                                      <col className="w-40" />
+                                    </colgroup>
+                                    <tbody>
+                                      {mix.ingredients.map((ing) => {
+                                        const ingItem = items.find((it) => it.id === ing.itemId);
+                                        const basis = ing.basis || 'quantity';
+                                        const est = basis === 'percentage'
+                                          ? (Number(ing.percentage) || 0) * runQty / 100
+                                          : refQty > 0
+                                            ? (Number(ing.quantity) || 0) * runQty / refQty
+                                            : 0;
+                                        const isService = ingItem?.type === 'service';
+                                        const ingLocs = itemLocationChoices(ingItem);
+                                        return (
+                                          <tr key={ing.itemId}>
+                                            <td className="py-0.5 pr-2 font-semibold text-[var(--color-on-surface-variant)] truncate">
+                                              {ingItem ? ingItem.code : '—'}
+                                            </td>
+                                            <td className="py-0.5 pr-2 font-semibold text-[var(--color-on-surface-variant)] whitespace-nowrap">
+                                              {isService ? 'service' : `${Number(est.toFixed(4))} ${ingItem?.unit || ''}`}
+                                            </td>
+                                            <td className="py-0.5">
+                                              {isService ? (
+                                                <span className="py-0.5 font-semibold text-[var(--color-on-surface-variant)]">no stock post</span>
+                                              ) : ingLocs.length === 0 ? (
+                                                <span className="py-0.5 font-semibold text-[var(--color-on-surface-variant)]">no location</span>
+                                              ) : (
+                                                <SearchableSelect
+                                                  value={row.production?.sources?.[ing.itemId] || ''}
+                                                  onChange={(v) => setRowIngredientSource(idx, ing.itemId, v)}
+                                                  placeholder="Source location..."
+                                                  inputClass="text-[9px] font-semibold"
+                                                  options={ingLocs.map((locName) => ({ value: locName, label: locName }))}
+                                                />
+                                              )}
+                                            </td>
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </td>
+                              </tr>
+                            );
+                          })()}
+                          </React.Fragment>
                         );
                       })}
                     </tbody>
@@ -2519,6 +2911,102 @@ export function OrdersView({
           </div>
         </div>
       )}
+
+      {/* --- TRACKABLE UNIT PICKER (one line row's serial selection) --- */}
+      {unitsPickerRow !== null && (() => {
+        const row = formItems[unitsPickerRow];
+        if (!row) return null;
+        const unitItem = items.find((i) => i.id === row.itemId);
+        const rowUnitIds = (row.unitIds || []) as string[];
+        const mineSet = new Set(rowUnitIds);
+        const othersPicked = new Set(
+          formItems.flatMap((r, i2) => (i2 === unitsPickerRow ? [] : ((r.unitIds || []) as string[])))
+        );
+        // Sellable units of THIS item: in stock or deployed; sold/scrapped are
+        // gone; a unit picked on ANOTHER row is greyed out (one sale each).
+        const candidates = inventoryUnits.filter((u) => u.itemId === row.itemId && (u.status === 'in_stock' || u.status === 'deployed'));
+        const visible = candidates.filter((u) => {
+          if (!unitsPickerQuery.trim()) return true;
+          const hay = [u.serialNumber, u.vehicleNo, u.locationName, u.supplierName].filter(Boolean).join(' ').toLowerCase();
+          return hay.includes(unitsPickerQuery.toLowerCase().trim());
+        });
+        return (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs">
+            <div className="bg-[var(--color-surface-container-lowest)] w-full max-w-lg rounded-3xl shadow-2xl border border-[var(--color-outline-variant)] flex flex-col max-h-[80vh]">
+              <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
+                <div>
+                  <h3 className="text-sm font-bold text-[var(--color-on-surface)]">Select Units — {unitItem?.name}</h3>
+                  <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
+                    {rowUnitIds.length} unit(s) selected for this line — each serial sells ONE physical unit
+                  </p>
+                </div>
+                <button type="button" onClick={() => { setUnitsPickerRow(null); setUnitsPickerQuery(''); }} className="p-2 text-[var(--color-outline)] rounded-full hover:bg-[var(--color-surface-container-high)]"><X className="w-4.5 h-4.5" /></button>
+              </div>
+              <div className="px-6 pt-4">
+                <input
+                  type="text"
+                  autoFocus
+                  placeholder="Search by serial, vehicle, location..."
+                  value={unitsPickerQuery}
+                  onChange={(e) => setUnitsPickerQuery(e.target.value)}
+                  className="w-full px-4 py-2 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                />
+              </div>
+              <div className="p-6 overflow-y-auto space-y-1.5">
+                {visible.length === 0 ? (
+                  <p className="text-xs text-[var(--color-on-surface-variant)] text-center py-8">
+                    No eligible units. Register units for {unitItem?.name || 'this item'} in the Trackable inventory tab first.
+                  </p>
+                ) : (
+                  visible.map((u) => {
+                    const mine = mineSet.has(u.id);
+                    const takenElsewhere = othersPicked.has(u.id);
+                    return (
+                      <button
+                        key={u.id}
+                        type="button"
+                        disabled={takenElsewhere}
+                        onClick={() => toggleRowUnit(unitsPickerRow, u.id)}
+                        className={`w-full flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border text-left transition-colors ${
+                          mine
+                            ? 'border-[var(--color-primary)] bg-[var(--color-primary-container)]/40'
+                            : takenElsewhere
+                              ? 'border-[var(--color-outline-variant)] opacity-40 cursor-not-allowed'
+                              : 'border-[var(--color-outline-variant)] hover:border-[var(--color-primary)]/50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className={`w-4.5 h-4.5 rounded-full border flex items-center justify-center shrink-0 ${mine ? 'bg-[var(--color-primary)] border-[var(--color-primary)] text-[var(--color-on-primary)]' : 'border-[var(--color-outline)]'}`}>
+                            {mine && <Check className="w-3 h-3" />}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="font-mono font-bold text-[var(--color-on-surface)] text-xs truncate">{u.serialNumber}</p>
+                            <p className="text-[10px] text-[var(--color-on-surface-variant)] truncate">
+                              {u.status === 'deployed' ? `In use${u.vehicleNo ? ` @ ${u.vehicleNo}` : ''}` : (u.locationName || 'In stock')}
+                              {u.condition ? ` · ${u.condition}` : ''}
+                            </p>
+                          </div>
+                        </div>
+                        {takenElsewhere && <span className="text-[9px] font-bold uppercase text-[var(--color-error)] shrink-0">Picked on another line</span>}
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+              <div className="px-6 py-4 border-t border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] flex items-center justify-between">
+                <span className="text-[10px] font-bold text-[var(--color-on-surface-variant)]">Sold units flip to "Sold" in the register once this document reaches a money stage.</span>
+                <button
+                  type="button"
+                  onClick={() => { setUnitsPickerRow(null); setUnitsPickerQuery(''); }}
+                  className="px-5 py-2 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold hover:opacity-95"
+                >
+                  Done ({rowUnitIds.length})
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* --- ORDER DETAIL VIEW MODAL --- */}
       {/* ORDER DETAILS MODAL — shared with the party statement (same modal,

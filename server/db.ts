@@ -8,16 +8,23 @@ import {
   Transaction,
   CompanySettings,
   Item,
+  ItemAttributeKey,
   ItemCategory,
   ItemUnit,
   ItemLocation,
   ItemLocationStock,
   ProductionBatchRun,
+  BatchMix,
+  BatchMixIngredient,
   Order,
   Vehicle,
   Driver,
   TripSlip,
   Tyre,
+  InventoryUnit,
+  InventoryUnitEvent,
+  InventoryUnitStatus,
+  InventoryUnitEventType,
   Employee,
   EmployeeAttendance,
   EmployeeLeave,
@@ -76,6 +83,10 @@ import {
   liveSyncPurchaseItems,
   liveSyncPurchaseStages,
   liveSyncBatch,
+  liveSyncBatchMix,
+  liveSyncInventoryUnit,
+  liveSyncInventoryUnitEvent,
+  liveSyncInventoryUnitEventsBulk,
   liveSyncAuditLog,
   liveSyncDocument,
   liveSyncSaleOrderDocLink,
@@ -164,6 +175,8 @@ export interface DatabaseSchema {
   locations: ItemLocation[];
   stockAdjustments: ItemStockAdjustment[];
   productionBatches: ProductionBatchRun[];
+  /** Batch mixes (recipes) — production feature (2026-11-12) */
+  batchMixes: BatchMix[];
   /** @deprecated legacy `orders` rows (retired by the relational sale/purchase split) */
   orders: Order[];
   sales: Sale[];
@@ -206,6 +219,10 @@ export interface DatabaseSchema {
   /** APP DEFAULTS — the generic key/value default store (table app_defaults;
    *  key IS the primary key). First member: diesel_rate = '99.8' (₹/litre). */
   appDefaults: AppDefault[];
+  /** TRACKABLE INVENTORY — asset-type items are catalog headers; each physical
+   *  unit is one register row + its append-only lifecycle log. */
+  inventoryUnits: InventoryUnit[];
+  inventoryUnitEvents: InventoryUnitEvent[];
 }
 
 /**
@@ -252,6 +269,9 @@ class ServerLocalDatabase {
       stockAdjustments: [],
       stockMovements: [],
       productionBatches: JSON.parse(JSON.stringify(SEED_BATCHES)),
+      batchMixes: [],
+      inventoryUnits: [],
+      inventoryUnitEvents: [],
       orders: [],
       sales: [],
       salesInvoices: [],
@@ -921,6 +941,13 @@ class ServerLocalDatabase {
     newItem.unitId =
       (this.data.units || []).find((u) => (u.code || '').trim().toLowerCase() === (newItem.unit || '').trim().toLowerCase() ||
         (u.name || '').trim().toLowerCase() === (newItem.unit || '').trim().toLowerCase())?.id || newItem.unitId;
+    // DYNAMIC ATTRIBUTES (serialized, 2026-11-16): the declared per-unit key
+    // list rides the create payload for trackable items.
+    if (newItem.type === 'asset' && data.attributes !== undefined) {
+      newItem.attributes = this.sanitizeItemAttributes(data.attributes);
+    } else {
+      delete newItem.attributes;
+    }
     if (existingIdx !== -1) {
       this.data.items[existingIdx] = newItem;
     } else {
@@ -942,6 +969,20 @@ class ServerLocalDatabase {
     // endpoint, so documentIds should never ride an update — never persist it.
     delete (updates as any).documentIds;
     const existing = this.data.items[index];
+
+    // TYPE GUARD (trackable, 2026-11-13): an item's type may change ONLY while
+    // nothing depends on it — no stock-movement history (the aggregate ledger)
+    // and no register units. A "Tyre" mistakenly created as a Stock Item can be
+    // converted to Trackable until its first movement / unit; after that the
+    // type is frozen to keep the registers meaningful.
+    if (updates.type && updates.type !== existing.type) {
+      const hasMovements = (this.data.stockMovements || []).some((m) => m.itemId === id);
+      const hasRegisterUnits = (this.data.inventoryUnits || []).some((u) => u.itemId === id);
+      if (hasMovements || hasRegisterUnits) {
+        throw new Error(`"${existing.name}" carries stock history / registered units — its type can no longer change.`);
+      }
+      this.logAudit('UPDATE', 'ITEM', id, `Item ${existing.name} type changed ${existing.type} → ${updates.type}`);
+    }
 
     let locations = updates.locations !== undefined ? updates.locations : existing.locations;
     let computedStock = updates.currentStock !== undefined ? Number(updates.currentStock) : existing.currentStock;
@@ -975,6 +1016,16 @@ class ServerLocalDatabase {
       id,
       updatedAt: new Date().toISOString(),
     };
+    // DYNAMIC ATTRIBUTES (serialized, 2026-11-16): a trackable item's key list
+    // may grow/change while its units live — existing units keep their stored
+    // values (unknown keys survive as legacy data on the unit row only).
+    if (updates.attributes !== undefined) {
+      if (existing.type !== 'asset') {
+        throw new Error(`Attribute keys apply to serialized (trackable) items — "${existing.name}" is not one.`);
+      }
+      updated.attributes = this.sanitizeItemAttributes(updates.attributes);
+    }
+    // else: keep whatever the existing row carried (spread above)
     // Movements are ledger-only: never persist movement history on the item row.
     // valuationRate/stockValue are read-time computations — likewise never persisted.
     delete updated.movements;
@@ -1006,9 +1057,15 @@ class ServerLocalDatabase {
     return true;
   }
 
-  public adjustItemStock(id: string, delta: number, logType: 'purchase_inward' | 'production_output' | 'production_consumed' | 'sale_dispatch' | 'opening' | 'adjustment_increase' | 'adjustment_decrease' | 'dispatch_reversal' | 'inward_reversal', refNo?: string, notes?: string, locationName?: string, partyId?: string, rate?: number, referenceId?: string): Item {
+  public adjustItemStock(id: string, delta: number, logType: 'purchase_inward' | 'production_output' | 'production_consumed' | 'production_consumed_reversal' | 'sale_dispatch' | 'opening' | 'adjustment_increase' | 'adjustment_decrease' | 'dispatch_reversal' | 'inward_reversal', refNo?: string, notes?: string, locationName?: string, partyId?: string, rate?: number, referenceId?: string): Item {
     const item = this.findItemRaw(id);
     if (!item) throw new Error(`Item ${id} not found.`);
+    // TRACKABLE (asset) items carry NO aggregate stock — their physical units
+    // live in the inventory_units register (enter / deploy / sell / scrap).
+    // An aggregate movement here would invent stock the register never had.
+    if (item.type === 'asset') {
+      throw new Error(`"${item.name}" is a trackable (asset) item — it carries no aggregate stock. Capture its serial units in the trackable register instead.`);
+    }
     const current = item.currentStock || 0;
     // NEGATIVE STOCK IS ALLOWED (mirrors the Azure MySQL path, which applies
     // the raw delta unclamped in liveSyncStockMovement): clamping here made
@@ -1062,22 +1119,38 @@ class ServerLocalDatabase {
 
     const targetLoc = locationName?.trim();
     let targetLocationId: string | undefined;
+    // Resolve a bucket's FK from the master list (legacy breakdown rows carry
+    // no locationId; the ledger movement must still post the authoritative id).
+    const masterIdForName = (name?: string) =>
+      name
+        ? this.data.locations?.find((ml) => (ml.name || '').trim().toLowerCase() === name.trim().toLowerCase())?.id
+        : undefined;
+    const applyDeltaToBucket = (idx: number) => {
+      const curLocStock = Number(updatedLocations[idx].currentStock) || 0;
+      updatedLocations[idx] = { ...updatedLocations[idx], currentStock: curLocStock + delta };
+      targetLocationId = updatedLocations[idx].locationId || masterIdForName(updatedLocations[idx].locationName);
+    };
+
     if (targetLoc) {
       const locIdx = updatedLocations.findIndex((l) => l.locationName.trim().toLowerCase() === targetLoc.toLowerCase());
       if (locIdx !== -1) {
-        const curLocStock = Number(updatedLocations[locIdx].currentStock) || 0;
-        updatedLocations[locIdx] = {
-          ...updatedLocations[locIdx],
-          currentStock: curLocStock + delta,
-        };
-        targetLocationId = updatedLocations[locIdx].locationId;
+        applyDeltaToBucket(locIdx);
       } else if (delta > 0) {
-        updatedLocations.push({
-          locationName: targetLoc,
-          currentStock: delta,
-          openingStock: 0,
-        });
+        // Positive qty at an unplanned location opens a fresh bucket for it.
+        updatedLocations.push({ locationName: targetLoc, currentStock: delta, openingStock: 0 });
+        targetLocationId = masterIdForName(targetLoc);
+      } else {
+        // Unmatched deduction: the item total MUST still move — take it from
+        // the first assigned bucket (ledger row records where it actually
+        // left). Silent no-op would strand the outward (currentStock is
+        // recomputed from the breakdown below).
+        if (updatedLocations.length > 0) applyDeltaToBucket(0);
       }
+    } else if (updatedLocations.length > 0) {
+      // No location supplied: land the delta on the first assigned bucket so
+      // the movement always reaches the item total (the ledger row carries the
+      // bucket; Azure's per-location mapping stays untouched as before).
+      applyDeltaToBucket(0);
     }
 
     // Deduplicate location names cleanly
@@ -1138,6 +1211,12 @@ class ServerLocalDatabase {
         break;
       case 'production_output':
       case 'production_consumed':
+        movement.referenceType = 'production_batch';
+        break;
+      // Consumption reversal keyed on the ORIGINAL movement's id (the same
+      // matching pattern as dispatch_reversal) — the sale it belongs to drives
+      // the referenceId.
+      case 'production_consumed_reversal':
         movement.referenceType = 'production_batch';
         break;
       default:
@@ -2126,12 +2205,33 @@ class ServerLocalDatabase {
   private normalizeSaleItemLines(saleId: string, input: SalesOrderItemInput[], stageId?: string): SalesOrderItem[] {
     const now = new Date().toISOString();
     return (input || [])
-      .filter((li) => li.itemId && Number(li.quantity) > 0)
       .map((li) => {
         const master = this.findItemRaw(li.itemId);
-        const locationId = li.locationId || this.resolveLocationIdFromName(li.locationName);
-        const quantity = Number(li.quantity) || 0;
+        // TRACKABLE (asset) lines ship REGISTER UNITS: the serial selection IS
+        // the line — quantity equals the number of chosen units, and at least
+        // one unit must ride every asset line (an unscoped asset sale would
+        // tell stock nothing at all).
+        const rawUnitIds = Array.isArray(li.unitIds) ? li.unitIds.filter(Boolean) : [];
+        if (master?.type === 'asset') {
+          if (rawUnitIds.length === 0) {
+            throw new Error(`Select the serial unit(s) for line "${li.itemName || master.name}" — a trackable item is sold per physical unit.`);
+          }
+          if (rawUnitIds.length !== new Set(rawUnitIds).size) {
+            throw new Error(`Duplicate unit selection on line "${li.itemName || master.name}".`);
+          }
+          for (const uid of rawUnitIds) {
+            const unit = this.data.inventoryUnits?.find((u) => u.id === uid);
+            if (!unit) throw new Error(`Selected unit no longer exists on line "${li.itemName || master.name}" — refresh and pick again.`);
+            if (unit.itemId !== li.itemId) throw new Error(`Unit ${unit.serialNumber} does not belong to "${master.name}" — pick units of the line's own item.`);
+            if (unit.status === 'sold') throw new Error(`Unit ${unit.serialNumber} is already sold.`);
+            if (unit.status === 'scrapped') throw new Error(`Unit ${unit.serialNumber} was scrapped — it cannot be sold.`);
+          }
+        }
+        const unitCount = master?.type === 'asset' ? rawUnitIds.length : (Number(li.quantity) || 0);
+        if (!li.itemId || unitCount <= 0) return null;
+        const quantity = unitCount;
         const rate = Number(li.rate) || 0;
+        const locationId = li.locationId || this.resolveLocationIdFromName(li.locationName);
         return {
           id: `soi-${saleId}-${Math.random().toString(36).slice(2, 10)}`,
           saleId,
@@ -2145,9 +2245,17 @@ class ServerLocalDatabase {
           gstRate: li.gstRate ?? master?.taxRateGst ?? 0,
           locationId,
           itemNotes: li.itemNotes,
+          ...(master?.type === 'asset' ? { unitIds: rawUnitIds } : {}),
+          // PRODUCE-&-SELL-DIRECTLY: the line flag rides the sale (the run
+          // configuration itself lives on the production_batches row)
+          produceDirect: Boolean(li.produceDirect),
+          // One-shot run config (NOT persisted on the line — the run row is
+          // the record; it rides creation/edit payloads to the run factory)
+          ...((li as any).production ? { production: (li as any).production } : {}),
           createdAt: now,
         } as unknown as SalesOrderItem;
-      });
+      })
+      .filter((li): li is SalesOrderItem => li !== null);
   }
 
   private normalizePurchaseItemLines(purchaseId: string, input: PurchaseOrderItemInput[]): PurchaseOrderItem[] {
@@ -2157,12 +2265,28 @@ class ServerLocalDatabase {
       .map((li) => {
         const master = this.findItemRaw(li.itemId);
         const locationId = li.locationId || this.resolveLocationIdFromName(li.locationName);
-        const ordered = Number(li.quantity) || 0;
+        // SERIALIZED line (2026-11-16): an asset line IS one physical unit —
+        // quantity is fixed at 1 (more units = more lines), and the unit's
+        // entry (serial + declared-key values) rides the line.
+        const serialized = master?.type === 'asset';
+        const ordered = serialized ? 1 : (Number(li.quantity) || 0);
         const rate = Number(li.rate) || 0;
-        const recv =
-          li.receivedQuantity !== undefined && li.receivedQuantity !== null
-            ? Number(li.receivedQuantity)
-            : undefined;
+        const recv = serialized ? undefined : (li.receivedQuantity !== undefined && li.receivedQuantity !== null
+          ? Number(li.receivedQuantity)
+          : undefined);
+        const rawEntry = (li as any).unitEntry as { serialNumber?: string; attributes?: Record<string, string | number> } | undefined;
+        const serial = serialized ? String(rawEntry?.serialNumber || '').trim() : undefined;
+        const cleanEntry: PurchaseOrderItem['unitEntry'] = serialized
+          ? (serial
+            ? { serialNumber: serial, ...(rawEntry?.attributes && typeof rawEntry.attributes === 'object' ? { attributes: rawEntry.attributes } : {}) }
+            : undefined)
+          : undefined;
+        if (serialized && !serial) {
+          throw new Error(`Enter the serial number for line "${master?.name || li.itemId}" — a serialized purchase line carries exactly ONE unit.`);
+        }
+        if (serialized && li.receivedQuantity !== undefined && li.receivedQuantity !== null && Number(li.receivedQuantity) > 1) {
+          throw new Error(`A serialized line ("${master?.name}") receives exactly one unit — add more lines to receive more units.`);
+        }
         return {
           id: `poi-${purchaseId}-${Math.random().toString(36).slice(2, 10)}`,
           purchaseId,
@@ -2177,6 +2301,7 @@ class ServerLocalDatabase {
           shortageQuantity: recv !== undefined && recv < ordered ? ordered - recv : undefined,
           overageQuantity: recv !== undefined && recv > ordered ? recv - ordered : undefined,
           itemNotes: li.itemNotes,
+          ...(cleanEntry ? { unitEntry: cleanEntry } : {}),
           createdAt: now,
         } as unknown as PurchaseOrderItem;
       });
@@ -2191,12 +2316,30 @@ class ServerLocalDatabase {
    */
   public applySaleInventory(sale: Sale, referenceNumber?: string, force = false): boolean {
     if (sale.inventoryApplied && !force) return false;
+    // TRACKABLE lines: their register units flip to SOLD here (sale FK on the
+    // unit + a 'sold' event) — no ledger movement applies to asset items.
+    const assetUnitIds = (sale.items || [])
+      .filter((li) => this.findItemRaw(li.itemId)?.type === 'asset')
+      .flatMap((li) => li.unitIds || []);
+    if (assetUnitIds.length > 0) {
+      try {
+        this.markUnitsSold(assetUnitIds, sale.id, `Sold against sale ${sale.saleNumber}${referenceNumber && referenceNumber !== sale.saleNumber ? ` (${referenceNumber})` : ''}`);
+      } catch (e: any) {
+        console.error(`[DB] Unit sale failed for sale ${sale.saleNumber}:`, e.message);
+      }
+    }
     for (const li of sale.items || []) {
       const master = this.findItemRaw(li.itemId);
       if (!master) {
         console.error(`[DB] Sale inventory: item ${li.itemId} not found for sale ${sale.saleNumber}`);
         continue;
       }
+      if (master.type === 'asset') continue; // register-managed — no aggregate movement
+      // PRODUCE-&-SELL-DIRECTLY line: its output was manufactured off the
+      // sale-bound run and never entered stock — no dispatch outward posts
+      // (the run carries the raw-material consumption instead; see
+      // syncSaleDirectRuns).
+      if (li.produceDirect) continue;
       const locName = li.locationId
         ? this.data.locations.find((l) => l.id === li.locationId)?.name
         : undefined;
@@ -2220,6 +2363,28 @@ class ServerLocalDatabase {
   }
 
   /**
+   * Releases every unit this sale sold (status 'sold' + saleId), back to
+   * in-stock — the edit-compensation / cancel path calls this before the
+   * (possibly edited) line set re-applies. A unit that meanwhile changed
+   * hands elsewhere keeps its new state (release only what still points here).
+   */
+  private releaseUnitsFromSale(sale: Sale, reason: string): void {
+    const owned = (this.data.inventoryUnits || []).filter(
+      (u) => u.saleId === sale.id && u.status === 'sold'
+    );
+    for (const unit of owned) {
+      unit.status = 'in_stock';
+      unit.saleId = undefined;
+      unit.vehicleId = undefined;
+      unit.position = undefined;
+      unit.updatedAt = new Date().toISOString();
+      this.postUnitEvent(unit, 'returned', { notes: `${reason} ${sale.saleNumber} — unit re-entered the register`, saleId: undefined });
+      this.logAudit('UPDATE', 'INVENTORY_UNIT', unit.id, `Unit ${unit.serialNumber} released back to register (${reason.trim()})`);
+      liveSyncInventoryUnit(unit);
+    }
+  }
+
+  /**
    * Compensates EVERY sale_dispatch row posted for this sale by writing
    * dispatch_reversal rows that re-enter stock at the FIFO blended rate the
    * original movement actually consumed (its recorded `rate`). Reversals are
@@ -2228,6 +2393,9 @@ class ServerLocalDatabase {
    * reversed twice).
    */
   public unapplySaleInventory(sale: Sale, reason = 'Reversal of sales dispatch'): void {
+    // TRACKABLE units first: release what this sale holds before reversing
+    // the product movements.
+    this.releaseUnitsFromSale(sale, reason);
     const originals = (this.data.stockMovements || []).filter(
       (m) => m.referenceId === sale.id && m.type === 'sale_dispatch'
     );
@@ -2262,10 +2430,265 @@ class ServerLocalDatabase {
     }
   }
 
+  // ---------- PRODUCE & SELL DIRECTLY (2026-11-16) ----------
+  // A sales-order line may carry produceDirect: its output is manufactured by
+  // a production run BOUND TO THE SALE (production_batches.sale_id +
+  // sale_item_id). Client rules (2026-11-16):
+  //   - raw MATERIALS still leave stock (FIFO outward, exactly like the
+  //     Production module) — only the OUTPUT lot inward and the sale's own
+  //     dispatch outward are skipped (the output never sits in stock);
+  //   - the run's quantity is LOCKED to the sale line's quantity;
+  //   - the recipe is THE item's single batch mix (one recipe per output item
+  //     is strict — createBatchMix/updateBatchMix enforce it);
+  //   - runs are BOUND TO THE SALE: an edit reconciles them per line (tearing
+  //     down + recreating changed lines with consumption reversal), a
+  //     cancellation/deletion removes them (reversing consumption), and while
+  //     the sale's dispatch stands a bound run cannot be deleted from the
+  //     Production module.
+
+  /**
+   * Reconciles the production runs bound to `sale` with the sale's current
+   * produceDirect lines. Runs whose line is gone or changed (item/quantity)
+   * are torn down — consumption reversed at the recorded rates — and the
+   * fresh line set gets new runs while `apply` is true (the run exists only
+   * while the sale's dispatch stands; quotation-stage sales keep none).
+   * Runs claim their lines by exact line id first, then by an
+   * (item, quantity) fingerprint: a master edit regenerates every line id,
+   * but an UNTOUCHED produce-direct line must not churn its run (its raw
+   * materials would needlessly re-consume, reshuffling the FIFO lots).
+   */
+  private syncSaleDirectRuns(sale: Sale, apply: boolean): void {
+    const items = sale.items || [];
+    const directLines = items.filter((li) => li.produceDirect && (Number(li.quantity) || 0) > 0);
+    const unlinked = new Set(directLines.map((li) => li.id));
+    const matches = (line: SalesOrderItem, run: ProductionBatchRun) =>
+      line.itemId === run.targetItemId &&
+      Math.abs((Number(line.quantity) || 0) - Number(run.targetQuantity)) <= 0.0001;
+    const current = (this.data.productionBatches || []).filter((b) => b.saleId === sale.id);
+    for (const run of current) {
+      let line = run.saleItemId
+        ? directLines.find((li) => li.id === run.saleItemId)
+        : undefined;
+      if (!line || !matches(line, run)) {
+        line = directLines.find((li) => unlinked.has(li.id) && matches(li, run));
+      }
+      if (line) {
+        // Keep + re-link (the line id may have been regenerated by an edit).
+        run.saleItemId = line.id;
+        liveSyncBatch(run);
+        unlinked.delete(line.id);
+        continue;
+      }
+      this.reverseDirectRunConsumption(run, sale);
+      this.data.productionBatches = (this.data.productionBatches || []).filter((b) => b.id !== run.id);
+      liveSyncBatch(run, true);
+      this.logAudit('DELETE', 'PRODUCTION_BATCH', run.id, `Direct-sale run ${run.batchNumber} torn down with sale ${sale.saleNumber} (line changed) — raw-material consumption reversed`);
+    }
+    if (!apply) return;
+    for (const line of directLines) {
+      if (!unlinked.has(line.id)) continue;
+      this.createDirectSaleRun(sale, line);
+    }
+  }
+
+  /**
+   * Records the direct-sale run for ONE sale line: quantity locked to the
+   * line, recipe resolved to the item's single batch mix (client may pass an
+   * explicit batchMixId in the line's `production` config — validated to be
+   * the item's own), sourcing locations from `production.itemLocations`.
+   * Throws when the item has no recipe — the caller aborts the whole sale
+   * (nothing half-posts).
+   */
+  private createDirectSaleRun(sale: Sale, line: SalesOrderItem): ProductionBatchRun {
+    const item = this.findItemRaw(line.itemId);
+    if (!item) throw new Error(`Produce-direct line: item ${line.itemId} no longer exists in the items master.`);
+    const cfg = ((line as any).production || {}) as {
+      date?: string;
+      supervisorName?: string;
+      mixTemperatureCelsius?: number;
+      notes?: string;
+      batchMixId?: string;
+      itemLocations?: Array<{ itemId: string; locationId?: string; locationName?: string }>;
+    };
+    let mix = cfg.batchMixId
+      ? (this.data.batchMixes || []).find((m) => m.id === cfg.batchMixId)
+      : (this.data.batchMixes || []).find((m) => m.outputItemId === line.itemId && m.isActive !== false);
+    if (mix && mix.outputItemId !== line.itemId) {
+      throw new Error(`Recipe ${mix.mixNumber} (${mix.name}) does not produce "${item.name}" — the run's recipe must match the sale line's item.`);
+    }
+    // Defensive fallbacks: exactly one ACTIVE mix is the rule, but a legacy
+    // all-inactive item still gets its recipe resolved (latest created).
+    if (!mix) {
+      const itemMixes = (this.data.batchMixes || []).filter((m) => m.outputItemId === line.itemId);
+      if (itemMixes.length === 0) {
+        throw new Error(`No recipe (batch mix) exists for "${item.name}" — create one in the Production module first.`);
+      }
+      mix = itemMixes[0];
+    }
+    if (mix.isActive === false) {
+      throw new Error(`Recipe ${mix.mixNumber} (${mix.name}) is inactive — reactivate it before producing for ${sale.saleNumber}.`);
+    }
+    return this.createProductionBatch({
+      batchMixId: mix.id,
+      targetQuantity: Math.abs(Number(line.quantity) || 0),
+      date: cfg.date || sale.date,
+      supervisorName: cfg.supervisorName || 'Plant Supervisor',
+      mixTemperatureCelsius: cfg.mixTemperatureCelsius,
+      notes: cfg.notes?.trim() || `Produced directly for sale ${sale.saleNumber} — output dispatched to ${this.data.parties.find((p) => p.id === sale.partyId)?.name || 'the party'} without stocking.`,
+      itemLocations: cfg.itemLocations || [],
+      saleId: sale.id,
+      saleItemId: line.id,
+      directSale: true,
+      skipOutputLot: true,
+    });
+  }
+
+  /**
+   * Reverses a direct-sale run's raw-material consumption: every
+   * production_consumed row posted for the run re-enters stock at its
+   * recorded FIFO rate (a production_consumed_reversal keyed on the original
+   * movement id — append-only ledger stays idempotent).
+   */
+  private reverseDirectRunConsumption(run: ProductionBatchRun, sale: Sale): void {
+    const originals = (this.data.stockMovements || []).filter(
+      (m) => m.referenceId === run.id && m.type === 'production_consumed'
+    );
+    const reversalKeys = new Set(
+      (this.data.stockMovements || [])
+        .filter((m) => m.type === 'production_consumed_reversal' && m.referenceId === sale.id)
+        .map((m) => m.referenceNumber)
+    );
+    for (const original of originals) {
+      if (reversalKeys.has(original.id)) continue;
+      const master = this.findItemRaw(original.itemId);
+      const locName = original.locationId
+        ? master?.locations?.find((l) => l.locationId === original.locationId)?.locationName ||
+          this.data.locations.find((l) => l.id === original.locationId)?.name
+        : undefined;
+      try {
+        this.adjustItemStock(
+          original.itemId,
+          Math.abs(Number(original.quantity) || 0),
+          'production_consumed_reversal',
+          original.id, // reversal key: matching original movement id (idempotency)
+          `Consumption reversal of run ${run.batchNumber} (sale ${sale.saleNumber})`,
+          locName,
+          undefined,
+          Number(original.rate) > 0 ? Number(original.rate) : undefined, // re-enter at the consumed FIFO rate
+          sale.id
+        );
+      } catch (e: any) {
+        console.error(`[DB] Failed to reverse production consumption ${original.id}:`, e.message);
+      }
+    }
+  }
+
+  /**
+   * Tear down EVERY production run bound to this sale (sale deletion /
+   * cancellation) — consumption reversed at the recorded rates.
+   */
+  private removeSaleDirectRuns(sale: Sale, reason: string): void {
+    const runs = (this.data.productionBatches || []).filter((b) => b.saleId === sale.id);
+    for (const run of runs) {
+      this.reverseDirectRunConsumption(run, sale);
+      this.data.productionBatches = (this.data.productionBatches || []).filter((b) => b.id !== run.id);
+      liveSyncBatch(run, true);
+      this.logAudit('DELETE', 'PRODUCTION_BATCH', run.id, `Direct-sale run ${run.batchNumber} removed (${reason} ${sale.saleNumber}) — raw-material consumption reversed`);
+    }
+  }
+
   /**
    * Posts the purchase's inward movements (receivedQuantity at GRN, ordered
    * quantity otherwise; every line enters a FIFO lot at its own rate).
    */
+  // ---------- SERIALISED PURCHASE (2026-11-16) ----------
+  // An asset line on a purchase IS one physical unit. When a stage save (PO or
+  // GRN) or a master edit carries serial numbers, the reconcile creates the
+  // register unit per line — supplier = the purchase's vendor, purchase date =
+  // the stage date, cost = the line rate — and removes units whose serial left
+  // the line set while they still sit untouched in stock (nothing deployed /
+  // sold / scrapped is ever removed).
+
+  /** Creates (idempotently) the ONE unit a serialized line carries. */
+  private createPurchaseUnit(
+    purchase: Purchase,
+    li: PurchaseOrderItem,
+    stageDate: string
+  ): void {
+    const item = this.findItemRaw(li.itemId);
+    if (!item || item.type !== 'asset' || !li.unitEntry) return;
+    const existing = (this.data.inventoryUnits || []).find(
+      (u) => u.itemId === li.itemId &&
+        String(u.serialNumber).trim().toLowerCase() === li.unitEntry!.serialNumber.toLowerCase()
+    );
+    if (existing) {
+      if (existing.purchaseId === purchase.id) return; // re-save — already registered
+      throw new Error(`Serial "${li.unitEntry.serialNumber}" of ${item.name} is already registered to ${existing.purchaseId ? 'another purchase' : 'the register'} — enter a different serial.`);
+    }
+    // Validate the declared-key values against the item's key list
+    this.validateUnitAttributes({ attributes: li.unitEntry.attributes || {} }, li.itemId);
+    const now = new Date().toISOString();
+    const unit = this.createInventoryUnit({
+      itemId: li.itemId,
+      serialNumber: li.unitEntry.serialNumber,
+      purchaseId: purchase.id,
+      supplierId: purchase.partyId || undefined, // auto: the purchase's vendor
+      purchaseDate: purchase.date || stageDate,   // auto: the document date
+      purchaseCost: Number(li.rate) > 0 ? Number(li.rate) : undefined, // auto: the line rate
+      attributes: li.unitEntry.attributes || {},
+      entryNotes: `Registered against purchase ${purchase.purchaseNumber}`,
+    });
+    this.logAudit('CREATE', 'INVENTORY_UNIT', unit.id, `Unit ${unit.serialNumber} of ${item.name} registered from purchase ${purchase.purchaseNumber}`);
+  }
+
+  /** Reconciles ALL serialized lines of a purchase against the register. */
+  private syncPurchaseSerializedUnits(purchase: Purchase, stageDate?: string): void {
+    const desired = new Map<string, string>(); // serial → line id
+    for (const li of purchase.items || []) {
+      const item = this.findItemRaw(li.itemId);
+      if (item?.type !== 'asset' || !li.unitEntry) continue;
+      desired.set(li.unitEntry.serialNumber.trim().toLowerCase(), li.id);
+      try {
+        this.createPurchaseUnit(purchase, li, stageDate || purchase.date);
+      } catch (e: any) {
+        // A duplicate/bad serial fails the save with a clear message
+        throw new Error(`Purchase ${purchase.purchaseNumber}: ${e.message}`);
+      }
+    }
+    // Cleanup: units bound to THIS purchase whose serial left the line set,
+    // and which never moved beyond 'entered' in stock (life history is kept).
+    const live = (this.data.inventoryUnits || []).filter(
+      (u) => u.purchaseId === purchase.id && !desired.has(String(u.serialNumber).trim().toLowerCase())
+    );
+    for (const unit of live) {
+      if (unit.status !== 'in_stock') continue; // deployed/sold — never removed here
+      const events = (this.data.inventoryUnitEvents || []).filter((e) => e.unitId === unit.id);
+      const lifecycle = events.some((e) => e.type !== 'entered');
+      if (lifecycle) continue;
+      this.logAudit('DELETE', 'INVENTORY_UNIT', unit.id, `Unit ${unit.serialNumber} removed — its serialized line left purchase ${purchase.purchaseNumber}`);
+      this.data.inventoryUnits = (this.data.inventoryUnits || []).filter((u) => u.id !== unit.id);
+      this.data.inventoryUnitEvents = (this.data.inventoryUnitEvents || []).filter((e) => e.unitId !== unit.id);
+      liveSyncInventoryUnit(unit, true);
+    }
+    if (live.length > 0) this.save();
+  }
+
+  /** Purchase cancellation/deletion: untouched units registered by it go away. */
+  private removePurchaseUnits(purchase: Purchase, reason: string): void {
+    const live = (this.data.inventoryUnits || []).filter(
+      (u) => u.purchaseId === purchase.id && u.status === 'in_stock'
+    );
+    for (const unit of live) {
+      const lifecycle = (this.data.inventoryUnitEvents || []).some((e) => e.unitId === unit.id && e.type !== 'entered');
+      if (lifecycle) continue; // deployed/sold history — keep the audit trail
+      this.logAudit('DELETE', 'INVENTORY_UNIT', unit.id, `Unit ${unit.serialNumber} removed (${reason} ${purchase.purchaseNumber})`);
+      this.data.inventoryUnits = (this.data.inventoryUnits || []).filter((u) => u.id !== unit.id);
+      this.data.inventoryUnitEvents = (this.data.inventoryUnitEvents || []).filter((e) => e.unitId !== unit.id);
+      liveSyncInventoryUnit(unit, true);
+    }
+    if (live.length > 0) this.save();
+  }
+
   public applyPurchaseInventory(purchase: Purchase, referenceNumber?: string, force = false): boolean {
     if (purchase.inventoryApplied && !force) return false;
     for (const li of purchase.items || []) {
@@ -2274,6 +2697,9 @@ class ServerLocalDatabase {
         console.error(`[DB] Purchase inventory: item ${li.itemId} not found for purchase ${purchase.purchaseNumber}`);
         continue;
       }
+      // SERIALIZED lines (2026-11-16): an asset item carries NO aggregate stock
+      // — its unit already entered the register via syncPurchaseSerializedUnits.
+      if (master.type === 'asset') continue;
       const locName = li.locationId
         ? this.data.locations.find((l) => l.id === li.locationId)?.name
         : undefined;
@@ -2463,6 +2889,10 @@ class ServerLocalDatabase {
     // journal immediately (receivable rides the party ledger; receipt is
     // recorded later against the party). Quotations touch nothing.
     if (firstStage.stageType === 'sales_invoice' || firstStageType === 'sales_order') {
+      // PRODUCE-&-SELL-DIRECTLY lines record their runs FIRST: a failed run
+      // (no recipe / insufficient raw stock) aborts the whole sale so nothing
+      // half-posts (client rule: the toggle promises produce + sell).
+      this.syncSaleDirectRuns(sale, true);
       if (this.applySaleInventory(sale, firstStage.stageNumber, true)) {
         sale.inventoryApplied = true;
       }
@@ -2606,6 +3036,17 @@ class ServerLocalDatabase {
       }
     }
 
+    // PRODUCE-&-SELL-DIRECTLY: the bound runs follow the sale's line set —
+    // changed lines tear down + recreate (consumption reversed at the recorded
+    // rates) while the dispatch stands; a not-yet-applied sale (quotation
+    // stages, or an edit that only now switched the dispatch on) reconciles
+    // against the effective inventory_applied flag. A cancellation skips this
+    // — its bound runs are removed wholesale just below.
+    const cancellingNow = (updates as any).status === 'cancelled' && !wasCancelled;
+    if (!cancellingNow) {
+      this.syncSaleDirectRuns(existing, existing.inventoryApplied);
+    }
+
     // Payment-flow switch on the master EDIT: a flow never applied at
     // creation can be chosen here (Sales Order stage). Applies once through
     // the shared settlement gate; a sale already carrying a flow ignores it.
@@ -2633,6 +3074,11 @@ class ServerLocalDatabase {
     if (updates.status === 'cancelled' && !wasCancelled && existing.inventoryApplied) {
       this.unapplySaleInventory(existing, 'Cancellation reversal for sale');
       existing.inventoryApplied = false;
+    }
+    // A cancelled sale keeps no direct-sale runs — bound runs are removed and
+    // their raw-material consumption reversed (runs exist only on live sales).
+    if (updates.status === 'cancelled' && !wasCancelled) {
+      this.removeSaleDirectRuns(existing, 'Cancellation of sale');
     }
     if (updates.status) existing.status = updates.status;
     existing.status = this.computeSalesStatus(existing);
@@ -2759,6 +3205,13 @@ class ServerLocalDatabase {
             locationId: li.locationId,
             itemNotes: li.itemNotes,
             weightTonnes: (li as any).weightTonnes,
+            // TRACKABLE lines: the register selection carries into the new
+            // stage (the promoted document sells the same physical units)
+            unitIds: li.unitIds,
+            // PRODUCE-&-SELL-DIRECTLY: the flag + one-shot run config carry
+            // into the promoted stage (produce + sell stays produce + sell)
+            produceDirect: (li as any).produceDirect,
+            ...((li as any).production ? { production: (li as any).production } : {}),
           }));
     const items = this.normalizeSaleItemLines(id, seedInput, stageId);
     const total = this.computeStageTotals(items, Number(sale.transportCharges) || 0, sale.freightGstRate || 0);
@@ -2788,6 +3241,9 @@ class ServerLocalDatabase {
     if (stage.stageType === 'sales_order') {
       if (!sale.inventoryApplied && this.applySaleInventory(sale, stage.stageNumber, true)) {
         sale.inventoryApplied = true;
+        // The dispatch stands now — bound direct-sale runs come to life
+        // (client rule: produce + sell, run qty locked to the sale lines).
+        this.syncSaleDirectRuns(sale, true);
       }
       const askedType = (stageInput as any).settlementType;
       this.applySaleCash(sale, stage, {
@@ -2829,6 +3285,8 @@ class ServerLocalDatabase {
       this.unapplySaleInventory(sale, 'Deletion reversal for sale');
       sale.inventoryApplied = false;
     }
+    // Bound direct-sale runs go with the sold sale — consumption reversed.
+    this.removeSaleDirectRuns(sale, 'Deletion of sale');
     if (sale.invoiceVoucherId || sale.settlementVoucherId) {
       // Defensive: an invoice-stage sale is locked, so this is only reachable
       // for API-side settlement data — un-book the vouchers before deleting.
@@ -2993,6 +3451,9 @@ class ServerLocalDatabase {
     for (const sale of sales) {
       if (!sale.inventoryApplied && this.applySaleInventory(sale, sale.saleNumber, true)) {
         sale.inventoryApplied = true;
+        // Produce-&-sell-directly lines: the dispatch stands — their bound
+        // runs come to life with the catch-up.
+        this.syncSaleDirectRuns(sale, true);
       }
     }
 
@@ -3230,6 +3691,12 @@ class ServerLocalDatabase {
     }
     purchase.status = this.computePurchaseStatus(purchase);
 
+    // SERIALISED lines (2026-11-16): a purchase created straight at PO/GRN
+    // registers its units right away (PO too, per the user's rule)
+    if (stage.stageType === 'purchase_order' || stage.stageType === 'goods_receipt') {
+      this.syncPurchaseSerializedUnits(purchase, stage.date);
+    }
+
     this.data.purchases.unshift(purchase);
     delete (purchase as any).documentIds; // never persisted — linked below
     this.logAudit('CREATE', 'PURCHASE', purchaseId, `Registered purchase ${purchase.purchaseNumber} (stage ${stage.stageType})`);
@@ -3331,8 +3798,18 @@ class ServerLocalDatabase {
       // Cancellation of a GRN'd purchase also un-books its Cash & Bank entries.
       this.deleteLinkedVouchers(existing, `Cancellation reversal for purchase ${existing.purchaseNumber}`);
     }
+    // SERIALISED lines: a cancelled purchase keeps no untouched units — its
+    // register entries (never deployed/sold) are removed with it.
+    if (updates.status === 'cancelled' && !wasCancelled) {
+      this.removePurchaseUnits(existing, 'Cancellation of purchase');
+    }
     if (updates.status) existing.status = updates.status;
     existing.status = this.computePurchaseStatus(existing);
+
+    // SERIALISED lines (2026-11-16): the register follows the line set on a
+    // master edit (new serials register per stage rules; removed serials tear
+    // down while untouched in stock)
+    this.syncPurchaseSerializedUnits(existing, existing.date);
 
     this.logAudit('UPDATE', 'PURCHASE', id, `Updated purchase ${existing.purchaseNumber}`);
     this.save();
@@ -3426,6 +3903,12 @@ class ServerLocalDatabase {
     } else if (stageInput.updateCash) {
       this.logAudit('DISPATCH', 'PURCHASE_CASH', id, `Cash application requested at ${stageType} stage — applies at the purchase-order stage`);
     }
+    // SERIALISED lines (2026-11-16): a PO or GRN stage save registers the
+    // units its serialized lines carry (PO too, per the user's rule) and
+    // reconciles removed serials with the register.
+    if (stageType === 'purchase_order' || stageType === 'goods_receipt') {
+      this.syncPurchaseSerializedUnits(purchase, stageRow?.date || now.split('T')[0]);
+    }
     purchase.status = this.computePurchaseStatus(purchase);
     purchase.updatedAt = now;
 
@@ -3445,6 +3928,8 @@ class ServerLocalDatabase {
       this.unapplyPurchaseInventory(purchase, 'Deletion reversal for purchase');
       purchase.inventoryApplied = false;
     }
+    // SERIALISED lines: deleting the purchase removes its never-moved units.
+    this.removePurchaseUnits(purchase, 'Deletion of purchase');
     if (purchase.invoiceVoucherId || purchase.settlementVoucherId) {
       // Deleting a GRN'd purchase un-books its Cash & Bank vouchers.
       this.deleteLinkedVouchers(purchase, `Deletion reversal for purchase ${purchase.purchaseNumber}`);
@@ -3457,46 +3942,874 @@ class ServerLocalDatabase {
     return true;
   }
 
+  // --- BATCH MIXES (RECIPES) — 2026-11-12 ---
+  // FK-only storage: output_item_id / ingredient item ids reference the items
+  // master; every display name/unit is resolved at READ time (Golden Rule §2).
+  private nextBatchMixNumber(): string {
+    const year = new Date().getFullYear();
+    const prefix = `BM-${year}-`;
+    let max = 0;
+    for (const m of this.data.batchMixes || []) {
+      if (!String(m.mixNumber || '').startsWith(prefix)) continue;
+      const n = parseInt(m.mixNumber.slice(prefix.length), 10);
+      if (Number.isFinite(n) && n > max) max = n;
+    }
+    return `${prefix}${String(max + 1).padStart(4, '0')}`;
+  }
+
+  public getBatchMixes(): BatchMix[] {
+    return this.data.batchMixes || [];
+  }
+
+  public getBatchMixById(id: string): BatchMix | undefined {
+    return this.data.batchMixes?.find((m) => m.id === id);
+  }
+
+  /** Server-minted next mix number for the Add-Mix form prefill. */
+  public peekNextBatchMixNumber(): string {
+    // Mint-and-hold is unnecessary for recipes: numbering scans existing
+    // mixes, so a peek that never saves just re-uses the slot.
+    return this.nextBatchMixNumber();
+  }
+
+  /**
+   * Validate + normalize a submitted recipe. Throws a business-rule error
+   * (surfaced as an HTTP 400) when the row cannot stand as written.
+   * SIZING IS PER-ROW (2026-11-12 correction): each ingredient independently
+   * picks quantity (own unit) or percentage of produced output — bitumen in %
+   * and LDO in MT mix freely on ONE recipe. referenceOutputQty (the one-mix
+   * yield) is required as soon as ANY row is quantity-sized, since that is
+   * what scales those rows on a run.
+   */
+  private sanitizeBatchMix(data: any): { name: string; outputItemId: string; referenceOutputQty?: number; ingredients: BatchMixIngredient[]; notes?: string; isActive: boolean } {
+    const outputItemId = String(data.outputItemId || '').trim();
+    const outputItem = outputItemId ? this.findItemRaw(outputItemId) : undefined;
+    if (!outputItem) {
+      // Report WHAT arrived so stale-client-placeholder ids are diagnosable.
+      throw new Error(
+        outputItemId
+          ? `The selected output item (id ${outputItemId}) is not in the items master — your session may hold a stale id; re-open the mix form and re-pick the item.`
+          : 'Select the item this mix produces from the items master.'
+      );
+    }
+    // 2026-11-16 (client rule): the mix picks NO name of its own — the OUTPUT
+    // ITEM identifies the recipe. A caller-supplied name is ignored in favour
+    // of the item's live name (display never stored as authoritative copy on
+    // read-back: the card resolves it from the items master too).
+    const name = outputItem.name;
+    // Legacy recipe-level basis — only a fallback for rows created before
+    // per-row sizing shipped (same day); never accepted from the client now.
+    const legacyBasis: 'quantity' | 'percentage' = data.basis === 'percentage' ? 'percentage' : 'quantity';
+
+    const seen = new Set<string>();
+    const ingredients: BatchMixIngredient[] = [];
+    for (const raw of Array.isArray(data.ingredients) ? data.ingredients : []) {
+      const itemId = String(raw.itemId || '').trim();
+      if (!itemId) continue;
+      if (itemId === outputItemId) throw new Error('A mix cannot consume its own output item.');
+      if (seen.has(itemId)) throw new Error(`Item is listed more than once in the ingredient rows.`);
+      seen.add(itemId);
+      const item = this.findItemRaw(itemId);
+      if (!item) {
+        throw new Error(`Ingredient item (id ${itemId}) is not in the items master — re-pick it in the mix form (stale session id).`);
+      }
+      const rowBasis: 'quantity' | 'percentage' =
+        raw.basis === 'percentage' || raw.basis === 'quantity' ? raw.basis : legacyBasis;
+      if (rowBasis === 'quantity') {
+        const qty = Number(raw.quantity);
+        if (!Number.isFinite(qty) || qty <= 0) throw new Error(`Every quantity-sized ingredient needs a positive quantity (in the item's own unit).`);
+        ingredients.push({ id: raw.id, itemId, basis: 'quantity', quantity: qty });
+      } else {
+        const pct = Number(raw.percentage);
+        if (!Number.isFinite(pct) || pct <= 0) throw new Error(`Every percentage-sized ingredient needs a positive percentage of the produced output.`);
+        ingredients.push({ id: raw.id, itemId, basis: 'percentage', percentage: pct });
+      }
+    }
+    if (ingredients.length === 0) throw new Error('A mix needs at least one ingredient item.');
+    const hasQtyRows = ingredients.some((ing) => ing.basis === 'quantity');
+    if (hasQtyRows) {
+      const refQty = Number(data.referenceOutputQty);
+      if (!Number.isFinite(refQty) || refQty <= 0) throw new Error('A positive batch yield (the output of ONE mix) is required while any ingredient is sized by quantity.');
+      return { name, outputItemId, referenceOutputQty: refQty, ingredients, notes: data.notes?.trim() || undefined, isActive: data.isActive !== false };
+    }
+    return { name, outputItemId, ingredients, notes: data.notes?.trim() || undefined, isActive: data.isActive !== false };
+  }
+
+  /**
+   * ONE RECIPE PER OUTPUT ITEM (client rule, 2026-11-16): an item resolves to
+   * "the" recipe by itself (sales produce-direct auto-fetch); a second ACTIVE
+   * mix for the same output item is refused. Inactive mixes coexist as
+   * history; re-activating a second one for an item that already has an
+   * active recipe is refused the same way.
+   */
+  private assertSingleActiveMixForItem(outputItemId: string, excludeMixId?: string): void {
+    const clash = (this.data.batchMixes || []).find(
+      (m) => m.id !== excludeMixId && m.outputItemId === outputItemId && m.isActive !== false
+    );
+    if (!clash) return;
+    const out = this.findItemRaw(outputItemId)?.name || outputItemId;
+    throw new Error(`"${out}" already has an active recipe (BM ${clash.mixNumber} — ${clash.name}). One recipe per item is strict: edit that recipe or delete it instead of creating a second one.`);
+  }
+
+  public createBatchMix(data: any): BatchMix {
+    const clean = this.sanitizeBatchMix(data);
+    this.assertSingleActiveMixForItem(clean.outputItemId);
+    const newMix: BatchMix = {
+      ...clean,
+      id: `bmix-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      mixNumber: this.nextBatchMixNumber(),
+      createdAt: new Date().toISOString(),
+    };
+    // Ingredient rows are server-minted ids (replaced wholesale per save).
+    for (const ing of newMix.ingredients) ing.id = `bmi-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    this.data.batchMixes = [newMix, ...(this.data.batchMixes || [])];
+    this.logAudit('CREATE', 'BATCH_MIX', newMix.id, `Recipe ${newMix.mixNumber} (${newMix.name}) created: ${newMix.ingredients.length} ingredients producing ${this.findItemRaw(newMix.outputItemId)?.name}`);
+    this.save();
+    liveSyncBatchMix(newMix);
+    return newMix;
+  }
+
+  public updateBatchMix(id: string, updates: any): BatchMix | undefined {
+    const idx = this.data.batchMixes?.findIndex((m) => m.id === id);
+    if (idx === undefined || idx === -1) return undefined;
+    const clean = this.sanitizeBatchMix({ ...this.data.batchMixes[idx], ...updates });
+    // One-recipe-per-item holds through edits too — retargeting the output
+    // item or re-activating the mix cannot steal an item that has a recipe.
+    this.assertSingleActiveMixForItem(clean.outputItemId, id);
+    const updated: BatchMix = {
+      ...this.data.batchMixes[idx],
+      ...clean,
+      // Ingredient rows are FULLY REPLACED on every save — fresh ids.
+      ingredients: clean.ingredients.map((ing) => ({
+        ...ing,
+        id: `bmi-${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${Math.random().toString(36).slice(2, 4)}`,
+      })),
+    };
+    this.data.batchMixes[idx] = updated;
+    this.logAudit('UPDATE', 'BATCH_MIX', id, `Recipe ${updated.mixNumber} (${updated.name}) updated`);
+    this.save();
+    liveSyncBatchMix(updated);
+    return updated;
+  }
+
+  public deleteBatchMix(id: string): boolean {
+    const idx = this.data.batchMixes?.findIndex((m) => m.id === id);
+    if (idx === undefined || idx === -1) return false;
+    const mix = this.data.batchMixes[idx];
+    const usedByRun = (this.data.productionBatches || []).some((b) => b.batchMixId === id);
+    if (usedByRun) throw new Error('This mix is used by recorded production runs and cannot be deleted — mark it inactive instead.');
+    this.data.batchMixes.splice(idx, 1);
+    this.logAudit('DELETE', 'BATCH_MIX', id, `Recipe ${mix.mixNumber} (${mix.name}) deleted`);
+    this.save();
+    liveSyncBatchMix(mix, true);
+    return true;
+  }
+
+  // ==========================================================================
+  // TRACKABLE INVENTORY (2026-11-13) — asset-type items are catalog headers;
+  // every physical unit is one register row. Aggregate stock NEVER applies:
+  // count = COUNT(units WHERE status = 'in_stock'), computed by JOIN. Every
+  // reference is an FK (item / location / vehicle / supplier / sale) and the
+  // lifecycle posts into an append-only event log.
+  // ==========================================================================
+  public getInventoryUnits(): InventoryUnit[] {
+    return this.data.inventoryUnits || [];
+  }
+
+  public getInventoryUnitById(id: string): InventoryUnit | undefined {
+    return this.data.inventoryUnits?.find((u) => u.id === id);
+  }
+
+  public getInventoryUnitEvents(unitId?: string): InventoryUnitEvent[] {
+    const events = this.data.inventoryUnitEvents || [];
+    return unitId ? events.filter((e) => e.unitId === unitId) : events;
+  }
+
+  /** An asset item must exist AND be type 'asset' (stock items can carry
+   *  aggregate stock and never belong in the unit register). */
+  private requireAssetItem(itemId: string): Item {
+    const key = String(itemId || '').trim();
+    const item = this.findItemRaw(key);
+    if (!item) throw new Error('The trackable item no longer exists in the items master.');
+    if (item.type !== 'asset') throw new Error(`"${item.name}" is not a trackable (asset) item — only asset-type items own a unit register.`);
+    return item;
+  }
+
+  /** Validate an optional FK payload member against its master. */
+  private requireRef<T extends { id: string }>(collection: T[] | undefined, id: string | undefined, label: string): T | undefined {
+    if (!id) return undefined;
+    const found = collection?.find((x: T) => x.id === id);
+    if (!found) throw new Error(`${label} not found — pick it from the master.`);
+    return found;
+  }
+
+  /** Shared serial rule: unique WITHIN the item master (two different items
+   *  may both carry serial T-100; one item's units may not). */
+  private assertSerialFree(itemId: string, serial: string, ignoreUnitId?: string): void {
+    const key = serial.trim().toLowerCase();
+    const clash = this.data.inventoryUnits?.find(
+      (u) => u.itemId === itemId && String(u.serialNumber).trim().toLowerCase() === key && u.id !== ignoreUnitId
+    );
+    if (clash) {
+      throw new Error(`Serial "${serial}" is already registered for this item${ignoreUnitId ? ' — edit the unit instead of duplicating it' : ''}.`);
+    }
+  }
+
+  // ==========================================================================
+  // DYNAMIC ATTRIBUTES (serialized inventory, 2026-11-16)
+  // A trackable (asset) item declares which per-unit fields exist. Fixed facts
+  // stay columns (serial, supplier, purchase date, cost); everything else is
+  // one of the item's KEYS (text/number/date/select). Units store their values
+  // by key; the item's key list may grow and change while units live.
+  // ==========================================================================
+
+  /** Slug for an attribute key (stable identifier in the unit's value map). */
+  private attrKeySlug(label: string): string {
+    return label.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || `key-${Date.now().toString(36)}`;
+  }
+
+  /** Validates + normalizes an item's attribute-key list. */
+  private sanitizeItemAttributes(input: any): ItemAttributeKey[] {
+    const rows: ItemAttributeKey[] = [];
+    const seenKeys = new Set<string>();
+    const seenLabels = new Set<string>();
+    for (const raw of Array.isArray(input) ? input : []) {
+      const label = String(raw?.label ?? raw?.name ?? '').trim();
+      if (!label) continue;
+      const lowerLabel = label.toLowerCase();
+      if (seenLabels.has(lowerLabel)) continue; // silently dedupe repeats
+      seenLabels.add(lowerLabel);
+      const type = ['text', 'number', 'date', 'select'].includes(raw?.type) ? raw.type : 'text';
+      const options = Array.isArray(raw.options)
+        ? raw.options.map((o: any) => String(o).trim()).filter(Boolean)
+        : [];
+      if (type === 'select' && options.length === 0) {
+        throw new Error(`Attribute "${label}" is a pick-list — add at least one option value.`);
+      }
+      let key = raw?.key ? String(raw.key).trim() : undefined;
+      if (!key) key = this.attrKeySlug(label);
+      while (seenKeys.has(key)) key = `${key}-2`;
+      seenKeys.add(key);
+      rows.push({
+        key,
+        label,
+        type: type as ItemAttributeKey['type'],
+        ...(type === 'select' ? { options } : {}),
+        ...(raw?.required ? { required: true } : {}),
+      });
+    }
+    return rows;
+  }
+
+  /**
+   * Validates a unit entry's attribute VALUES against the owning item's key
+   * list — typed coercion + required enforcement. Unknown keys (no longer
+   * declared) are carried along if the unit already stored them, so legacy
+   * data is not lost when keys change; they just don't render as columns.
+   */
+  private validateUnitAttributes(data: any, itemId: string, existingUnit?: InventoryUnit): Partial<InventoryUnit> {
+    const item = this.findItemRaw(itemId);
+    if (!item) throw new Error('The owning item no longer exists.');
+    const inMap = (data?.attributes && typeof data.attributes === 'object' && !Array.isArray(data.attributes))
+      ? data.attributes
+      : {};
+    const out: Record<string, string | number> = {};
+    const declared: ItemAttributeKey[] = Array.isArray(item.attributes) ? item.attributes : [];
+    for (const keyDef of declared) {
+      const raw = inMap[keyDef.key];
+      const filled = raw !== undefined && raw !== null && String(raw).trim() !== '';
+      if (keyDef.required && !filled) {
+        throw new Error(`"${keyDef.label}" is required for every ${item.name} entry.`);
+      }
+      if (!filled) continue;
+      if (keyDef.type === 'number') {
+        const n = Number(raw);
+        if (!Number.isFinite(n)) throw new Error(`"${keyDef.label}" must be a number.`);
+        out[keyDef.key] = n;
+      } else if (keyDef.type === 'select') {
+        const v = String(raw).trim();
+        if (!keyDef.options?.includes(v)) {
+          throw new Error(`"${keyDef.label}" must be one of: ${(keyDef.options || []).join(', ')}.`);
+        }
+        out[keyDef.key] = v;
+      } else {
+        out[keyDef.key] = String(raw).trim();
+      }
+    }
+    // Preserve stored values whose keys were removed from the master (legacy)
+    for (const [k, v] of Object.entries(existingUnit?.attributes || {})) {
+      if (declared.some((d) => d.key === k)) continue;
+      out[k] = v as string | number;
+    }
+    return Object.keys(out).length > 0 ? { attributes: out } : { attributes: undefined };
+  }
+
+  private validateUnitPayload(data: any, itemId: string): Partial<InventoryUnit> {
+    const patch: Partial<InventoryUnit> = {};
+    if (data.supplierId !== undefined) {
+      // supplier FK (parties master) — an explicit '' clears it
+      patch.supplierId = this.requireRef(this.data.parties, data.supplierId?.trim() || undefined, 'Supplier')?.id;
+    }
+    if (data.locationId !== undefined) {
+      // storage-location FK (item_locations master); '' clears it
+      patch.locationId = this.requireRef(this.data.locations, data.locationId?.trim() || undefined, 'Storage location')?.id;
+    }
+    if (data.purchaseDate !== undefined) patch.purchaseDate = data.purchaseDate?.trim() || undefined;
+    if (data.purchaseCost !== undefined) patch.purchaseCost = data.purchaseCost === null || data.purchaseCost === '' ? undefined : Number(data.purchaseCost);
+    if (data.warrantyExpiry !== undefined) patch.warrantyExpiry = data.warrantyExpiry?.trim() || undefined;
+    if (data.condition !== undefined) {
+      patch.condition = ['excellent', 'good', 'worn', 'damaged'].includes(data.condition) ? data.condition : undefined;
+    }
+    if (data.notes !== undefined) patch.notes = data.notes?.trim() || undefined;
+    // Purchase linkage (FK to the purchase that received the unit)
+    if (data.purchaseId !== undefined) patch.purchaseId = data.purchaseId?.trim() || undefined;
+    // DYNAMIC ATTRIBUTES (2026-11-16): validated + coerced against the owning
+    // item's declared key list (required enforcement, number/select types).
+    if (data.attributes !== undefined) {
+      const existingUnit = data.id ? this.data.inventoryUnits?.find((u) => u.id === data.id) : undefined;
+      const attrPatch = this.validateUnitAttributes({ attributes: data.attributes }, itemId, existingUnit);
+      patch.attributes = attrPatch.attributes;
+    }
+    if (data.serialNumber !== undefined) {
+      const serial = String(data.serialNumber || '').trim();
+      if (!serial) throw new Error('A serial number is required — the unit register tracks uniqueness by it.');
+      patch.serialNumber = serial;
+      this.assertSerialFree(itemId, serial, data.id);
+    }
+    return patch;
+  }
+
+  /**
+   * Register ONE physical unit of an asset item. Always enters at `in_stock`
+   * (GRN capture / manual entry / legacy backfill) with an 'entered' event.
+   */
+  public createInventoryUnit(data: any): InventoryUnit {
+    const itemId = String(data.itemId || '').trim();
+    const item = this.requireAssetItem(itemId);
+    const serial = String(data.serialNumber || '').trim();
+    if (!serial) throw new Error('A serial number is required — the register tracks uniqueness by it.');
+    this.assertSerialFree(itemId, serial);
+
+    const now = new Date().toISOString();
+    const unit: InventoryUnit = {
+      id: `iu-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      itemId,
+      serialNumber: serial,
+      status: 'in_stock',
+      createdAt: now,
+      updatedAt: now,
+      ...this.validateUnitPayload({ ...data, id: undefined, itemId, serialNumber: serial }, itemId),
+    };
+
+    const event: InventoryUnitEvent = {
+      id: `iue-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      unitId: unit.id,
+      date: now,
+      type: 'entered',
+      notes: data.entryNotes?.trim() || (data.source === 'purchase_grn' ? 'Captured on goods receipt' : 'Manually registered'),
+      supplierId: unit.supplierId,
+      locationId: unit.locationId,
+      createdAt: now,
+    };
+
+    this.data.inventoryUnits = [unit, ...(this.data.inventoryUnits || [])];
+    this.data.inventoryUnitEvents = [event, ...(this.data.inventoryUnitEvents || [])];
+    this.logAudit('CREATE', 'INVENTORY_UNIT', unit.id, `Unit ${unit.serialNumber} of ${item.name} registered (${unit.status})`);
+    this.save();
+    liveSyncInventoryUnit(unit);
+    liveSyncInventoryUnitEvent(event);
+    return unit;
+  }
+
+  /** Register N units at once (purchase GRN with serials / legacy backfill). */
+  public createInventoryUnitsBulk(entries: any[]): InventoryUnit[] {
+    if (!Array.isArray(entries) || entries.length === 0) throw new Error('No units to register.');
+    return entries.map((e) => this.createInventoryUnit(e));
+  }
+
+  /**
+   * Edit a unit's procurement/condition facts. The lifecycle fields (status,
+   * vehicle, sale linkage) are NOT editable here — lifecycle moves through the
+   * explicit endpoints so every transition lands in the event log.
+   */
+  public updateInventoryUnit(id: string, updates: any): InventoryUnit {
+    const unit = this.data.inventoryUnits?.find((u) => u.id === id);
+    if (!unit) throw new Error('Unit not found.');
+    const item = this.findItemRaw(unit.itemId);
+
+    for (const locked of ['status', 'vehicleId', 'position', 'fitOdometer', 'saleId', 'itemId']) {
+      if (updates[locked] !== undefined && updates[locked] !== unit[locked as keyof InventoryUnit]) {
+        throw new Error(`"${locked}" is a lifecycle field — use the dedicated deploy / return / sell / scrap actions.`);
+      }
+    }
+    const patch = this.validateUnitPayload({ ...updates, id, serialNumber: updates.serialNumber ?? unit.serialNumber }, unit.itemId);
+    // Storage only applies while the unit sits on the shelf.
+    if (unit.status !== 'in_stock' && patch.locationId !== undefined) {
+      delete patch.locationId;
+    }
+    const updated: InventoryUnit = { ...unit, ...patch, updatedAt: new Date().toISOString() };
+    const idx = this.data.inventoryUnits!.findIndex((u) => u.id === id);
+    this.data.inventoryUnits![idx] = updated;
+    this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${updated.serialNumber} of ${item?.name} updated`);
+    this.save();
+    liveSyncInventoryUnit(updated);
+    return updated;
+  }
+
+  /** Append one lifecycle event for a unit (shared shape for the moves below). */
+  private postUnitEvent(unit: InventoryUnit, type: InventoryUnitEventType, ctx: {
+    notes?: string; vehicleId?: string; position?: string; odometer?: number; locationId?: string; saleId?: string;
+  }): InventoryUnitEvent {
+    const now = new Date().toISOString();
+    const event: InventoryUnitEvent = {
+      id: `iue-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      unitId: unit.id,
+      date: now,
+      type,
+      notes: ctx.notes?.trim() || undefined,
+      vehicleId: ctx.vehicleId,
+      position: ctx.position,
+      odometer: ctx.odometer,
+      locationId: ctx.locationId,
+      saleId: ctx.saleId,
+      createdAt: now,
+    };
+    this.data.inventoryUnitEvents = [event, ...(this.data.inventoryUnitEvents || [])];
+    liveSyncInventoryUnitEvent(event);
+    return event;
+  }
+
+  /** Fit the unit onto a fleet vehicle (position + odometer at fitment). */
+  public deployInventoryUnit(id: string, data: any): InventoryUnit {
+    const unit = this.data.inventoryUnits?.find((u) => u.id === id);
+    if (!unit) throw new Error('Unit not found.');
+    if (unit.status !== 'in_stock') throw new Error(`Unit ${unit.serialNumber} is already ${unit.status.replace('_', ' ')} — only in-stock units can be deployed.`);
+    const vehicleId = String(data.vehicleId || data.vehicle_id || '').trim();
+    if (!vehicleId) throw new Error('Pick the vehicle (or mark the unit as in use) for this deploy.');
+    const vehicle = this.requireRef(this.data.vehicles, vehicleId, 'Vehicle');
+    if (!vehicle) throw new Error('Vehicle not found — pick it from the fleet master.');
+
+    const contextLocation = unit.locationId;
+    unit.status = 'deployed';
+    unit.vehicleId = vehicleId;
+    unit.position = data.position?.trim() || undefined;
+    unit.fitOdometer = data.odometer !== undefined && data.odometer !== null && data.odometer !== '' ? Number(data.odometer) : unit.fitOdometer;
+    unit.updatedAt = new Date().toISOString();
+    const item = this.findItemRaw(unit.itemId);
+    this.postUnitEvent(unit, 'deployed', {
+      notes: data.notes?.trim() || data.deployNotes?.trim() || `${item?.name || 'Unit'} ${unit.serialNumber} mounted on ${(vehicle as any).vehicleNo || 'vehicle'}${unit.position ? ` @ ${unit.position}` : ''}${unit.fitOdometer ? ` @ ${unit.fitOdometer} km` : ''}`,
+      vehicleId,
+      position: unit.position,
+      odometer: unit.fitOdometer,
+      locationId: contextLocation,
+    });
+    this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${unit.serialNumber} (${item?.name}) deployed to vehicle`);
+    this.save();
+    liveSyncInventoryUnit(unit);
+    return unit;
+  }
+
+  /** Take the unit off the vehicle back into stock. */
+  public returnInventoryUnit(id: string, data: any): InventoryUnit {
+    const unit = this.data.inventoryUnits?.find((u) => u.id === id);
+    if (!unit) throw new Error('Unit not found.');
+    if (unit.status !== 'deployed') throw new Error(`Unit ${unit.serialNumber} is not deployed (${unit.status.replace('_', ' ')}).`);
+    const lastVehicleId = unit.vehicleId;
+    const lastPosition = unit.position;
+    const odometer = data.odometer !== undefined && data.odometer !== null && data.odometer !== '' ? Number(data.odometer) : undefined;
+    const locationId = this.requireRef(this.data.locations, data.locationId?.trim() || undefined, 'Storage location')?.id;
+    unit.status = 'in_stock';
+    unit.vehicleId = undefined;
+    unit.position = undefined;
+    if (locationId) unit.locationId = locationId;
+    if (data.condition && ['excellent', 'good', 'worn', 'damaged'].includes(data.condition)) unit.condition = data.condition;
+    unit.updatedAt = new Date().toISOString();
+    this.postUnitEvent(unit, 'returned', {
+      notes: data.notes?.trim() || 'Removed from vehicle back to storage',
+      vehicleId: lastVehicleId,
+      position: lastPosition,
+      odometer,
+      locationId: unit.locationId,
+    });
+    this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${unit.serialNumber} returned to stock`);
+    this.save();
+    liveSyncInventoryUnit(unit);
+    return unit;
+  }
+
+  /** Send the unit for upkeep (retreading, rebore, repair). The deployment
+   *  context is kept — a tyre may be retreaded while it stays where it was. */
+  public maintainInventoryUnit(id: string, data: any): InventoryUnit {
+    const unit = this.data.inventoryUnits?.find((u) => u.id === id);
+    if (!unit) throw new Error('Unit not found.');
+    if (unit.status === 'maintenance') throw new Error(`Unit ${unit.serialNumber} is already in maintenance.`);
+    if (unit.status === 'sold' || unit.status === 'scrapped') throw new Error(`Unit ${unit.serialNumber} has left the register (sold/scrapped) — maintenance is not possible.`);
+    unit.status = 'maintenance';
+    unit.updatedAt = new Date().toISOString();
+    this.postUnitEvent(unit, 'maintenance', { notes: data?.notes?.trim() || data?.maintenanceNotes?.trim() || 'Sent for maintenance / retreading', vehicleId: unit.vehicleId, locationId: unit.locationId });
+    this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${unit.serialNumber} sent for maintenance`);
+    this.save();
+    liveSyncInventoryUnit(unit);
+    return unit;
+  }
+
+  /** Bring a unit out of maintenance back into stock. */
+  public restoreInventoryUnit(id: string, data: any): InventoryUnit {
+    const unit = this.data.inventoryUnits?.find((u) => u.id === id);
+    if (!unit) throw new Error('Unit not found.');
+    if (unit.status !== 'maintenance') throw new Error(`Unit ${unit.serialNumber} is not in maintenance.`);
+    const locationId = this.requireRef(this.data.locations, data?.locationId?.trim() || undefined, 'Storage location')?.id;
+    unit.status = 'in_stock';
+    if (locationId) unit.locationId = locationId;
+    if (data?.condition && ['excellent', 'good', 'worn', 'damaged'].includes(data.condition)) unit.condition = data.condition;
+    unit.updatedAt = new Date().toISOString();
+    this.postUnitEvent(unit, 'restored', {
+      notes: data?.notes?.trim() || data?.maintenanceNotes?.trim() || 'Returned from maintenance',
+      locationId: unit.locationId,
+    });
+    this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${unit.serialNumber} restored from maintenance`);
+    this.save();
+    liveSyncInventoryUnit(unit);
+    return unit;
+  }
+
+  /** Retire the unit permanently (beyond repair / beyond use). */
+  public scrapInventoryUnit(id: string, data: any): InventoryUnit {
+    const unit = this.data.inventoryUnits?.find((u) => u.id === id);
+    if (!unit) throw new Error('Unit not found.');
+    if (unit.status === 'sold') throw new Error(`Unit ${unit.serialNumber} was already sold.`);
+    if (unit.status === 'scrapped') throw new Error(`Unit ${unit.serialNumber} is already scrapped.`);
+    const lastVehicleId = unit.vehicleId;
+    const lastPosition = unit.position;
+    unit.status = 'scrapped';
+    unit.updatedAt = new Date().toISOString();
+    const item = this.findItemRaw(unit.itemId);
+    this.postUnitEvent(unit, 'scrapped', {
+      notes: data?.notes?.trim() || data?.reason?.trim() || `Unit ${unit.serialNumber} scrapped`,
+      vehicleId: lastVehicleId,
+      position: lastPosition,
+      locationId: unit.locationId,
+    });
+    this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${unit.serialNumber} (${item?.name}) scrapped`);
+    this.save();
+    liveSyncInventoryUnit(unit);
+    return unit;
+  }
+
+  /**
+   * Remove a unit from the register. Allowed ONLY while it sits in stock with
+   * no lifecycle beyond its 'entered' event — units with deployment /
+   * sale / scrap history are audit records, never deletable.
+   */
+  public deleteInventoryUnit(id: string): boolean {
+    const unit = this.data.inventoryUnits?.find((u) => u.id === id);
+    if (!unit) throw new Error('Unit not found.');
+    if (unit.status !== 'in_stock') {
+      throw new Error(`Unit ${unit.serialNumber} has lifecycle history (${unit.status.replace('_', ' ')}) — it cannot be deleted.`);
+    }
+    const item = this.findItemRaw(unit.itemId);
+    this.data.inventoryUnits = this.data.inventoryUnits!.filter((u) => u.id !== id);
+    this.data.inventoryUnitEvents = (this.data.inventoryUnitEvents || []).filter((e) => e.unitId !== id);
+    this.logAudit('DELETE', 'INVENTORY_UNIT', id, `Unit ${unit.serialNumber} of ${item?.name} removed from the register`);
+    this.save();
+    liveSyncInventoryUnit(unit, true);
+    liveSyncInventoryUnitEventsBulk(id);
+    return true;
+  }
+
+  /**
+   * Sale-ladder hook (called by the sales flow later): mark the given units
+   * as SOLD against one sale. Units currently deployed are released; each
+   * unit gets a 'sold' event carrying the sale FK. `notes` is the caller's
+   * narrative (e.g. "Sold against sale RST 00012").
+   */
+  public markUnitsSold(unitIds: string[], saleId: string, notes?: string): InventoryUnit[] {
+    if (!Array.isArray(unitIds) || unitIds.length === 0) return [];
+    const sale = this.data.sales?.find((s) => s.id === saleId);
+    if (!sale) throw new Error('Sale not found — cannot book the unit sale.');
+    const eventNotes = notes?.trim() || `Sold against sale ${sale.saleNumber}`;
+    const sold: InventoryUnit[] = [];
+    for (const raw of unitIds) {
+      const unit = this.data.inventoryUnits?.find((u) => u.id === raw);
+      if (!unit) throw new Error('One of the units no longer exists.');
+      if (unit.status === 'sold') throw new Error(`Unit ${unit.serialNumber} is already sold.`);
+      if (unit.status === 'scrapped') throw new Error(`Unit ${unit.serialNumber} was scrapped — it cannot be sold.`);
+      // Capture the last context (before mutation) so the event records it.
+      const ctx = { vehicleId: unit.vehicleId, locationId: unit.locationId };
+      unit.status = 'sold';
+      unit.saleId = saleId;
+      unit.updatedAt = new Date().toISOString();
+      const item = this.findItemRaw(unit.itemId);
+      this.postUnitEvent(unit, 'sold', { notes: eventNotes, ...ctx, saleId });
+      this.logAudit('UPDATE', 'INVENTORY_UNIT', unit.id, `Unit ${unit.serialNumber} (${item?.name}) sold via ${sale.saleNumber}`);
+      liveSyncInventoryUnit(unit);
+      sold.push(unit);
+    }
+    this.save();
+    return sold;
+  }
+
+  /** Server-minted run number for production batches (BTN-26/NNN style). */
+  private nextBatchNumber(): string {
+    const year = new Date().getFullYear();
+    const prefix = `BTN-${year}-`;
+    let max = 0;
+    for (const b of this.data.productionBatches || []) {
+      if (!String(b.batchNumber || '').startsWith(prefix)) continue;
+      const n = parseInt(b.batchNumber.slice(prefix.length), 10);
+      if (Number.isFinite(n) && n > max) max = n;
+    }
+    return `${prefix}${String(max + 1).padStart(4, '0')}`;
+  }
+
   // --- PRODUCTION BATCHES ---
   public getProductionBatches(): ProductionBatchRun[] {
     return this.data.productionBatches;
   }
 
-  public createProductionBatch(batchData: Omit<ProductionBatchRun, 'id' | 'createdAt'>): ProductionBatchRun {
-    const newId = `pbr-${Date.now()}`;
+  /**
+   * Recipe-driven production (2026-11-12): one POST posts ONE recipe run.
+   * The run is locked to the mix — the caller picks the mix + the produced
+   * quantity (+ date/supervisor/notes); the server resolves every ingredient
+   * quantity by THAT ROW's sizing basis (per-row, not recipe-level):
+   *   - 'quantity' row: consumed = stored qty × (produced / referenceOutputQty)
+   *   - 'percentage' row: consumed = percentage% × produced
+   * Every consumed qty keeps its own item's unit; consumption leaves the FIFO
+   * lots at blended cost and the OUTPUT lot is valued at exactly what the run
+   * consumed (total consumed value / produced qty — FIFO, no averaging).
+   * @param batchData { batchMixId, targetQuantity (+ optional batchNumber,
+   *                   date, plantUnit, supervisorName, mixTemperatureCelsius,
+   *                   notes) }
+   */
+  public createProductionBatch(batchData: any): ProductionBatchRun {
+    const mixId = String(batchData.batchMixId || '').trim();
+    const mix = this.data.batchMixes?.find((m) => m.id === mixId);
+    if (!mix) throw new Error('Batch mix not found — pick the recipe this run is producing.');
+    if (mix.isActive === false) throw new Error('This mix is inactive — reactivate it (or pick another recipe) before recording production.');
+    const producedQty = Number(batchData.targetQuantity ?? batchData.producedQuantity);
+    if (!Number.isFinite(producedQty) || producedQty <= 0) throw new Error('Produced quantity must be a positive number.');
+    const outputItem = this.findItemRaw(mix.outputItemId);
+    if (!outputItem) throw new Error(`The mix's output item no longer exists in the items master.`);
+
+    // One-mix yield anchors the QUANTITY-sized rows (per-row basis, 2026-11-12
+    // correction — percentage rows need no anchor).
+    const refQty = Number(mix.referenceOutputQty) || 0;
+    const hasQtyRows = (mix.ingredients || []).some((ing) => (ing.basis || 'quantity') === 'quantity');
+    if (hasQtyRows && refQty <= 0) {
+      throw new Error(`Mix ${mix.mixNumber} has quantity-sized ingredients but no batch yield — fix the recipe first.`);
+    }
+    const qtyScale = refQty > 0 ? producedQty / refQty : 0;
+
+    // Resolve every consumed line from the mix (locked to recipe — no client
+    // quantity overrides are accepted). Service-type ingredients record on
+    // the run but post NO stock movement (services have no stock ledger).
+    // Sourcing locations (2026-11-13): each material line specifies WHERE its
+    // qty leaves stock — the caller sends itemLocations[{itemId, locationId|
+    // locationName}]; the server resolves it against the item's assigned
+    // locations and the deduction applies to that location's stock bucket.
+    const locChoices = new Map<string, { locationId?: string; locationName?: string }>();
+    for (const e of Array.isArray(batchData.itemLocations) ? batchData.itemLocations : []) {
+      if (e && e.itemId) locChoices.set(String(e.itemId), e);
+    }
+    const resolveSourcingLocation = (item: Item, choice?: { locationId?: string; locationName?: string }) => {
+      if (!choice) return {};
+      // Assigned locations only (the item's stock breakdown / legacy CSV),
+      // mirroring STOCK ADJUSTMENTS — a master location the item never
+      // tracks is not a valid source.
+      let breakdown: ItemLocationStock[] = (item.locations || [])
+        .filter((l) => l.locationName && l.locationName.trim())
+        .map((l) => ({ ...l, locationName: l.locationName.trim() }));
+      if (breakdown.length === 0 && item.stockLocation) {
+        breakdown = item.stockLocation.split(',').map((s) => s.trim()).filter(Boolean)
+          .map((name) => ({ locationName: name, currentStock: 0 }));
+      }
+      if (breakdown.length === 0) return {};
+      let entry = choice.locationId
+        ? breakdown.find((l) => l.locationId === choice.locationId)
+        : undefined;
+      if (!entry && choice.locationName) {
+        entry = breakdown.find(
+          (l) => l.locationName.toLowerCase() === String(choice.locationName).trim().toLowerCase()
+        );
+      }
+      if (!entry) {
+        throw new Error(
+          `"${choice.locationName || choice.locationId}" is not a storage location assigned to ${item.name} — pick one of the item's assigned locations.`
+        );
+      }
+      return {
+        locationId: entry.locationId
+          || this.data.locations?.find(
+            (ml) => (ml.name || '').trim().toLowerCase() === entry!.locationName.toLowerCase()
+          )?.id,
+        locationName: entry.locationName,
+      };
+    };
+    const consumedLines = (mix.ingredients || []).map((ing) => {
+      const item = this.findItemRaw(ing.itemId);
+      if (!item) throw new Error(`Ingredient item of mix ${mix.mixNumber} no longer exists — fix the recipe first.`);
+      const rowBasis = ing.basis || 'quantity';
+      const qty = rowBasis === 'percentage'
+        ? (Number(ing.percentage) || 0) * (producedQty / 100)
+        : (Number(ing.quantity) || 0) * qtyScale;
+      const sourcing = item.type === 'service'
+        ? {}
+        : resolveSourcingLocation(item, locChoices.get(ing.itemId));
+      return {
+        itemId: ing.itemId,
+        quantity: Number(qty.toFixed(4)),
+        percentage: rowBasis === 'percentage' ? Number(ing.percentage) : undefined,
+        ...sourcing,
+      };
+    });
+    for (const line of consumedLines) {
+      if (line.quantity <= 0) throw new Error(`Resolving the recipe against ${producedQty} ${outputItem.unit} produced a non-positive quantity for one ingredient — check the mix's batch yield / percentages.`);
+    }
+
+    const newId = `pbr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const batchNumber = String(batchData.batchNumber || '').trim() || this.nextBatchNumber();
+    // PRODUCE-&-SELL-DIRECTLY (2026-11-16): a run created from a sales order
+    // carries the sale FKs and SKIPS the output lot inward — the output sells
+    // straight off the run (the sale line posts no dispatch either). The run
+    // still snapshots its costing (output_rate = what one unit consumed).
+    const directSale = Boolean(batchData.skipOutputLot || batchData.saleId);
     const newBatch: ProductionBatchRun = {
-      ...batchData,
       id: newId,
+      batchNumber,
+      date: batchData.date || new Date().toISOString().slice(0, 10),
+      plantUnit: batchData.plantUnit || '',
+      targetItemId: outputItem.id,
+      targetItemName: outputItem.name,
+      targetQuantity: producedQty,
+      unit: outputItem.unit,
+      rawMaterialsConsumed: consumedLines,
+      batchMixId: mix.id,
+      mixName: mix.name,
+      supervisorName: batchData.supervisorName?.trim() || undefined,
+      mixTemperatureCelsius: batchData.mixTemperatureCelsius ? Number(batchData.mixTemperatureCelsius) : undefined,
+      saleId: directSale ? String(batchData.saleId || '') || undefined : undefined,
+      saleItemId: directSale ? String(batchData.saleItemId || '') || undefined : undefined,
+      directSale: directSale || undefined,
+      notes: batchData.notes?.trim() || undefined,
       createdAt: new Date().toISOString(),
     };
+
+    // Output placement (2026-11-13): the produced lot lands in a chosen stock
+    // location. When the caller omits it and the output item tracks assigned
+    // locations, default to its FIRST ASSIGNED — an unscoped inward would
+    // strand the increase (currentStock is recomputed from the breakdown).
+    // A DIRECT-SALE run posts NO output inward at all (client rule: the output
+    // is sold straight off the run) — placement resolution is skipped.
+    if (!directSale) {
+      const outputChoice = (batchData.outputLocationId || batchData.outputLocationName)
+        ? { locationId: batchData.outputLocationId, locationName: batchData.outputLocationName }
+        : (outputItem.locations || [])
+            .filter((l) => l.locationName && l.locationName.trim())
+            .map((l) => ({ locationId: l.locationId, locationName: l.locationName.trim() }))[0];
+      const outputLoc = resolveSourcingLocation(outputItem, outputChoice);
+
+      // Consumption first (FIFO outward) — the consumed value drives the
+      // output lot's rate: exactly what the run consumed per unit (FIFO, no
+      // averaging). With zero value (no costed lots anywhere) the movement
+      // falls back to the item's catalog cost chain like any legacy row.
+      const consumed = this.applyConsumptionMovements(newBatch);
+      const outputRate = consumed.totalValue > 0 ? consumed.totalValue / producedQty : undefined;
+      newBatch.outputValue = consumed.totalValue > 0 ? consumed.totalValue : undefined;
+      newBatch.outputRate = outputRate;
+      this.applyBatchOutputMovement(newBatch, outputRate, outputLoc.locationName);
+    } else {
+      // Direct-sale run: consumption still posts (real raw material leaving
+      // stock); the consumed value is snapshot as the run's costing — the sale
+      // revenue sits against it on the P&L without a phantom stock lot.
+      const consumed = this.applyConsumptionMovements(newBatch);
+      newBatch.outputValue = consumed.totalValue > 0 ? consumed.totalValue : undefined;
+      newBatch.outputRate =
+        newBatch.outputValue !== undefined ? newBatch.outputValue / producedQty : undefined;
+    }
+
     this.data.productionBatches.unshift(newBatch);
-
-    // Deduct raw materials consumed
-    for (const raw of newBatch.rawMaterialsConsumed) {
-      try {
-        this.adjustItemStock(raw.itemId, -raw.quantity, 'production_consumed', newBatch.batchNumber, `Consumed in batch ${newBatch.batchNumber}`);
-      } catch (e) {
-        console.error(`Failed to deduct raw material ${raw.itemName}:`, e);
-      }
-    }
-
-    // Add finished output stock
-    try {
-      this.adjustItemStock(newBatch.targetItemId, newBatch.targetQuantity, 'production_output', newBatch.batchNumber, `Batch output run`);
-    } catch (e) {
-      console.error(`Failed to add finished item ${newBatch.targetItemName}:`, e);
-    }
-
-    this.logAudit('CREATE', 'PRODUCTION_BATCH', newId, `Produced batch ${newBatch.batchNumber} - ${newBatch.targetQuantity} ${newBatch.unit} of ${newBatch.targetItemName}`);
+    this.logAudit(
+      'CREATE',
+      'PRODUCTION_BATCH',
+      newId,
+      directSale
+        ? `Produced ${newBatch.targetQuantity} ${newBatch.unit} of ${newBatch.targetItemName} via recipe ${mix.mixNumber} (${mix.name}) — DIRECT SALE (output not stocked; raw-material consumption posted)`
+        : `Produced ${newBatch.targetQuantity} ${newBatch.unit} of ${newBatch.targetItemName} via recipe ${mix.mixNumber} (${mix.name})`
+    );
     this.save();
     liveSyncBatch(newBatch);
     return newBatch;
+  }
+
+  /**
+   * Post a batch's ledger movements (FIFO outward consumption + inward
+   * output) and return the TOTAL VALUE of what was actually consumed.
+   * adjustItemStock computes each outward's blended FIFO rate internally and
+   * unshifts its ledger row, so the row at stockMovements[0] right after a
+   * call carries that row's movement_value.
+   */
+  private applyConsumptionMovements(batch: ProductionBatchRun): { totalValue: number } {
+    let totalConsumedValue = 0;
+    for (const raw of batch.rawMaterialsConsumed) {
+      // Service-type ingredients (e.g. plant hire) ride on the run document
+      // but post NO stock movement — services have no stock ledger.
+      if (this.findItemRaw(raw.itemId)?.type === 'service') continue;
+      try {
+        this.adjustItemStock(
+          raw.itemId,
+          -raw.quantity,
+          'production_consumed',
+          batch.batchNumber,
+          `Consumed in batch ${batch.batchNumber}`,
+          raw.locationName,
+          undefined,
+          undefined,
+          batch.id,
+        );
+        const movement = this.data.stockMovements?.[0];
+        totalConsumedValue += movement?.itemId === raw.itemId ? (movement.movementValue || 0) : 0;
+      } catch (e) {
+        // A failed product consumption aborts the run — posting a half-run
+        // would silently manufacture output from nothing.
+        throw new Error(`Could not consume ${raw.itemId}: ${(e as Error).message}`);
+      }
+    }
+    return { totalValue: totalConsumedValue };
+  }
+
+  /** The run's inward movement — one lot of the produced output, placed in
+   *  the chosen (or first-assigned) stock location. */
+  private applyBatchOutputMovement(batch: ProductionBatchRun, outputRate?: number, locationName?: string): void {
+    try {
+      this.adjustItemStock(
+        batch.targetItemId,
+        batch.targetQuantity,
+        'production_output',
+        batch.batchNumber,
+        'Batch output via recipe',
+        locationName,
+        undefined,
+        outputRate,
+        batch.id,
+      );
+    } catch (e) {
+      throw new Error(`Could not post the batch output: ${(e as Error).message}`);
+    }
   }
 
   public deleteProductionBatch(id: string): boolean {
     const index = this.data.productionBatches.findIndex((b) => b.id === id);
     if (index === -1) return false;
     const batch = this.data.productionBatches[index];
+    // PRODUCE-&-SELL-DIRECTLY (client rule): a run bound to a LIVE sale is the
+    // sale's production record — it can only be removed with the sale (edit /
+    // cancel / delete reconcile it; see syncSaleDirectRuns).
+    if (batch.saleId) {
+      const sale = (this.data.sales || []).find((s) => s.id === batch.saleId);
+      if (sale && sale.status !== 'cancelled') {
+        throw new Error(`Run ${batch.batchNumber} is bound to sale ${sale.saleNumber} (produced & sold directly) — it cannot be deleted from here. Edit or cancel the sale instead.`);
+      }
+    }
     this.data.productionBatches.splice(index, 1);
     this.logAudit('DELETE', 'PRODUCTION_BATCH', id, `Deleted batch run ${batch.batchNumber}`);
     this.save();

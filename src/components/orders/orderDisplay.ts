@@ -106,6 +106,7 @@ export function saleToDisplay(s: Sale): OrderDisplay {
     gstRate: li.gstRate,
     location: li.location,
     weightTonnes: (li as any).weightTonnes,
+    produceDirect: (li as any).produceDirect,
   }));
   const subtotal = items.reduce((sum, i) => sum + i.quantity * i.rate, 0);
   const taxAmount = items.reduce((sum, i) => sum + (i.quantity * i.rate * (i.gstRate || 0)) / 100, 0);
@@ -130,6 +131,7 @@ export function saleToDisplay(s: Sale): OrderDisplay {
       gstRate: li.gstRate,
       location: li.location,
       weightTonnes: (li as any).weightTonnes,
+      produceDirect: (li as any).produceDirect,
     }) as OrderItem),
   }));
   return {
@@ -189,6 +191,9 @@ export function purchaseToDisplay(p: Purchase): OrderDisplay {
     receivedQuantity: li.receivedQuantity,
     shortageQuantity: li.shortageQuantity,
     overageQuantity: li.overageQuantity,
+    // SERIALIZED line (2026-11-16): the unit entry rides the display rows so
+    // edit/GRN forms prefill the serial + declared keys
+    unitEntry: (li as any).unitEntry,
   }));
   const isRfqOnly = !(p.stages || []).some((st) => st.stageType !== 'rfq');
   const subtotal = items.reduce((sum, i) => sum + i.quantity * i.rate, 0);

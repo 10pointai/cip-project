@@ -15,6 +15,7 @@ export function SearchableSelect({
   closedDisplay,
   placeholder = 'Type to search...',
   disabledText,
+  inputClass,
 }: {
   options?: Array<{ value: string; label: string; sub?: string }>;
   value: string;
@@ -24,6 +25,10 @@ export function SearchableSelect({
   placeholder?: string;
   /** When set, renders a dimmed non-interactive placeholder instead of the picker. */
   disabledText?: string;
+  /** Overrides the input's fixed text sizing (default `text-xs font-medium`) —
+   *  compact sub-tables pass `text-[9px] font-semibold` so every column reads
+   *  at the same size. */
+  inputClass?: string;
 }) {
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState('');
@@ -110,7 +115,7 @@ export function SearchableSelect({
         onFocus={openMenu}
         onBlur={() => setOpen(false)}
         placeholder={placeholder}
-        className="w-full bg-transparent text-xs font-medium text-[var(--color-on-surface)] placeholder:text-[var(--color-on-surface-variant)] focus:outline-none"
+        className={`w-full bg-transparent ${inputClass || 'text-xs font-medium'} text-[var(--color-on-surface)] placeholder:text-[var(--color-on-surface-variant)] focus:outline-none`}
       />
       {open && menuPos && createPortal(
         <div

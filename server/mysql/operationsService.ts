@@ -1,6 +1,6 @@
 import { executeMysqlQuery, executeMysqlOne } from './queryClient';
 import { isMysqlConfigured } from './connection';
-import { Item, ItemCategory, ItemUnit, ItemLocation, ProductionBatchRun, Vehicle, Driver, TripSlip, Tyre, VehicleExpenseEntry, ItemStockAdjustment, StockMovementLog, Sale, Purchase, SaleInvoice } from '../../src/types';
+import { Item, ItemAttributeKey, ItemCategory, ItemUnit, ItemLocation, ProductionBatchRun, BatchMix, Vehicle, Driver, TripSlip, Tyre, VehicleExpenseEntry, ItemStockAdjustment, StockMovementLog, Sale, Purchase, SaleInvoice, InventoryUnit, InventoryUnitEvent, InventoryUnitStatus, InventoryUnitEventType } from '../../src/types';
 import { serverDb } from '../db';
 import { computeItemValuation } from '../inventoryValuation';
 import { resolveUnitIdByCode, liveSyncTripSlip } from './azureSync';
@@ -52,6 +52,12 @@ function mapItemRow(it: any): Item {
     maxCapacity: it.max_capacity ? parseNum(it.max_capacity) : undefined,
     lastStockUpdate: it.last_stock_update || undefined,
     movements: parseJsonField(it.movements, []),
+    // DYNAMIC ATTRIBUTES (serialized, 2026-11-16): the item's declared
+    // per-unit key list (asset items only — other types carry none)
+    attributes: ((): ItemAttributeKey[] | undefined => {
+      const parsed = parseJsonField(it.attributes, []);
+      return Array.isArray(parsed) && parsed.length > 0 ? parsed : undefined;
+    })(),
     createdAt: it.created_at,
     updatedAt: it.updated_at,
   };
@@ -152,6 +158,8 @@ async function attachMovementsToItems(items: Item[]): Promise<Item[]> {
         movementValue: m.movement_value !== null && m.movement_value !== undefined ? parseNum(m.movement_value) : undefined,
         valuationRateAfter: m.valuation_rate_after !== null && m.valuation_rate_after !== undefined ? parseNum(m.valuation_rate_after) : undefined,
         referenceNumber: m.reference_number || undefined,
+        locationId: m.location_id || undefined,
+        locationName: m.location_display || undefined,
         sourcePartyOrBatch: m.party_display || undefined,
         notes: m.notes || undefined,
       });
@@ -321,12 +329,197 @@ export async function fetchBatchesDirect(): Promise<ProductionBatchRun[]> {
     targetQuantity: parseNum(b.target_quantity),
     unit: b.unit,
     rawMaterialsConsumed: parseJsonField(b.raw_materials_consumed, []),
+    batchMixId: b.batch_mix_id || undefined,
+    // Produce-&-sell-directly (2026-11-16): sale(line) FKs + no-output-lot flag
+    saleId: b.sale_id || undefined,
+    saleItemId: b.sale_item_id || undefined,
+    directSale: Boolean(b.sale_id),
+    outputRate: b.output_rate !== null && b.output_rate !== undefined ? parseNum(b.output_rate) : undefined,
+    outputValue: b.output_value !== null && b.output_value !== undefined ? parseNum(b.output_value) : undefined,
     supervisorName: b.supervisor_name || undefined,
     mixTemperatureCelsius: b.mix_temperature_celsius !== null && b.mix_temperature_celsius !== undefined ? parseNum(b.mix_temperature_celsius) : undefined,
     notes: b.notes || undefined,
     createdAt: b.created_at,
   }));
 }
+
+// ==========================================
+// BATCH MIXES (RECIPES) — 2026-11-12
+// Reads funnel through serverDb (sandbox working copy — the source of truth
+// for business rules); writes call its CRUD, which liveSync to MySQL. The
+// client refetches after mutations, rehydrating the sandbox from MySQL.
+// ==========================================
+
+export async function fetchBatchMixesDirect(): Promise<BatchMix[]> {
+  return serverDb.getBatchMixes();
+}
+
+export async function fetchBatchMixByIdDirect(id: string): Promise<BatchMix | undefined> {
+  return serverDb.getBatchMixById(id);
+}
+
+export async function createBatchMixDirect(data: any): Promise<BatchMix> {
+  return serverDb.createBatchMix(data);
+}
+
+export async function updateBatchMixDirect(id: string, updates: any): Promise<BatchMix | undefined> {
+  return serverDb.updateBatchMix(id, updates);
+}
+
+export async function deleteBatchMixDirect(id: string): Promise<boolean> {
+  return serverDb.deleteBatchMix(id);
+}
+
+// ==========================================
+// TRACKABLE INVENTORY — unit register (2026-11-13)
+// FK-only rows; every display resolves via JOINs / the client masters.
+// ==========================================
+
+const UNIT_SELECT = `
+  SELECT iu.*,
+         it.name AS item_display, it.code AS item_code,
+         il.name AS location_display,
+         v.registration_number AS vehicle_display,
+         p.name AS supplier_display,
+         s.sale_number AS sale_display
+  FROM inventory_units iu
+  LEFT JOIN items it ON it.id = iu.item_id
+  LEFT JOIN item_locations il ON il.id = iu.location_id
+  LEFT JOIN vehicles v ON v.id = iu.vehicle_id
+  LEFT JOIN parties p ON p.id = iu.party_id
+  LEFT JOIN sales_orders s ON s.id = iu.sale_id`;
+
+function mapUnitRow(u: any): InventoryUnit {
+  return {
+    id: u.id,
+    itemId: u.item_id,
+    serialNumber: u.serial_number,
+    status: (u.status || 'in_stock') as InventoryUnitStatus,
+    locationId: u.location_id || undefined,
+    vehicleId: u.vehicle_id || undefined,
+    position: u.position || undefined,
+    fitOdometer: u.fit_odometer !== null && u.fit_odometer !== undefined ? parseNum(u.fit_odometer) : undefined,
+    supplierId: u.party_id || undefined,
+    purchaseDate: u.purchase_date || undefined,
+    purchaseCost: u.purchase_cost !== null && u.purchase_cost !== undefined ? parseNum(u.purchase_cost) : undefined,
+    warrantyExpiry: u.warranty_expiry || undefined,
+    saleId: u.sale_id || undefined,
+    purchaseId: u.purchase_id || undefined,
+    condition: u.unit_condition || undefined,
+    notes: u.notes || undefined,
+    // DYNAMIC ATTRIBUTES (serialized, 2026-11-16): values keyed by the owning
+    // item's declared keys (JSON object on the row)
+    attributes: (() => {
+      const parsed = parseJsonField(u.attributes, {}) as Record<string, string | number>;
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length > 0
+        ? parsed
+        : undefined;
+    })(),
+    createdAt: u.created_at,
+    updatedAt: u.updated_at || undefined,
+    // Display copies (JOINs; display-only — Golden Rule §2)
+    itemName: u.item_display || undefined,
+    itemCode: u.item_code || undefined,
+    locationName: u.location_display || undefined,
+    vehicleNo: u.vehicle_display || undefined,
+    supplierName: u.supplier_display || undefined,
+    saleNumber: u.sale_display || undefined,
+  };
+}
+
+export async function fetchInventoryUnitsDirect(itemId?: string): Promise<InventoryUnit[]> {
+  if (!isMysqlConfigured()) {
+    const units = serverDb.getInventoryUnits().filter((u) => !itemId || u.itemId === itemId);
+    // Sandbox reads resolve display copies from the hydrated masters.
+    return units.map((u) => ({
+      ...u,
+      itemName: serverDb.getItems().find((i) => i.id === u.itemId)?.name,
+      locationName: serverDb.getLocations().find((l) => l.id === u.locationId)?.name,
+      vehicleNo: serverDb.getVehicles().find((v) => v.id === u.vehicleId)?.vehicleNo,
+      supplierName: serverDb.getParties().find((p) => p.id === u.supplierId)?.name,
+      saleNumber: (serverDb.getSales() as any[]).find((s) => s.id === u.saleId)?.saleNumber,
+    }));
+  }
+  if (itemId) {
+    const rows = await executeMysqlQuery(`${UNIT_SELECT} WHERE iu.item_id = ? ORDER BY iu.created_at DESC`, [itemId]);
+    return rows.map(mapUnitRow);
+  }
+  const rows = await executeMysqlQuery(`${UNIT_SELECT} ORDER BY iu.created_at DESC`);
+  return rows.map(mapUnitRow);
+}
+
+export async function fetchInventoryUnitEventsDirect(unitId?: string): Promise<InventoryUnitEvent[]> {
+  if (!isMysqlConfigured()) {
+    return serverDb.getInventoryUnitEvents(unitId);
+  }
+  if (unitId) {
+    const rows = await executeMysqlQuery(
+      'SELECT * FROM inventory_unit_events WHERE unit_id = ? ORDER BY date DESC, created_at DESC',
+      [unitId]
+    );
+    return rows.map((e: any) => mapUnitEventRow(e));
+  }
+  const rows = await executeMysqlQuery('SELECT * FROM inventory_unit_events ORDER BY date DESC, created_at DESC');
+  return rows.map((e: any) => mapUnitEventRow(e));
+}
+
+function mapUnitEventRow(e: any): InventoryUnitEvent {
+  return {
+    id: e.id,
+    unitId: e.unit_id,
+    date: e.date,
+    type: (e.type || 'entered') as InventoryUnitEventType,
+    notes: e.notes || undefined,
+    vehicleId: e.vehicle_id || undefined,
+    position: e.position || undefined,
+    odometer: e.odometer !== null && e.odometer !== undefined ? parseNum(e.odometer) : undefined,
+    locationId: e.location_id || undefined,
+    saleId: e.sale_id || undefined,
+    supplierId: e.party_id || undefined,
+    createdAt: e.created_at,
+  };
+}
+
+export async function createInventoryUnitDirect(data: any): Promise<InventoryUnit> {
+  return serverDb.createInventoryUnit(data);
+}
+
+export async function createInventoryUnitsBulkDirect(entries: any[]): Promise<InventoryUnit[]> {
+  return serverDb.createInventoryUnitsBulk(entries);
+}
+
+export async function updateInventoryUnitDirect(id: string, updates: any): Promise<InventoryUnit> {
+  return serverDb.updateInventoryUnit(id, updates);
+}
+
+export async function deployInventoryUnitDirect(id: string, data: any): Promise<InventoryUnit> {
+  return serverDb.deployInventoryUnit(id, data);
+}
+
+export async function returnInventoryUnitDirect(id: string, data: any): Promise<InventoryUnit> {
+  return serverDb.returnInventoryUnit(id, data);
+}
+
+export async function maintainInventoryUnitDirect(id: string, data: any): Promise<InventoryUnit> {
+  return serverDb.maintainInventoryUnit(id, data);
+}
+
+export async function restoreInventoryUnitDirect(id: string, data: any): Promise<InventoryUnit> {
+  return serverDb.restoreInventoryUnit(id, data);
+}
+
+export async function scrapInventoryUnitDirect(id: string, data: any): Promise<InventoryUnit> {
+  return serverDb.scrapInventoryUnit(id, data);
+}
+
+export async function deleteInventoryUnitDirect(id: string): Promise<boolean> {
+  return serverDb.deleteInventoryUnit(id);
+}
+
+export async function markUnitsSoldDirect(unitIds: string[], saleId: string, notes?: string): Promise<InventoryUnit[]> {
+  return serverDb.markUnitsSold(unitIds, saleId, notes);
+}
+
 
 // ==========================================
 // ORDERS (LEGACY — retired for reads/writes by the relational model above)
@@ -776,6 +969,7 @@ export async function updateItemDirect(id: string, updates: any): Promise<Item |
       min_stock_level = ?,
       max_capacity = ?,
       movements = NULL,
+      attributes = ?,
       last_stock_update = ?,
       updated_at = ?
     WHERE id = ?`,
@@ -798,6 +992,8 @@ export async function updateItemDirect(id: string, updates: any): Promise<Item |
       item.currentStock || 0,
       item.minStockLevel || 0,
       item.maxCapacity || null,
+      // DYNAMIC ATTRIBUTES (serialized, 2026-11-16): the declared key list
+      item.attributes && item.attributes.length > 0 ? JSON.stringify(item.attributes) : null,
       item.lastStockUpdate || null,
       item.updatedAt || new Date().toISOString(),
       id,

@@ -29,6 +29,7 @@ import {
   AlertCircle,
   Clock,
   Sparkles,
+  ScanBarcode,
 } from 'lucide-react';
 import {
   Item,
@@ -38,6 +39,9 @@ import {
   ItemType,
   CompanySettings,
   ItemStockAdjustment,
+  InventoryUnit,
+  Party,
+  Vehicle,
 } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { ItemFormModal } from './ItemFormModal';
@@ -45,6 +49,7 @@ import { CategoryManagerModal } from './CategoryManagerModal';
 import { UnitManagerModal } from './UnitManagerModal';
 import { LocationManagerModal } from './LocationManagerModal';
 import { ItemDetailPage } from './ItemDetailPage';
+import { AssetItemProfilePage } from './AssetItemProfilePage';
 import { StockAdjustmentModal } from './StockAdjustmentModal';
 
 interface ItemsViewProps {
@@ -54,6 +59,10 @@ interface ItemsViewProps {
   locations: ItemLocation[];
   settings: CompanySettings;
   stockAdjustments?: ItemStockAdjustment[];
+  /** Trackable inventory (asset-type items' unit register) */
+  inventoryUnits?: InventoryUnit[];
+  parties?: Party[];
+  vehicles?: Vehicle[];
   onNavigateToInventory?: () => void;
   onRefresh?: () => void;
 }
@@ -65,12 +74,15 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
   locations,
   settings,
   stockAdjustments: propAdjustments,
+  inventoryUnits = [],
+  parties = [],
+  vehicles = [],
   onNavigateToInventory,
 }) => {
   const currencySymbol = settings.currencySymbol || '₹';
 
-  // Active top-level subtab: 'catalog' vs 'adjustments'
-  const [activeSubTab, setActiveSubTab] = useState<'catalog' | 'adjustments'>('catalog');
+  // Active top-level subtab
+  const [activeSubTab, setActiveSubTab] = useState<'catalog' | 'trackable' | 'adjustments'>('catalog');
 
   // Fallback to localDb if prop not passed
   const stockAdjustments = useMemo(() => {
@@ -92,8 +104,15 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
   const [adjItemFilter, setAdjItemFilter] = useState<string>('all');
   const [adjSortBy, setAdjSortBy] = useState<'recent' | 'oldest' | 'qty_desc' | 'val_desc'>('recent');
 
+  // Filters for the Trackable tab
+  const [trkSearchQuery, setTrkSearchQuery] = useState('');
+
   // Modals state
   const [isItemFormOpen, setIsItemFormOpen] = useState(false);
+  /** WHAT a NEW form creates, decided by WHERE it opened from (2026-11-16):
+   *  Serialized Inventory opens the form with 'asset' — the created catalog
+   *  row owns a trackable unit register instead of aggregate stock. */
+  const [itemFormDefaultType, setItemFormDefaultType] = useState<ItemType | undefined>(undefined);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
   const [isCategoriesOpen, setIsCategoriesOpen] = useState(false);
   const [isUnitsOpen, setIsUnitsOpen] = useState(false);
@@ -110,6 +129,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
       const customEvent = e as CustomEvent;
       if (customEvent.detail === 'add-item') {
         setEditingItem(null);
+        setItemFormDefaultType(undefined); // header action: Basic Inventory context
         setIsItemFormOpen(true);
       } else if (customEvent.detail === 'manage-categories') {
         setIsCategoriesOpen(true);
@@ -126,10 +146,13 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
     return () => window.removeEventListener('app-header-action', handleHeaderAction);
   }, []);
 
-  // Quick stats calculations for Catalog
+  // Quick stats calculations for Catalog (asset/trackable items NEVER ride
+  // the aggregate stock tab — they live in the Trackable register)
+  const assetItems = useMemo(() => items.filter((i) => i.type === 'asset'), [items]);
   const catalogStats = useMemo(() => {
-    const products = items.filter((i) => i.type === 'product');
-    const services = items.filter((i) => i.type === 'service');
+    const stockItems = items.filter((i) => i.type !== 'asset');
+    const products = stockItems.filter((i) => i.type === 'product');
+    const services = stockItems.filter((i) => i.type === 'service');
     // Stock Valuation card values every product at its item MASTER cost rate
     // (default: Opening Cost -> Purchase -> Sale). FIFO lots stay recorded on
     // the stock_movements ledger for audit, but do not drive this card.
@@ -139,7 +162,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
     }, 0);
 
     return {
-      totalItems: items.length,
+      totalItems: stockItems.length,
       totalProducts: products.length,
       totalServices: services.length,
       categoriesCount: categories.length,
@@ -175,6 +198,8 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
   const filteredItems = useMemo(() => {
     return items
       .filter((item) => {
+        // TRACKABLE items never appear in the stock catalog
+        if (item.type === 'asset') return false;
         // Search filter
         if (searchQuery.trim()) {
           const q = searchQuery.toLowerCase().trim();
@@ -279,14 +304,48 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
       });
   }, [stockAdjustments, adjSearchQuery, adjTypeFilter, adjItemFilter, adjSortBy]);
 
+  // TRACKABLE register stats — per asset item, live counts from the unit
+  // register (COUNT by JOIN, never stored numbers on the item).
+  const trackableRows = useMemo(() => {
+    const q = trkSearchQuery.toLowerCase().trim();
+    return assetItems
+      .filter((item) => {
+        if (!q) return true;
+        const hay = [item.name, item.code, item.categoryName].filter(Boolean).join(' ').toLowerCase();
+        return hay.includes(q);
+      })
+      .map((item) => {
+        const itemUnits = inventoryUnits.filter((u) => u.itemId === item.id);
+        return {
+          item,
+          inStock: itemUnits.filter((u) => u.status === 'in_stock').length,
+          inUse: itemUnits.filter((u) => u.status === 'deployed').length,
+          maintenance: itemUnits.filter((u) => u.status === 'maintenance').length,
+          sold: itemUnits.filter((u) => u.status === 'sold').length,
+          scrapped: itemUnits.filter((u) => u.status === 'scrapped').length,
+          total: itemUnits.length,
+        };
+      });
+  }, [assetItems, inventoryUnits, trkSearchQuery]);
+
+  const trackableTotals = useMemo(() => ({
+    items: trackableRows.length,
+    allUnits: trackableRows.reduce((s, r) => s + r.total, 0),
+    inStock: trackableRows.reduce((s, r) => s + r.inStock, 0),
+    inUse: trackableRows.reduce((s, r) => s + r.inUse, 0),
+  }), [trackableRows]);
+
   // Handlers
-  const handleOpenAdd = () => {
+  const handleOpenAdd = (type?: ItemType) => {
     setEditingItem(null);
+    setItemFormDefaultType(type);
     setIsItemFormOpen(true);
   };
 
   const handleEdit = (item: Item) => {
     setEditingItem(item);
+    // Edit mode: the modal keeps the item's OWN stored type (no defaulting)
+    setItemFormDefaultType(undefined);
     setIsItemFormOpen(true);
   };
 
@@ -316,6 +375,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
   };
 
   const handleExportCSV = () => {
+    if (activeSubTab === 'trackable') return; // the register exports arrive with the unit-flow step
     if (activeSubTab === 'catalog') {
       const headers = [
         'Item Code',
@@ -419,13 +479,28 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
           catalog row REPLACES the tab content with the item's full page (Back
           returns to the catalog list) */}
       {detailItem ? (
-        <ItemDetailPage
-          item={detailItem}
-          category={categories.find((c) => c.id === detailItem.categoryId)}
-          currencySymbol={currencySymbol}
-          onBack={() => setDetailItemId(null)}
-          onEdit={handleEdit}
-        />
+        detailItem.type === 'asset' ? (
+          // TRACKABLE item — the unit register profile (serials, lifecycle)
+          <AssetItemProfilePage
+            item={detailItem}
+            categories={categories}
+            inventoryUnits={inventoryUnits}
+            parties={parties}
+            vehicles={vehicles}
+            locations={locations}
+            settings={settings}
+            onBack={() => setDetailItemId(null)}
+            onEdit={handleEdit}
+          />
+        ) : (
+          <ItemDetailPage
+            item={detailItem}
+            category={categories.find((c) => c.id === detailItem.categoryId)}
+            currencySymbol={currencySymbol}
+            onBack={() => setDetailItemId(null)}
+            onEdit={handleEdit}
+          />
+        )
       ) : (
         <>
       {/* Top Header & Navigation Switcher */}
@@ -442,16 +517,22 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
             }`}
           >
             <Package className="w-4 h-4" />
-            <span>Master Catalog</span>
-            <span
-              className={`px-2 py-0.2 rounded-full text-[10px] font-extrabold ${
-                activeSubTab === 'catalog'
-                  ? 'bg-white/20 text-white'
-                  : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
-              }`}
-            >
-              {items.length}
-            </span>
+            <span>Basic Inventory</span>
+           
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveSubTab('trackable')}
+            className={`flex items-center gap-2 px-5 py-2 rounded-full font-bold text-xs transition-all ${
+              activeSubTab === 'trackable'
+                ? 'bg-[var(--color-primary)] text-[var(--color-on-primary)] shadow-xs'
+                : 'text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
+            }`}
+          >
+            <ScanBarcode className="w-4 h-4" />
+            <span>Serialized Inventory</span>
+            
           </button>
 
           <button
@@ -465,15 +546,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
           >
             <SlidersHorizontal className="w-4 h-4" />
             <span>Stock Adjustments</span>
-            <span
-              className={`px-2 py-0.2 rounded-full text-[10px] font-extrabold ${
-                activeSubTab === 'adjustments'
-                  ? 'bg-white/20 text-white'
-                  : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
-              }`}
-            >
-              {stockAdjustments.length}
-            </span>
+            
           </button>
         </div>
 
@@ -521,14 +594,42 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
             Locations ({locations.length})
           </button>
 
-          <button
-            type="button"
-            onClick={handleOpenAdd}
-            className="flex items-center gap-1.5 px-5 py-2.5 bg-[var(--color-primary)] hover:opacity-95 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-md transition-all hover:scale-[1.02] active:scale-[0.98]"
-          >
-            <Plus className="w-4 h-4" />
-            Add Item
-          </button>
+          {/* CONTEXT-AWARE PRIMARY ACTION (2026-11-16): the header shows ONE
+              button for the active feature — Basic Inventory → Add Item;
+              Serialized Inventory → New Trackable Item; Stock Adjustments
+              → New Adjustment. Each opens its own feature's form. */}
+          {activeSubTab === 'catalog' && (
+            <button
+              type="button"
+              onClick={handleOpenAdd}
+              className="flex items-center gap-1.5 px-5 py-2.5 bg-[var(--color-primary)] hover:opacity-95 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-md transition-all hover:scale-[1.02] active:scale-[0.98]"
+            >
+              <Plus className="w-4 h-4" />
+              Add Item
+            </button>
+          )}
+
+          {activeSubTab === 'trackable' && (
+            <button
+              type="button"
+              onClick={() => handleOpenAdd('asset')}
+              className="flex items-center gap-1.5 px-5 py-2.5 bg-[var(--color-primary)] hover:opacity-95 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-md transition-all hover:scale-[1.02] active:scale-[0.98]"
+            >
+              <ScanBarcode className="w-4 h-4" />
+              New  Item
+            </button>
+          )}
+
+          {activeSubTab === 'adjustments' && (
+            <button
+              type="button"
+              onClick={() => handleOpenAdjustmentModal()}
+              className="flex items-center gap-1.5 px-5 py-2.5 bg-[var(--color-primary)] hover:opacity-95 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-md transition-all hover:scale-[1.02] active:scale-[0.98]"
+            >
+              <SlidersHorizontal className="w-4 h-4" />
+              New Adjustment
+            </button>
+          )}
         </div>
       </div>
 
@@ -1076,6 +1177,115 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
       )}
 
       {/* ========================================================================= */}
+      {/* VIEW 1b: TRACKABLE INVENTORY — asset-type items & their unit registers    */}
+      {/* ========================================================================= */}
+      {activeSubTab === 'trackable' && (
+        <div className="space-y-5">
+          {/* KPI strip */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs">
+              <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Trackable Items</span>
+              <p className="text-2xl font-black text-[var(--color-on-surface)] mt-1">{trackableTotals.items}</p>
+            </div>
+            <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs">
+              <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Total Units</span>
+              <p className="text-2xl font-black text-[var(--color-on-surface)] mt-1">{trackableTotals.allUnits}</p>
+            </div>
+            <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs">
+              <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">In Spare</span>
+              <p className="text-2xl font-black text-[var(--color-success)] mt-1">{trackableTotals.inStock}</p>
+            </div>
+            <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs">
+              <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">In Use (deployed)</span>
+              <p className="text-2xl font-black text-[var(--color-primary)] mt-1">{trackableTotals.inUse}</p>
+            </div>
+          </div>
+
+          {/* Asset-item table */}
+          <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl overflow-clip shadow-xs">
+            <div className="p-3 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]/60">
+              {/* The primary "New Trackable Item" action lives in the subtab
+                  header (2026-11-16) — this bar keeps only the search. */}
+              <div className="relative max-w-md">
+                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-outline)]" />
+                <input
+                  type="text"
+                  placeholder="Search trackable items by name, code, or category..."
+                  value={trkSearchQuery}
+                  onChange={(e) => setTrkSearchQuery(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2 bg-[var(--color-surface-container)] text-xs font-semibold text-[var(--color-on-surface)] placeholder:text-[var(--color-on-surface-variant)] border border-[var(--color-outline-variant)] rounded-full focus:outline-none focus:bg-[var(--color-surface)] focus:border-[var(--color-primary)] transition-all"
+                />
+              </div>
+            </div>
+            <div>
+              <table className="w-full text-left border-collapse">
+                <thead className="sticky top-16 z-20">
+                  <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
+                    <th className="py-3.5 px-4">Item</th>
+                    <th className="py-3.5 px-3">Category</th>
+                    <th className="py-3.5 px-3 text-right">In Spare</th>
+                    <th className="py-3.5 px-3 text-right">In Use</th>
+                    <th className="py-3.5 px-3 text-right">Maint.</th>
+                    <th className="py-3.5 px-3 text-right">Sold</th>
+                    <th className="py-3.5 px-3 text-right">Scrapped</th>
+                    <th className="py-3.5 px-4 text-right">Total Units</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--color-outline-variant)]/60">
+                  {trackableRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                        <ScanBarcode className="w-8 h-8 mx-auto text-[var(--color-outline-variant)] mb-2" />
+                        <p className="text-xs font-bold">{assetItems.length === 0 ? 'No trackable items yet' : 'No items match the search'}</p>
+                        <p className="text-[10px] mt-0.5">
+                          {assetItems.length === 0
+                            ? 'Add a trackable item — e.g. "Tyre", "Battery" — and it owns its own unit register.'
+                            : 'Try widening the search.'}
+                        </p>
+                        {assetItems.length === 0 && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenAdd('asset')}
+                            className="mt-3 inline-flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold shadow-xs hover:opacity-90 transition-opacity"
+                          >
+                            <Plus className="w-3.5 h-3.5" /> New Trackable Item
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ) : (
+                    trackableRows.map((row) => (
+                      <tr
+                        key={row.item.id}
+                        onClick={() => setDetailItemId(row.item.id)}
+                        className="hover:bg-[var(--color-surface-container-high)]/40 transition-colors cursor-pointer text-xs"
+                      >
+                        <td className="py-3.5 px-4">
+                          <div className="flex items-center gap-2">
+                            <ScanBarcode className="w-3.5 h-3.5 text-[var(--color-primary)] shrink-0" />
+                            <span className="font-bold text-[var(--color-on-surface)]">{row.item.name}</span>
+                            {!row.item.isActive && <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-[var(--color-error-container)] text-[var(--color-on-error-container)]">INACTIVE</span>}
+                          </div>
+                          <p className="text-[10px] text-[var(--color-on-surface-variant)] font-mono mt-0.5">{row.item.code} · {row.item.unit}</p>
+                        </td>
+                        <td className="py-3.5 px-3 font-semibold text-[var(--color-on-surface)]">{row.item.categoryName || '—'}</td>
+                        <td className="py-3.5 px-3 text-right font-black text-[var(--color-success)]">{row.inStock}</td>
+                        <td className="py-3.5 px-3 text-right font-black text-[var(--color-primary)]">{row.inUse}</td>
+                        <td className="py-3.5 px-3 text-right font-black text-[var(--color-on-surface-variant)]">{row.maintenance}</td>
+                        <td className="py-3.5 px-3 text-right font-bold text-[var(--color-on-surface-variant)]">{row.sold}</td>
+                        <td className="py-3.5 px-3 text-right font-bold text-[var(--color-on-surface-variant)]">{row.scrapped}</td>
+                        <td className="py-3.5 px-4 text-right font-black text-[var(--color-on-surface)]">{row.total}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
       {/* VIEW 2: STOCK ADJUSTMENTS LEDGER                                          */}
       {/* ========================================================================= */}
       {activeSubTab === 'adjustments' && (
@@ -1427,10 +1637,12 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
           categories={categories}
           units={units}
           locations={locations}
+          defaultType={itemFormDefaultType}
           currencySymbol={currencySymbol}
           onClose={() => {
             setIsItemFormOpen(false);
             setEditingItem(null);
+            setItemFormDefaultType(undefined);
           }}
           onOpenCategories={() => setIsCategoriesOpen(true)}
           onOpenUnits={() => setIsUnitsOpen(true)}

@@ -18,6 +18,7 @@ import {
   Check,
   CheckCircle2,
   UserRound,
+  ScanBarcode,
 } from 'lucide-react';
 import {
   Order,
@@ -181,6 +182,10 @@ export function AddPurchaseModal({
       gstRate: string;
       location: string;
       receivedQuantity: string;
+      /** SERIALIZED line (asset item, 2026-11-16): the ONE unit this line
+       *  enters — serial + the item's declared-key drafts */
+      serial: string;
+      attributes: Record<string, string>;
     }>
   >(() => {
     const suggestedRate = (prod?: Item) =>
@@ -203,6 +208,10 @@ export function AddPurchaseModal({
           gstRate: String(i.gstRate ?? ''),
           location: i.location || '',
           receivedQuantity: i.receivedQuantity !== undefined ? String(i.receivedQuantity) : '',
+          serial: (i as any).unitEntry?.serialNumber || '',
+          attributes: Object.fromEntries(
+            Object.entries((i as any).unitEntry?.attributes || {}).map(([k, v]) => [k, String(v)])
+          ),
         };
       });
       // Advancing an RFQ to the Purchase Order: blank/zero (pending) vendor
@@ -231,6 +240,8 @@ export function AddPurchaseModal({
         gstRate: '',
         location: '',
         receivedQuantity: '',
+        serial: '',
+        attributes: {},
       },
     ];
   });
@@ -280,7 +291,9 @@ export function AddPurchaseModal({
   const accounts = useMemo(() => localDb.getAccounts(), []);
   const vendorParties: Party[] = parties;
   const productItems: Item[] = useMemo(() => {
-    return items.filter((i) => i.type === 'product' || !i.type);
+    // 2026-11-16: serialized (asset) items join the purchase picker — each
+    // line then registers ONE unit (serial + declared keys) at PO / GRN.
+    return items.filter((i) => i.type === 'product' || i.type === 'asset' || !i.type);
   }, [items]);
 
   const selectedParty = useMemo(() => {
@@ -345,6 +358,11 @@ export function AddPurchaseModal({
         rate: isRfq ? '' : suggestedRate,
         gstRate: product.taxRateGst !== undefined && product.taxRateGst !== null ? String(product.taxRateGst) : '',
         location: defaultLoc,
+        // SERIALIZED line (2026-11-16): quantity is FIXED at 1 — a line IS one
+        // unit; its declared keys start blank (values per serial entry)
+        quantity: product.type === 'asset' ? '1' : updated[index].quantity,
+        serial: '',
+        attributes: {},
       };
     } else {
       updated[index] = {
@@ -354,6 +372,9 @@ export function AddPurchaseModal({
         rate: '',
         gstRate: '',
         location: '',
+        quantity: '',
+        serial: '',
+        attributes: {},
       };
     }
 
@@ -362,7 +383,7 @@ export function AddPurchaseModal({
 
   const handleItemFieldChange = (
     index: number,
-    field: 'quantity' | 'rate' | 'gstRate' | 'location' | 'receivedQuantity',
+    field: 'quantity' | 'rate' | 'gstRate' | 'location' | 'receivedQuantity' | 'serial',
     val: string
   ) => {
     const updated = [...lineItems];
@@ -382,7 +403,7 @@ export function AddPurchaseModal({
   const handleAddLineItem = () => {
     setLineItems((prev) => [
       ...prev,
-      { itemId: '', itemName: '', quantity: '', unit: 'MT', rate: '', gstRate: '', location: '', receivedQuantity: '' },
+      { itemId: '', itemName: '', quantity: '', unit: 'MT', rate: '', gstRate: '', location: '', receivedQuantity: '', serial: '', attributes: {} },
     ]);
   };
 
@@ -460,7 +481,14 @@ export function AddPurchaseModal({
         setValidationError(`Line item #${i + 1} has no material selected.`);
         return false;
       }
-      const qty = parseFloat(row.quantity);
+      // SERIALIZED line (2026-11-16): a PO / GRN save registers its unit —
+      // the serial is compulsory (RFQ lines are document-only so far)
+      const lineProd = items.find((it) => it.id === row.itemId);
+      if (lineProd?.type === 'asset' && !isRfq && !row.serial.trim()) {
+        setValidationError(`Line item #${i + 1} (${row.itemName}) is a serialized item — enter its SERIAL NUMBER to register the unit.`);
+        return false;
+      }
+      const qty = parseFloat(row.quantity) || (lineProd?.type === 'asset' ? 1 : NaN);
       if (isNaN(qty) || qty <= 0) {
         setValidationError(`Line item #${i + 1} (${row.itemName || 'Item'}) must have a valid quantity > 0.`);
         return false;
@@ -512,16 +540,34 @@ export function AddPurchaseModal({
         const assignedLoc =
           row.location?.trim() ||
           (prodLocs.length > 0 ? prodLocs[0].locationName : prod?.stockLocation || 'Main Yard');
+        // SERIALIZED line (asset item, 2026-11-16): quantity is FIXED at 1 —
+        // the line carries its ONE unit (serial + declared keys) against the
+        // purchase; supplier/date/cost are auto (vendor / doc date / rate)
+        const isSerialized = prod?.type === 'asset';
         return {
           itemId: row.itemId,
-          quantity: orderedQty,
+          quantity: isSerialized ? 1 : orderedQty,
           // RFQ keeps the pending rate (0) but carries the item's GST slab;
           // vendor rates finalize at the Purchase Order stage
           rate: isRfq ? 0 : parseFloat(row.rate) || 0,
           gstRate: round2(parseFloat(row.gstRate) || 0),
           locationName: assignedLoc,
-          receivedQuantity: targetStage === 'goods_receipt' ? recvQty : orderedQty,
+          receivedQuantity: isSerialized
+            ? undefined
+            : (targetStage === 'goods_receipt' ? recvQty : orderedQty),
           unit: row.unit,
+          ...(isSerialized
+            ? (row.serial.trim()
+              ? {
+                  unitEntry: {
+                    serialNumber: row.serial.trim(),
+                    attributes: Object.fromEntries(
+                      Object.entries(row.attributes || {}).filter(([, v]) => v !== '')
+                    ),
+                  },
+                }
+              : {})
+            : {}),
         };
       });
 
@@ -848,7 +894,8 @@ export function AddPurchaseModal({
                 <tbody className="divide-y divide-[var(--color-outline-variant)]/60 [&>tr:last-child>td:first-child]:rounded-bl-2xl [&>tr:last-child>td:last-child]:rounded-br-2xl">
                   {lineItems.map((row, idx) => {
                     const selectedProd = productItems.find((p) => p.id === row.itemId);
-                    const orderedQtyVal = parseFloat(row.quantity) || 0;
+                    const serializedRow = selectedProd?.type === 'asset';
+                    const orderedQtyVal = parseFloat(row.quantity) || (serializedRow ? 1 : 0);
                     const receivedQtyVal =
                       row.receivedQuantity !== '' ? parseFloat(row.receivedQuantity) || 0 : orderedQtyVal;
                     // The goods receipt bills the RECEIVED quantity at the PO
@@ -872,7 +919,8 @@ export function AddPurchaseModal({
                     });
 
                     return (
-                      <tr key={idx} className="bg-[var(--color-surface-container-lowest)]">
+                      <React.Fragment key={idx}>
+                      <tr className="bg-[var(--color-surface-container-lowest)]">
                         {/* Material selection (searchable) / locked name at GRN */}
                         <td className="py-2 px-3">
                           {itemRateLocked ? (
@@ -888,7 +936,9 @@ export function AddPurchaseModal({
                               options={productItems.map((p) => ({
                                 value: p.id,
                                 label: p.code,
-                                sub: `(${p.name}) · Unit: ${p.unit}`,
+                                sub: p.type === 'asset'
+                                  ? `(${p.name}) · Serialized — one unit per line`
+                                  : `(${p.name}) · Unit: ${p.unit}`,
                               }))}
                             />
                           )}
@@ -898,6 +948,10 @@ export function AddPurchaseModal({
                         <td className="py-2 px-3">
                           {itemRateLocked ? (
                             <span className="text-xs font-medium text-[var(--color-on-surface)] truncate block">{row.location || '—'}</span>
+                          ) : serializedRow ? (
+                            <span className="text-[10px] text-[var(--color-on-surface-variant)] font-semibold">
+                              by register
+                            </span>
                           ) : !selectedProd ? (
                             <SearchableSelect
                               value=""
@@ -938,8 +992,8 @@ export function AddPurchaseModal({
 
                         {/* Ordered / Requested quantity — locked at GRN over an existing order */}
                         <td className="py-2 px-3 text-right">
-                          {itemRateLocked ? (
-                            <span className="text-xs font-bold text-[var(--color-on-surface)]">
+                          {itemRateLocked || serializedRow ? (
+                            <span className="text-xs font-bold text-[var(--color-on-surface)]" title={serializedRow ? 'A serialized line is exactly ONE unit — the serial identifies it' : undefined}>
                               {orderedQtyVal.toLocaleString('en-IN')} <span className="text-[10px] text-[var(--color-on-surface-variant)] font-semibold">{row.unit}</span>
                             </span>
                           ) : (
@@ -958,21 +1012,28 @@ export function AddPurchaseModal({
                           )}
                         </td>
 
-                        {/* Actual received quantity (GRN only) */}
+                        {/* Actual received quantity (GRN only) — serialized
+                            rows implicitly receive their ONE unit */}
                         {isGrn && (
                           <td className="py-2 px-3 text-right bg-[var(--color-surface-container-high)]/30">
-                            <div className="flex items-center gap-1 justify-end">
-                              <input
-                                type="number"
-                                step="any"
-                                placeholder={String(orderedQtyVal || 0)}
-                                value={row.receivedQuantity}
-                                onChange={(e) => handleItemFieldChange(idx, 'receivedQuantity', e.target.value)}
-                                className="w-full bg-transparent border-b border-[var(--color-primary)] text-xs font-black text-[var(--color-on-surface)] focus:outline-none text-right"
-                              />
-                              <span className="text-[10px] text-[var(--color-on-surface-variant)] font-semibold">{row.unit}</span>
-                            </div>
-                            {orderedQtyVal > 0 && (
+                            {serializedRow ? (
+                              <span className="text-xs font-black text-[var(--color-on-surface)]">
+                                1 <span className="text-[10px] text-[var(--color-on-surface-variant)] font-semibold">{row.unit}</span>
+                              </span>
+                            ) : (
+                              <div className="flex items-center gap-1 justify-end">
+                                <input
+                                  type="number"
+                                  step="any"
+                                  placeholder={String(orderedQtyVal || 0)}
+                                  value={row.receivedQuantity}
+                                  onChange={(e) => handleItemFieldChange(idx, 'receivedQuantity', e.target.value)}
+                                  className="w-full bg-transparent border-b border-[var(--color-primary)] text-xs font-black text-[var(--color-on-surface)] focus:outline-none text-right"
+                                />
+                                <span className="text-[10px] text-[var(--color-on-surface-variant)] font-semibold">{row.unit}</span>
+                              </div>
+                            )}
+                            {!serializedRow && orderedQtyVal > 0 && (
                               <div className="mt-1 text-right">
                                 {shortage > 0 ? (
                                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]">
@@ -1062,6 +1123,78 @@ export function AddPurchaseModal({
                           )}
                         </td>
                       </tr>
+
+                      {/* SERIALIZED line (2026-11-16): the unit-entry row — the
+                          ONE unit this line registers (supplier = vendor, date
+                          = document date, cost = line rate are automatic) */}
+                      {serializedRow && !isRfq && (() => {
+                        const attrDefs = selectedProd?.attributes || [];
+                        return (
+                          <tr className="bg-[var(--color-surface-container-lowest)]">
+                            <td colSpan={isGrn ? 8 : 7} className="px-3 pb-2.5">
+                              <div className="p-2.5 rounded-xl border border-[var(--color-primary)]/40 bg-[var(--color-primary-container)]/25 space-y-2">
+                                <p className="text-[9px] font-bold uppercase tracking-wider text-[var(--color-primary)] flex items-center gap-1.5">
+                                  <ScanBarcode className="w-3 h-3" /> Unit Entry — this line registers ONE {selectedProd?.name} in the serialized inventory
+                                </p>
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                  <div>
+                                    <label className="block text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase">
+                                      Serial Number *
+                                    </label>
+                                    <input
+                                      type="text"
+                                      required
+                                      value={row.serial}
+                                      onChange={(e) => handleItemFieldChange(idx, 'serial', e.target.value)}
+                                      placeholder="e.g. APO-9931"
+                                      className="mt-0.5 w-full px-2.5 py-1 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-[11px] font-mono font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                                    />
+                                  </div>
+                                  {(selectedProd?.attributes || []).map((def) => (
+                                    <div key={def.key}>
+                                      <label className="block text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase">
+                                        {def.label}{def.required && <span className="text-[var(--color-error)]"> *</span>}
+                                      </label>
+                                      {def.type === 'select' ? (
+                                        <select
+                                          value={row.attributes[def.key] || ''}
+                                          onChange={(e) => {
+                                            const next = [...lineItems];
+                                            next[idx] = { ...next[idx], attributes: { ...row.attributes, [def.key]: e.target.value } };
+                                            setLineItems(next);
+                                          }}
+                                          className="mt-0.5 w-full px-2 py-1 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-[11px] font-semibold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                                        >
+                                          <option value="">— Not recorded —</option>
+                                          {(def.options || []).map((opt) => (
+                                            <option key={opt} value={opt}>{opt}</option>
+                                          ))}
+                                        </select>
+                                      ) : (
+                                        <input
+                                          type={def.type === 'number' ? 'number' : def.type === 'date' ? 'date' : 'text'}
+                                          step={def.type === 'number' ? 'any' : undefined}
+                                          value={row.attributes[def.key] || ''}
+                                          onChange={(e) => {
+                                            const next = [...lineItems];
+                                            next[idx] = { ...next[idx], attributes: { ...row.attributes, [def.key]: e.target.value } };
+                                            setLineItems(next);
+                                          }}
+                                          className="mt-0.5 w-full px-2 py-1 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-[11px] font-semibold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                                        />
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                                <p className="text-[9px] text-[var(--color-on-surface-variant)] font-semibold">
+                                  Supplier = the purchase's vendor · Purchase date = this document's date · Unit cost = this line's rate — all automatic.
+                                </p>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })()}
+                      </React.Fragment>
                     );
                   })}
                 </tbody>

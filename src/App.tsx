@@ -42,6 +42,8 @@ function AppContent() {
     units,
     locations,
     productionBatches,
+    batchMixes,
+    inventoryUnits,
     orders,
     sales,
     saleInvoices,
@@ -53,6 +55,7 @@ function AppContent() {
     transfers,
     adjustments,
     stockAdjustments,
+    vehicles,
     vehicleEmiEntries,
     vehicleExpenses,
     isOnline,
@@ -601,12 +604,16 @@ function AppContent() {
               locations={locations}
               settings={settings}
               stockAdjustments={stockAdjustments}
+              inventoryUnits={inventoryUnits}
+              parties={parties}
+              vehicles={vehicles}
             />
           )}
 
           {activeTab === 'production' && hasPermission('manage_production') && (
             <ProductionView
               batches={productionBatches}
+              batchMixes={batchMixes}
               items={items}
               settings={settings}
             />
@@ -619,6 +626,7 @@ function AppContent() {
               purchaseOrders={purchases}
               parties={parties}
               items={items}
+              inventoryUnits={inventoryUnits}
               settings={settings}
               onAddSale={handleAddSale}
               onUpdateSale={handleUpdateSale}
@@ -643,6 +651,7 @@ function AppContent() {
               purchaseOrders={purchases}
               parties={parties}
               items={items}
+              inventoryUnits={inventoryUnits}
               settings={settings}
               onAddSale={handleAddSale}
               onUpdateSale={handleUpdateSale}

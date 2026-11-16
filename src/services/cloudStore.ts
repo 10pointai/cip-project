@@ -6,6 +6,9 @@ import {
   ItemCategory,
   ItemUnit,
   ItemLocation,
+  BatchMix,
+  InventoryUnit,
+  InventoryUnitEvent,
   ProductionBatchRun,
   Order,
   Vehicle,
@@ -39,7 +42,7 @@ import { api } from './api';
 /** The 25 store collections, as addressable fetch targets. */
 export type CollectionName =
   | 'parties' | 'transactions' | 'settings' | 'items' | 'categories' | 'units'
-  | 'locations' | 'productionBatches' | 'orders' | 'sales' | 'saleInvoices' | 'purchases'
+  | 'locations' | 'productionBatches' | 'batchMixes' | 'inventoryUnits' | 'orders' | 'sales' | 'saleInvoices' | 'purchases'
   | 'vehicles' | 'drivers' | 'tripSlips' | 'tyres' | 'employees' | 'attendance'
   | 'leaves' | 'employeePayments' | 'employeeLedgerTransactions' | 'accounts'
   | 'transfers' | 'adjustments'
@@ -86,10 +89,10 @@ const FEATURE_COLLECTIONS: Record<string, CollectionName[]> = {
   dashboard: ['transactions'],
   parties: ['parties', 'transactions', 'sales', 'saleInvoices', 'purchases', 'accounts'],
   'cash-bank': ['accounts', 'transfers', 'adjustments', 'transactions', 'parties', 'employeePayments'],
-  items: ['items', 'categories', 'units', 'locations', 'stockAdjustments'],
+  items: ['items', 'categories', 'units', 'locations', 'stockAdjustments', 'inventoryUnits'],
   sales: ['sales', 'saleInvoices', 'purchases', 'transactions', 'accounts'],
   purchases: ['purchases', 'sales', 'transactions', 'accounts'],
-  production: ['productionBatches', 'items'],
+  production: ['productionBatches', 'batchMixes', 'items'],
   // drivers are employees with role 'driver' — loaded via 'employees'.
   logistics: [
     'vehicles', 'tripSlips', 'tyres', 'employees', 'vehicleEmiEntries', 'vehicleExpenses',
@@ -114,6 +117,8 @@ const COLLECTION_FETCHERS: Partial<Record<CollectionName, () => Promise<{ succes
   units: () => api.getUnits(),
   locations: () => api.getLocations(),
   productionBatches: () => api.getBatches(),
+  batchMixes: () => api.getBatchMixes(),
+  inventoryUnits: () => api.getInventoryUnits(),
   orders: () => api.getOrders(),
   sales: () => api.getSales(),
   saleInvoices: () => api.getSaleInvoices(),
@@ -186,6 +191,8 @@ class CloudStore {
   private units: ItemUnit[] = [];
   private locations: ItemLocation[] = [];
   private productionBatches: ProductionBatchRun[] = [];
+  private batchMixes: BatchMix[] = [];
+  private inventoryUnits: InventoryUnit[] = [];
   private orders: Order[] = []; // legacy rows (retired table) — read-only
   private sales: Sale[] = [];
   private saleInvoices: SaleInvoice[] = [];
@@ -265,6 +272,8 @@ class CloudStore {
         if (d.units) this.units = d.units;
         if (d.locations) this.locations = d.locations;
         if (d.productionBatches) this.productionBatches = d.productionBatches;
+        if (d.batchMixes) this.batchMixes = d.batchMixes;
+        if (d.inventoryUnits) this.inventoryUnits = d.inventoryUnits;
         if (d.orders) this.orders = d.orders;
         if (d.sales) this.sales = d.sales;
         if (d.salesInvoices) this.saleInvoices = d.salesInvoices;
@@ -381,6 +390,8 @@ class CloudStore {
       if (loaded.units) this.units = loaded.units as ItemUnit[];
       if (loaded.locations) this.locations = loaded.locations as ItemLocation[];
       if (loaded.productionBatches) this.productionBatches = loaded.productionBatches as ProductionBatchRun[];
+      if (loaded.batchMixes) this.batchMixes = loaded.batchMixes as BatchMix[];
+      if (loaded.inventoryUnits) this.inventoryUnits = loaded.inventoryUnits as InventoryUnit[];
       if (loaded.sales) this.sales = loaded.sales as Sale[];
       if (loaded.saleInvoices) this.saleInvoices = loaded.saleInvoices as SaleInvoice[];
       if (loaded.appDefaults) this.appDefaults = loaded.appDefaults as AppDefault[];
@@ -505,6 +516,7 @@ class CloudStore {
   public getUnits(): ItemUnit[] { return [...this.units]; }
   public getLocations(): ItemLocation[] { return [...this.locations]; }
   public getProductionBatches(): ProductionBatchRun[] { return [...this.productionBatches]; }
+  public getBatchMixes(): BatchMix[] { return [...this.batchMixes]; }
   /** @deprecated legacy `orders` rows (retired table) — read-only */
   public getOrders(): Order[] { return [...this.orders]; }
 
@@ -753,7 +765,15 @@ class CloudStore {
       })
       // AFTER adoption (same no-race rule as addParty)
       .then(() => this.refreshAfter(['items']))
-      .catch((err) => console.error('[CloudStore] addItem cloud error:', err));
+      .catch((err) => {
+        // The create never landed: drop the optimistic placeholder instead of
+        // leaving a PHANTOM row whose client id no server row will ever know.
+        console.error('[CloudStore] addItem cloud error:', err);
+        this.items = this.items.filter((it) => it.id !== newItem.id);
+        this.notify();
+        this.loadCollections(['items']);
+        setTimeout(() => alert(`Failed to save the item: ${err?.message || 'server error'}`), 0);
+      });
     return newItem;
   }
 
@@ -1498,29 +1518,427 @@ class CloudStore {
     return false;
   }
 
-  // Production Batches
-  public addProductionBatch(batchData: Partial<ProductionBatchRun>): ProductionBatchRun {
+  // Production
+  // Batch Mixes (recipes) — production feature, 2026-11-12
+  /**
+   * STALE-ID RECONCILIATION — resolves item references against a FRESH items
+   * master (id → code → name) and returns the remapped payload when anything
+   * changed. Cures client placeholders left behind by a save that never
+   * landed (server restarts, sync gaps).
+   */
+  private async remapItemIdsAgainstMaster<T extends { outputItemId?: string; itemId?: string; ingredients?: Array<{ itemId?: string }> }>(
+    payload: T
+  ): Promise<T | null> {
+    const res = await api.getItems();
+    const fresh: Item[] = res?.data || [];
+    const freshById = new Map(fresh.map((i) => [i.id, i]));
+    const resolve = (id?: string): string | undefined => {
+      if (!id) return undefined;
+      if (freshById.has(id)) return id; // already authoritative
+      const local = this.items.find((i) => i.id === id);
+      const byCode = local ? fresh.find((f) => (f.code || '').trim().toLowerCase() === (local.code || '').trim().toLowerCase()) : undefined;
+      if (byCode) return byCode.id;
+      const byName = local ? fresh.find((f) => (f.name || '').trim().toLowerCase() === (local.name || '').trim().toLowerCase()) : undefined;
+      return byName?.id;
+    };
+    let changed = false;
+    const next: T = { ...payload };
+    if (payload.outputItemId) {
+      const mapped = resolve(payload.outputItemId);
+      if (mapped && mapped !== payload.outputItemId) {
+        next.outputItemId = mapped;
+        changed = true;
+      }
+    }
+    if (Array.isArray(next.ingredients)) {
+      next.ingredients = next.ingredients.map((ing) => {
+        const mapped = resolve(ing.itemId);
+        if (mapped && mapped !== ing.itemId) {
+          changed = true;
+          return { ...ing, itemId: mapped };
+        }
+        return ing;
+      });
+    } else if (payload.itemId) {
+      const mapped = resolve(payload.itemId);
+      if (mapped && mapped !== payload.itemId) {
+        next.itemId = mapped;
+        changed = true;
+      }
+    }
+    return changed ? next : null;
+  }
+
+  public addBatchMix(mixData: Partial<BatchMix>): BatchMix {
+    const newMix: BatchMix = {
+      id: `bmix-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      mixNumber: mixData.mixNumber || '',
+      name: mixData.name || '',
+      outputItemId: mixData.outputItemId || '',
+      // Recipe-level basis is LEGACY (per-row sizing) — new mixes never set it;
+      // each ingredient row carries its own basis.
+      referenceOutputQty: mixData.referenceOutputQty,
+      ingredients: mixData.ingredients || [],
+      notes: mixData.notes,
+      isActive: mixData.isActive !== false,
+      createdAt: new Date().toISOString(),
+      ...mixData,
+    };
+    this.batchMixes.unshift(newMix);
+    this.notify();
+    // Adopt the SERVER-minted mix (authoritative id + mix number + ingredient
+    // row ids — ingredient rows are fully replaced server-side).
+    api
+      .createBatchMix(mixData)
+      .then((res) => {
+        const created = res?.data;
+        if (created?.id) {
+          this.batchMixes = this.batchMixes.map((m) => (m.id === newMix.id ? { ...created } : m));
+          this.notify();
+          this.refreshAfter(['batchMixes']);
+        }
+      })
+      .catch(async (err) => {
+        const msg = String(err?.message || err || '');
+        if (/not in the items master/i.test(msg)) {
+          try {
+            const remapped = await this.remapItemIdsAgainstMaster(mixData);
+            if (remapped) {
+              const retry = await api.createBatchMix(remapped as Partial<BatchMix>);
+              const created = retry?.data;
+              if (created?.id) {
+                this.batchMixes = this.batchMixes.map((m) => (m.id === newMix.id ? { ...created } : m));
+                this.notify();
+                this.refreshAfter(['batchMixes']);
+                return;
+              }
+            }
+          } catch (retryErr: any) {
+            err = retryErr || err;
+          }
+        }
+        console.error('[CloudStore] addBatchMix cloud error:', err);
+        setTimeout(() => alert(`Failed to save the mix: ${err?.message || 'server error'}`), 0);
+      });
+    return newMix;
+  }
+
+  public updateBatchMix(id: string, updates: Partial<BatchMix>): BatchMix | undefined {
+    if (!this.batchMixes.some((m) => m.id === id)) return undefined;
+    this.batchMixes = this.batchMixes.map((m) => (m.id === id ? { ...m, ...updates } : m));
+    this.notify();
+    api
+      .updateBatchMix(id, updates)
+      .then((res) => {
+        const updated = res?.data;
+        if (updated?.id) {
+          this.batchMixes = this.batchMixes.map((m) => (m.id === id ? { ...updated } : m));
+          this.notify();
+          this.refreshAfter(['batchMixes']);
+        }
+      })
+      .catch(async (err) => {
+        const msg = String(err?.message || err || '');
+        if (/not in the items master/i.test(msg)) {
+          try {
+            const remapped = await this.remapItemIdsAgainstMaster(updates);
+            if (remapped) {
+              const retry = await api.updateBatchMix(id, remapped as Partial<BatchMix>);
+              const updated = retry?.data;
+              if (updated?.id) {
+                this.batchMixes = this.batchMixes.map((m) => (m.id === id ? { ...updated } : m));
+                this.notify();
+                this.refreshAfter(['batchMixes']);
+                return;
+              }
+            }
+          } catch (retryErr: any) {
+            err = retryErr || err;
+          }
+        }
+        console.error('[CloudStore] updateBatchMix cloud error:', err);
+        setTimeout(() => alert(`Failed to save the mix: ${err?.message || 'server error'}`), 0);
+      });
+    return this.batchMixes.find((m) => m.id === id);
+  }
+
+  public deleteBatchMix(id: string): boolean {
+    if (!this.batchMixes.some((m) => m.id === id)) return false;
+    this.batchMixes = this.batchMixes.filter((m) => m.id !== id);
+    this.notify();
+    api.deleteBatchMix(id).then(() => this.refreshAfter(['batchMixes'])).catch((err) => console.error('[CloudStore] deleteBatchMix cloud error:', err));
+    return true;
+  }
+
+  // ========================================================================
+  // TRACKABLE INVENTORY (2026-11-13) — the unit register of asset-type items.
+  // Optimistic writes + server adoption, mirroring the batch-mix pattern;
+  // event log rows are fetched on demand (they ride no cached collection).
+  // ========================================================================
+  public getInventoryUnits(itemId?: string): InventoryUnit[] {
+    return itemId ? this.inventoryUnits.filter((u) => u.itemId === itemId) : [...this.inventoryUnits];
+  }
+
+  public getInventoryUnitById(id: string): InventoryUnit | undefined {
+    return this.inventoryUnits.find((u) => u.id === id);
+  }
+
+  /** Lifecycle log — fetched on demand, not cached state. */
+  public async fetchUnitEvents(unitId?: string): Promise<InventoryUnitEvent[]> {
+    const res = await api.getInventoryUnitEvents(unitId);
+    return res?.data || [];
+  }
+
+  private adoptUnit(serverUnit: InventoryUnit) {
+    this.inventoryUnits = this.inventoryUnits.map((u) => (u.id === serverUnit.id ? { ...serverUnit } : u));
+    this.notify();
+  }
+
+  public addInventoryUnit(unitData: Partial<InventoryUnit> & { itemId: string; serialNumber: string }): InventoryUnit {
+    const now = new Date().toISOString();
+    const newUnit: InventoryUnit = {
+      id: `iu-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      itemId: unitData.itemId,
+      serialNumber: unitData.serialNumber,
+      status: 'in_stock',
+      createdAt: now,
+      ...unitData,
+    };
+    this.inventoryUnits = [newUnit, ...this.inventoryUnits];
+    this.notify();
+    api
+      .createInventoryUnit(unitData)
+      .then((res) => {
+        if (res?.data?.id) {
+          this.inventoryUnits = this.inventoryUnits.map((u) => (u.id === newUnit.id ? { ...res.data } : u));
+          this.notify();
+        }
+      })
+      .catch(async (err) => {
+        const msg = String(err?.message || err || '');
+        // "Item no longer exists" ⇒ the client's itemId is a STALE placeholder
+        // (the create's server id never reached this row). Reconcile against a
+        // FRESH items master by the local row's code/name and RETRY once.
+        if (/no longer exists in the items master/i.test(msg)) {
+          try {
+            const localItem = this.items.find((i) => i.id === unitData.itemId);
+            const freshRes = await api.getItems();
+            const fresh: Item[] = freshRes?.data || [];
+            const mine =
+              fresh.find((i) => i.id === unitData.itemId) ||
+              fresh.find(
+                (i) => localItem && ((i.code || '').trim().toLowerCase() === (localItem.code || '').trim().toLowerCase())
+                  || (localItem.name && (i.name || '').trim().toLowerCase() === localItem.name.trim().toLowerCase())
+              );
+            if (mine && mine.id && mine.id !== unitData.itemId) {
+              const retryPayload = { ...unitData, itemId: mine.id };
+              const retry = await api.createInventoryUnit(retryPayload as any);
+              this.inventoryUnits = this.inventoryUnits.map((u) => (u.id === newUnit.id ? { ...(retry?.data || { ...newUnit }) } : u));
+              this.notify();
+              return;
+            }
+          } catch {
+            // fall through to the rollback path
+          }
+        }
+        // The server refused the registration (serial clash / not an asset
+        // item) — roll the optimistic row back and resync.
+        this.inventoryUnits = this.inventoryUnits.filter((u) => u.id !== newUnit.id);
+        this.notify();
+        this.loadCollections(['inventoryUnits', 'items']);
+        console.error('[CloudStore] addInventoryUnit cloud error:', err);
+        // Surface the server's reason to the caller's UI.
+        setTimeout(() => alert(`Failed to register the unit: ${err?.message || 'server error'}`), 0);
+      });
+    return newUnit;
+  }
+
+  public addInventoryUnitsBulk(entries: Array<Partial<InventoryUnit> & { itemId: string; serialNumber: string }>): InventoryUnit[] {
+    const now = new Date().toISOString();
+    const placeholders = entries.map((e) => ({
+      id: `iu-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+      itemId: e.itemId,
+      serialNumber: e.serialNumber,
+      status: 'in_stock' as const,
+      createdAt: now,
+      ...e,
+    }));
+    this.inventoryUnits = [...placeholders, ...this.inventoryUnits];
+    this.notify();
+    api
+      .createInventoryUnitsBulk(entries)
+      .then(async (res) => {
+        if (res?.data) {
+          const bySerial = new Map(res.data.map((u) => [u.serialNumber, u]));
+          this.inventoryUnits = this.inventoryUnits.map((u) => {
+            const mine = placeholders.find((p) => p.id === u.id);
+            const server = mine ? bySerial.get(mine.serialNumber) : undefined;
+            return server ? { ...server } : u;
+          });
+          this.notify();
+        }
+      })
+      .catch(async (err) => {
+        const msg = String(err?.message || err || '');
+        if (/no longer exists in the items master/i.test(msg)) {
+          try {
+            const freshRes = await api.getItems();
+            const fresh: Item[] = freshRes?.data || [];
+            const remapped = entries.map((e) => {
+              const localItem = this.items.find((i) => i.id === e.itemId);
+              const mine =
+                fresh.find((i) => i.id === e.itemId) ||
+                fresh.find(
+                  (i) => localItem && (i.code || '').trim().toLowerCase() === (localItem.code || '').trim().toLowerCase()
+                    || (localItem?.name && (i.name || '').trim().toLowerCase() === localItem.name.trim().toLowerCase())
+                );
+              return mine && mine.id && mine.id !== e.itemId ? { ...e, itemId: mine.id } : e;
+            });
+            const needsRemap = remapped.some((e, idx) => e.itemId !== entries[idx].itemId);
+            if (needsRemap) {
+              const retry = await api.createInventoryUnitsBulk(remapped as any);
+              if (retry?.data) {
+                const bySerial = new Map(retry.data.map((u) => [u.serialNumber, u]));
+                this.inventoryUnits = this.inventoryUnits.map((u) => {
+                  const mine = placeholders.find((p) => p.id === u.id);
+                  const server = mine ? bySerial.get(mine.serialNumber) : undefined;
+                  return server ? { ...server } : u;
+                });
+                this.notify();
+                return;
+              }
+            }
+          } catch {
+            // fall through to the rollback path
+          }
+        }
+        this.inventoryUnits = this.inventoryUnits.filter((u) => !placeholders.some((p) => p.id === u.id));
+        this.notify();
+        this.loadCollections(['inventoryUnits', 'items']);
+        console.error('[CloudStore] addInventoryUnitsBulk cloud error:', err);
+        setTimeout(() => alert(`Failed to register units: ${err?.message || 'server error'}`), 0);
+      });
+    return placeholders;
+  }
+
+  public updateInventoryUnit(id: string, updates: Partial<InventoryUnit>): InventoryUnit | undefined {
+    if (!this.inventoryUnits.some((u) => u.id === id)) return undefined;
+    this.inventoryUnits = this.inventoryUnits.map((u) => (u.id === id ? { ...u, ...updates } : u));
+    this.notify();
+    api
+      .updateInventoryUnit(id, updates)
+      .then((res) => {
+        if (res?.data?.id) this.adoptUnit(res.data);
+        else this.loadCollections(['inventoryUnits']);
+      })
+      .catch((err) => {
+        this.loadCollections(['inventoryUnits']);
+        console.error('[CloudStore] updateInventoryUnit cloud error:', err);
+        setTimeout(() => alert(`Failed to update the unit: ${err?.message || 'server error'}`), 0);
+      });
+    return this.inventoryUnits.find((u) => u.id === id);
+  }
+
+  /** One runner for every lifecycle move: optimistic status + server adopt. */
+  private moveUnitLifecycle(
+    id: string,
+    endpoint: 'deploy' | 'return' | 'maintain' | 'restore' | 'scrap',
+    payload: Record<string, unknown>,
+    optimistic: Partial<InventoryUnit>
+  ): InventoryUnit | undefined {
+    if (!this.inventoryUnits.some((u) => u.id === id)) return undefined;
+    this.inventoryUnits = this.inventoryUnits.map((u) => (u.id === id ? { ...u, ...optimistic } : u));
+    this.notify();
+    const call =
+      endpoint === 'deploy' ? api.deployInventoryUnit(id, payload as any)
+      : endpoint === 'return' ? api.returnInventoryUnit(id, payload as any)
+      : endpoint === 'maintain' ? api.maintainInventoryUnit(id, payload as any)
+      : endpoint === 'restore' ? api.restoreInventoryUnit(id, payload as any)
+      : api.scrapInventoryUnit(id, payload as any);
+    call
+      .then((res) => {
+        if (res?.data?.id) this.adoptUnit(res.data);
+        else this.loadCollections(['inventoryUnits']);
+      })
+      .catch((err) => {
+        this.loadCollections(['inventoryUnits']);
+        console.error(`[CloudStore] ${endpoint}InventoryUnit cloud error:`, err);
+        setTimeout(() => alert(`Failed to update the unit: ${err?.message || 'server error'}`), 0);
+      });
+    return this.inventoryUnits.find((u) => u.id === id);
+  }
+
+  public deployInventoryUnit(id: string, payload: { vehicleId: string; position?: string; odometer?: number; notes?: string }) {
+    return this.moveUnitLifecycle(id, 'deploy', payload as Record<string, unknown>, {
+      status: 'deployed',
+      vehicleId: payload.vehicleId,
+      position: payload.position,
+      fitOdometer: payload.odometer,
+    });
+  }
+
+  public returnInventoryUnit(id: string, payload: { locationId?: string; condition?: string; odometer?: number; notes?: string } = {}) {
+    return this.moveUnitLifecycle(id, 'return', payload as Record<string, unknown>, {
+      status: 'in_stock',
+      vehicleId: undefined,
+      position: undefined,
+      ...(payload.locationId ? { locationId: payload.locationId } : {}),
+    });
+  }
+
+  public maintainInventoryUnit(id: string, payload: { notes?: string } = {}) {
+    return this.moveUnitLifecycle(id, 'maintain', payload as Record<string, unknown>, { status: 'maintenance' });
+  }
+
+  public restoreInventoryUnit(id: string, payload: { locationId?: string; condition?: string; notes?: string } = {}) {
+    return this.moveUnitLifecycle(id, 'restore', payload as Record<string, unknown>, {
+      status: 'in_stock',
+      ...(payload.locationId ? { locationId: payload.locationId } : {}),
+    });
+  }
+
+  public scrapInventoryUnit(id: string, payload: { notes?: string } = {}) {
+    return this.moveUnitLifecycle(id, 'scrap', payload as Record<string, unknown>, { status: 'scrapped' });
+  }
+
+  public deleteInventoryUnit(id: string): boolean {
+    if (!this.inventoryUnits.some((u) => u.id === id)) return false;
+    this.inventoryUnits = this.inventoryUnits.filter((u) => u.id !== id);
+    this.notify();
+    api.deleteInventoryUnit(id).then(() => this.loadCollections(['inventoryUnits', 'items'])).catch((err) => {
+      console.error('[CloudStore] deleteInventoryUnit cloud error:', err);
+      this.loadCollections(['inventoryUnits']);
+      setTimeout(() => alert(`Failed to remove the unit: ${err?.message || 'server error'}`), 0);
+    });
+    return true;
+  }
+
+  // Production Batches — RECIPE-DRIVEN (2026-11-12): a run is posted from a
+  // batch mix + produced quantity. The server resolves the consumed
+  // quantities (locked to the recipe's math) and posts the FIFO ledger
+  // movements; the client never invents ingredient lines.
+  public addProductionBatch(batchData: Partial<ProductionBatchRun> & { batchMixId?: string }): ProductionBatchRun {
     const newBatch: ProductionBatchRun = {
       id: `pbr-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-      batchNumber: batchData.batchNumber || `BATCH-${Date.now().toString().substr(-6)}`,
+      batchNumber: batchData.batchNumber || '',
       date: batchData.date || new Date().toISOString().split('T')[0],
       plantUnit: batchData.plantUnit || '',
       targetItemId: batchData.targetItemId || '',
       targetItemName: batchData.targetItemName || '',
       targetQuantity: batchData.targetQuantity || 0,
-      unit: batchData.unit || 'MT',
-      mixTemperatureCelsius: batchData.mixTemperatureCelsius || 160,
+      unit: batchData.unit || '',
+      mixTemperatureCelsius: batchData.mixTemperatureCelsius,
       supervisorName: batchData.supervisorName || '',
       rawMaterialsConsumed: batchData.rawMaterialsConsumed || [],
+      batchMixId: batchData.batchMixId,
       createdAt: new Date().toISOString(),
       ...batchData,
     };
     this.productionBatches.unshift(newBatch);
     this.notify();
-    // Adopt the SERVER-minted batch (authoritative id) — production edits
-    // and consumption views must never target the optimistic placeholder id.
-    // The create also MOVES INVENTORY (raw deduction) — resync so item stocks
-    // adopt the ledger everywhere.
+    // Adopt the SERVER-minted batch (authoritative id + BTN number + resolved
+    // consumed lines). The create also MOVES INVENTORY (FIFO consumption +
+    // output lot) — resync so item stocks adopt the ledger everywhere.
     api
       .createBatch(batchData)
       .then(async (res) => {
@@ -1531,7 +1949,16 @@ class CloudStore {
         }
         await this.loadCollections(['productionBatches', 'items']);
       })
-      .catch((err) => console.error('[CloudStore] addProductionBatch cloud error:', err));
+      .catch((err) => {
+        // The server refused the run (recipe rules / consumption failure) —
+        // roll the optimistic placeholder back instead of leaving a phantom
+        // run on screen.
+        this.productionBatches = this.productionBatches.filter((b) => b.id !== newBatch.id);
+        this.notify();
+        this.loadCollections(['productionBatches', 'items']);
+        console.error('[CloudStore] addProductionBatch cloud error:', err);
+        alert(`Failed to record the run: ${err?.message || 'server error'}`);
+      });
     return newBatch;
   }
 
@@ -2469,6 +2896,7 @@ class CloudStore {
       units: this.units,
       locations: this.locations,
       productionBatches: this.productionBatches,
+      batchMixes: this.batchMixes,
       orders: this.orders,
       sales: this.sales,
       purchases: this.purchases,

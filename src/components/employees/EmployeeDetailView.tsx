@@ -26,7 +26,8 @@ import { Employee, AppDocument, Vehicle } from '../../types';
 import { api } from '../../services/api';
 import { useDatabase } from '../../hooks/useDatabase';
 import { formatCurrency } from '../../utils/formatters';
-import { EmployeeLedgerView, employeeLedgerBalance, LedgerTxnModal } from './EmployeeLedgerView';
+import { EmployeeLedgerView, LedgerTxnModal } from './EmployeeLedgerView';
+import { employeeLedgerBalance } from '../../utils/employeeLedger';
 import { EmployeeMonthlyTimesheetView } from './EmployeeMonthlyTimesheetModal';
 
 interface EmployeeDetailViewProps {

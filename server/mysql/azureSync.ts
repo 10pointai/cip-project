@@ -5,10 +5,16 @@ import {
   Party,
   Transaction,
   Item,
+  ItemAttributeKey,
   ItemCategory,
   ItemUnit,
   ItemLocation,
   ProductionBatchRun,
+  BatchMix,
+  BatchMixIngredient,
+  InventoryUnit,
+  InventoryUnitEvent,
+  InventoryUnitStatus,
   Order,
   Vehicle,
   Driver,
@@ -209,6 +215,11 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         // item_location_mapping JOIN below (no name copies on the items row)
         lastStockUpdate: it.last_stock_update || undefined,
         movements: parseJsonField(it.movements, []),
+        // DYNAMIC ATTRIBUTES (serialized, 2026-11-16): the item's declared
+        // per-unit key list (asset items only — other types carry none)
+        attributes: Array.isArray(parseJsonField(it.attributes, [])) && (parseJsonField(it.attributes, []) as any[]).length > 0
+          ? (parseJsonField(it.attributes, []) as ItemAttributeKey[])
+          : undefined,
         createdAt: it.created_at,
         updatedAt: it.updated_at,
       }));
@@ -388,8 +399,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
       }));
 
       const [locRows]: [any[], any] = await conn.query('SELECT * FROM item_locations ORDER BY name ASC');
-      const locations: ItemLocation[] = locRows.map((l) => ({
-        id: l.id,
+      const locations: ItemLocation[] = locRows.map((l) => ({        id: l.id,
         name: l.name,
         code: l.code || undefined,
         description: l.description || undefined,
@@ -399,7 +409,83 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         createdAt: l.created_at,
       }));
 
-      // 7. Production Batches
+      // 6b. TRACKABLE INVENTORY — unit register + lifecycle log. FK-only rows;
+      // every display (item name, storage location, vehicle number, supplier,
+      // sale number) resolves via LEFT JOINs at read time.
+      const [trackableUnitRows]: [any[], any] = await conn.query(`
+        SELECT iu.*,
+               it.name AS item_display, it.code AS item_code,
+               il.name AS location_display,
+               v.registration_number AS vehicle_display,
+               p.name AS supplier_display,
+               s.sale_number AS sale_display
+        FROM inventory_units iu
+        LEFT JOIN items it ON it.id = iu.item_id
+        LEFT JOIN item_locations il ON il.id = iu.location_id
+        LEFT JOIN vehicles v ON v.id = iu.vehicle_id
+        LEFT JOIN parties p ON p.id = iu.party_id
+        LEFT JOIN sales_orders s ON s.id = iu.sale_id
+        ORDER BY iu.created_at DESC
+      `);
+      const inventoryUnitEvents: InventoryUnitEvent[] = [];
+      const [ueRows]: [any[], any] = await conn.query(
+        'SELECT * FROM inventory_unit_events ORDER BY date DESC, created_at DESC'
+      );
+      for (const e of ueRows || []) {
+        inventoryUnitEvents.push({
+          id: e.id,
+          unitId: e.unit_id,
+          date: e.date,
+          type: (e.type || 'entered') as InventoryUnitEvent['type'],
+          notes: e.notes || undefined,
+          vehicleId: e.vehicle_id || undefined,
+          position: e.position || undefined,
+          odometer: e.odometer !== null && e.odometer !== undefined ? parseNum(e.odometer) : undefined,
+          locationId: e.location_id || undefined,
+          saleId: e.sale_id || undefined,
+          supplierId: e.party_id || undefined,
+          createdAt: e.created_at,
+        });
+      }
+      const inventoryUnits: InventoryUnit[] = trackableUnitRows.map((u) => ({
+        id: u.id,
+        itemId: u.item_id,
+        serialNumber: u.serial_number,
+        status: (u.status || 'in_stock') as InventoryUnitStatus,
+        locationId: u.location_id || undefined,
+        vehicleId: u.vehicle_id || undefined,
+        position: u.position || undefined,
+        fitOdometer: u.fit_odometer !== null && u.fit_odometer !== undefined ? parseNum(u.fit_odometer) : undefined,
+        supplierId: u.party_id || undefined,
+        purchaseDate: u.purchase_date || undefined,
+        purchaseCost: u.purchase_cost !== null && u.purchase_cost !== undefined ? parseNum(u.purchase_cost) : undefined,
+        warrantyExpiry: u.warranty_expiry || undefined,
+        saleId: u.sale_id || undefined,
+        // Purchase linkage (2026-11-16): the purchase that received this unit
+        purchaseId: u.purchase_id || undefined,
+        condition: u.unit_condition || undefined,
+        notes: u.notes || undefined,
+        // DYNAMIC ATTRIBUTES (serialized, 2026-11-16): values keyed by the
+        // owning item's declared keys (JSON object on the row)
+        attributes: (() => {
+          const parsed = parseJsonField(u.attributes, {}) as Record<string, string | number>;
+          return parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length > 0
+            ? parsed
+            : undefined;
+        })(),
+        createdAt: u.created_at,
+        updatedAt: u.updated_at || undefined,
+        // Display copies (JOINs resolved; display-only, never authoritative)
+        itemName: u.item_display || undefined,
+        itemCode: u.item_code || undefined,
+        locationName: u.location_display || undefined,
+        vehicleNo: u.vehicle_display || undefined,
+        supplierName: u.supplier_display || undefined,
+        saleNumber: u.sale_display || undefined,
+      }));
+
+      // 7. Production Batches (batchMixId / outputRate / outputValue are the
+      // 2026-11-12 recipe columns — NULL on pre-recipe historical runs)
       const [batchRows]: [any[], any] = await conn.query('SELECT * FROM production_batches ORDER BY date DESC, created_at DESC');
       const productionBatches: ProductionBatchRun[] = batchRows.map((b) => ({
         id: b.id,
@@ -411,10 +497,54 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         targetQuantity: parseNum(b.target_quantity),
         unit: b.unit,
         rawMaterialsConsumed: parseJsonField(b.raw_materials_consumed, []),
+        batchMixId: b.batch_mix_id || undefined,
+        // Produce-&-sell-directly (2026-11-16): sale FKs bind the run to its
+        // sale(line); a sale-bound run never posted an output lot inward.
+        saleId: b.sale_id || undefined,
+        saleItemId: b.sale_item_id || undefined,
+        directSale: Boolean(b.sale_id),
+        outputRate: b.output_rate !== null && b.output_rate !== undefined ? parseNum(b.output_rate) : undefined,
+        outputValue: b.output_value !== null && b.output_value !== undefined ? parseNum(b.output_value) : undefined,
         supervisorName: b.supervisor_name || 'Plant Supervisor',
         mixTemperatureCelsius: b.mix_temperature_celsius ? parseNum(b.mix_temperature_celsius) : undefined,
         notes: b.notes || undefined,
         createdAt: b.created_at,
+      }));
+
+      // 7a. BATCH MIXES (recipes) — ingredients JOINed per mix from their FKs
+      // (Golden Rule §2: names never stored on the mix or its rows).
+      const [mixRows]: [any[], any] = await conn.query('SELECT * FROM batch_mixes ORDER BY created_at DESC');
+      const [mixIngRows]: [any[], any] = await conn.query(
+        `SELECT bmi.* FROM batch_mix_ingredients bmi ORDER BY bmi.id ASC`
+      );
+      const batchMixes: BatchMix[] = mixRows.map((m) => ({
+        id: m.id,
+        mixNumber: m.mix_number || '',
+        name: m.name,
+        outputItemId: m.output_item_id,
+        // Recipe-level basis is legacy (per-row sizing shipped the same day);
+        // mixes created under per-row sizing leave it NULL. New rows always
+        // carry their own basis; legacy rows with none fall back to the
+        // mix-level basis (mapped below per ingredient).
+        basis: m.basis ? ((m.basis === 'percentage' ? 'percentage' : 'quantity') as BatchMix['basis']) : undefined,
+        referenceOutputQty: m.reference_output_qty !== null && m.reference_output_qty !== undefined ? parseNum(m.reference_output_qty) : undefined,
+        ingredients: (mixIngRows as any[])
+          .filter((ing) => ing.batch_mix_id === m.id)
+          .map((ing) => {
+            const mixLegacyBasis = m.basis === 'percentage' ? 'percentage' : 'quantity';
+            return {
+              id: ing.id,
+              itemId: ing.item_id,
+              // This ROW's sizing basis; legacy rows created before the
+              // per-row column fall back to the mix-level basis.
+              basis: (ing.basis || mixLegacyBasis) as BatchMixIngredient['basis'],
+              quantity: ing.quantity !== null && ing.quantity !== undefined ? parseNum(ing.quantity) : undefined,
+              percentage: ing.percentage !== null && ing.percentage !== undefined ? parseNum(ing.percentage) : undefined,
+            };
+          }),
+        notes: m.notes || undefined,
+        isActive: Boolean(m.is_active),
+        createdAt: m.created_at,
       }));
 
       // 8. Orders
@@ -517,6 +647,13 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
             locationId: li.location_id || undefined,
             itemNotes: li.item_notes || undefined,
             weightTonnes: li.weight_tonnes !== null && li.weight_tonnes !== undefined ? numOr(li.weight_tonnes) : undefined,
+            // Trackable register units sold on this line (JSON array or NULL)
+            unitIds: Array.isArray(parseJsonField(li.unit_ids, [])) && (parseJsonField(li.unit_ids, []) as any[]).length > 0
+              ? (parseJsonField(li.unit_ids, []) as string[])
+              : undefined,
+            // Produce-&-sell-directly flag (dispatch posts no outward; the run
+            // carrying sale_id + sale_item_id is the linked production record)
+            produceDirect: Boolean(li.produce_direct),
           });
           saleItemsByBucket.set(key, list);
         }
@@ -739,6 +876,15 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
             shortageQuantity: li.shortage_quantity !== null && li.shortage_quantity !== undefined ? numOr(li.shortage_quantity) : undefined,
             overageQuantity: li.overage_quantity !== null && li.overage_quantity !== undefined ? numOr(li.overage_quantity) : undefined,
             itemNotes: li.item_notes || undefined,
+            // SERIALIZED line (2026-11-16): serial + declared-key values
+            unitEntry: (() => {
+              const entry = typeof li.unit_entry === 'string' ? (() => { try { return JSON.parse(li.unit_entry); } catch { return null; } })() : (li.unit_entry || null);
+              if (!entry || typeof entry !== 'object' || !entry.serialNumber) return undefined;
+              return {
+                serialNumber: String(entry.serialNumber),
+                ...(entry.attributes && typeof entry.attributes === 'object' ? { attributes: entry.attributes } : {}),
+              };
+            })(),
           });
           purItemsByMaster.set(li.purchase_id, list);
         }
@@ -1303,6 +1449,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         units,
         locations,
         productionBatches,
+        batchMixes,
+        inventoryUnits,
+        inventoryUnitEvents,
         orders,
         sales,
         salesInvoices: saleInvoices,
@@ -1426,8 +1575,8 @@ export async function liveSyncItem(item: Item, isDelete = false) {
           id, name, code, type, category_id, unit_id, hsn_sac_code,
           tax_rate_gst, sale_price, purchase_price, opening_stock, opening_stock_price,
           opening_stock_date, technical_specs, remarks, is_active, current_stock,
-          min_stock_level, max_capacity, last_stock_update, movements, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          min_stock_level, max_capacity, last_stock_update, movements, attributes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           item.id,
           item.name,
@@ -1451,6 +1600,9 @@ export async function liveSyncItem(item: Item, isDelete = false) {
           item.lastStockUpdate || null,
           // Movements live in the stock_movements ledger only — never on the items row.
           null,
+          // DYNAMIC ATTRIBUTES (serialized, 2026-11-16): the declared per-unit
+          // key list (a trackable item's register schema)
+          item.attributes && item.attributes.length > 0 ? JSON.stringify(item.attributes) : null,
           item.createdAt || new Date().toISOString(),
           item.updatedAt || new Date().toISOString(),
         ]
@@ -1650,8 +1802,8 @@ export async function liveSyncSaleItems(saleId: string, items: SalesOrderItem[],
     }
     for (const li of items || []) {
       await pool.query(
-        `REPLACE INTO sales_order_items (id, sale_id, sales_order_stage_id, item_id, unit_id, quantity, rate, gst_rate, location_id, item_notes, weight_tonnes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `REPLACE INTO sales_order_items (id, sale_id, sales_order_stage_id, item_id, unit_id, quantity, rate, gst_rate, location_id, item_notes, weight_tonnes, unit_ids, produce_direct)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           li.id,
           saleId,
@@ -1664,6 +1816,8 @@ export async function liveSyncSaleItems(saleId: string, items: SalesOrderItem[],
           li.locationId || null,
           li.itemNotes || null,
           li.weightTonnes !== undefined && li.weightTonnes !== null ? numOr(li.weightTonnes) : null,
+          Array.isArray(li.unitIds) && li.unitIds.length > 0 ? JSON.stringify(li.unitIds) : null,
+          li.produceDirect ? 1 : 0,
         ]
       );
     }
@@ -1859,8 +2013,8 @@ export async function liveSyncPurchaseItems(purchaseId: string, items: PurchaseO
     }
     for (const li of items || []) {
       await pool.query(
-        `REPLACE INTO purchase_order_items (id, purchase_id, item_id, unit_id, quantity, rate, gst_rate, location_id, received_quantity, shortage_quantity, overage_quantity, item_notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `REPLACE INTO purchase_order_items (id, purchase_id, item_id, unit_id, quantity, rate, gst_rate, location_id, received_quantity, shortage_quantity, overage_quantity, item_notes, unit_entry)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           li.id,
           purchaseId,
@@ -1874,6 +2028,8 @@ export async function liveSyncPurchaseItems(purchaseId: string, items: PurchaseO
           li.shortageQuantity ?? null,
           li.overageQuantity ?? null,
           li.itemNotes || null,
+          // SERIALIZED line (2026-11-16): the ONE unit this line enters
+          li.unitEntry ? JSON.stringify(li.unitEntry) : null,
         ]
       );
     }
@@ -1923,8 +2079,8 @@ export async function liveSyncBatch(batch: ProductionBatchRun, isDelete = false)
       await pool.query('DELETE FROM production_batches WHERE id = ?', [batch.id]);
     } else {
       await pool.query(
-        `REPLACE INTO production_batches (id, batch_number, date, plant_unit, target_item_id, target_item_name, target_quantity, unit, raw_materials_consumed, supervisor_name, mix_temperature_celsius, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `REPLACE INTO production_batches (id, batch_number, date, plant_unit, target_item_id, target_item_name, target_quantity, unit, raw_materials_consumed, batch_mix_id, output_rate, output_value, supervisor_name, mix_temperature_celsius, sale_id, sale_item_id, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           batch.id,
           batch.batchNumber,
@@ -1935,8 +2091,16 @@ export async function liveSyncBatch(batch: ProductionBatchRun, isDelete = false)
           batch.targetQuantity,
           batch.unit,
           JSON.stringify(batch.rawMaterialsConsumed || []),
+          // Recipe ancestry FK + costing snapshots (numeric facts, §2)
+          batch.batchMixId || null,
+          batch.outputRate ?? null,
+          batch.outputValue ?? null,
           batch.supervisorName || null,
           batch.mixTemperatureCelsius || null,
+          // Produce-&-sell-directly (2026-11-16): the sale(line) FKs — a
+          // sale-bound run skipped the output-lot inward by design.
+          batch.saleId || null,
+          batch.saleItemId || null,
           batch.notes || null,
           batch.createdAt || new Date().toISOString(),
         ]
@@ -1944,6 +2108,157 @@ export async function liveSyncBatch(batch: ProductionBatchRun, isDelete = false)
     }
   } catch (e: any) {
     console.error('[Azure MySQL LiveSync] Failed to sync batch:', e.message);
+  }
+}
+
+// ============================================================================
+// BATCH MIX (RECIPE) — production feature, 2026-11-12
+// The mix row stores FKs only (output_item_id etc. — Golden Rule §2); the
+// ingredient child rows REPLACE wholesale on every save (each ingredient
+// carries its per-item quantity OR percentage).
+// ============================================================================
+export async function liveSyncBatchMix(mix: BatchMix, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM batch_mix_ingredients WHERE batch_mix_id = ?', [mix.id]);
+      await pool.query('DELETE FROM batch_mixes WHERE id = ?', [mix.id]);
+      return;
+    }
+    await pool.query(
+      `REPLACE INTO batch_mixes (id, mix_number, name, output_item_id, basis, reference_output_qty, notes, is_active, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        mix.id,
+        mix.mixNumber || null,
+        mix.name,
+        mix.outputItemId,
+        // Recipe-level basis is LEGACY (per-row sizing shipped the same day);
+        // kept so old rows keep meaning. New mixes leave it unset and each
+        // ingredient row carries its own basis. The column is NOT NULL — an
+        // explicit NULL REJECTED the entire REPLACE (mixes silently never
+        // reached MySQL and vanished on restart), so unset rows write the
+        // DEFAULT and per-row rows stay authoritative on read-back.
+        mix.basis || 'quantity',
+        mix.referenceOutputQty ?? null,
+        mix.notes || null,
+        mix.isActive === false ? 0 : 1,
+        mix.createdAt,
+      ]
+    );
+    // Ingredients: delete-then-insert wholesale (child rows are fully owned
+    // by the mix — a save is a full replacement, like purchase stage rows).
+    // Each row's sizing basis rides WITH the row (2026-11-12 correction).
+    await pool.query('DELETE FROM batch_mix_ingredients WHERE batch_mix_id = ?', [mix.id]);
+    for (const ing of mix.ingredients || []) {
+      await pool.query(
+        `INSERT INTO batch_mix_ingredients (id, batch_mix_id, item_id, basis, quantity, percentage)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          ing.id,
+          mix.id,
+          ing.itemId,
+          ing.basis || 'quantity',
+          ing.quantity ?? null,
+          ing.percentage ?? null,
+        ]
+      );
+    }
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync batch mix:', e.message);
+  }
+}
+
+// ============================================================================
+// TRACKABLE INVENTORY (2026-11-13) — unit register + lifecycle log
+// FK-only storage; display names resolve via JOINs at read time.
+// ============================================================================
+export async function liveSyncInventoryUnit(unit: InventoryUnit, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM inventory_units WHERE id = ?', [unit.id]);
+      return;
+    }
+    await pool.query(
+      `REPLACE INTO inventory_units (
+        id, item_id, serial_number, status, location_id, vehicle_id, position,
+        fit_odometer, party_id, purchase_date, purchase_cost, warranty_expiry,
+        sale_id, purchase_id, unit_condition, notes, attributes, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        unit.id,
+        unit.itemId,
+        String(unit.serialNumber || '').trim(),
+        unit.status || 'in_stock',
+        unit.locationId || null,
+        unit.vehicleId || null,
+        unit.position || null,
+        unit.fitOdometer ?? null,
+        unit.supplierId || null,
+        unit.purchaseDate || null,
+        unit.purchaseCost ?? null,
+        unit.warrantyExpiry || null,
+        unit.saleId || null,
+        // Purchase linkage (FK to the purchase that received the unit, 2026-11-16)
+        unit.purchaseId || null,
+        unit.condition || null,
+        unit.notes || null,
+        // DYNAMIC ATTRIBUTES (serialized, 2026-11-16): values keyed by the
+        // owning item's declared keys
+        unit.attributes && Object.keys(unit.attributes).length > 0 ? JSON.stringify(unit.attributes) : null,
+        unit.createdAt,
+        unit.updatedAt || unit.createdAt,
+      ]
+    );
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync inventory unit:', e.message);
+  }
+}
+
+export async function liveSyncInventoryUnitEvent(event: InventoryUnitEvent, isDelete = false) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    if (isDelete) {
+      await pool.query('DELETE FROM inventory_unit_events WHERE id = ?', [event.id]);
+      return;
+    }
+    await pool.query(
+      `REPLACE INTO inventory_unit_events (
+        id, unit_id, date, type, notes, vehicle_id, position, odometer,
+        location_id, sale_id, party_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        event.id,
+        event.unitId,
+        event.date,
+        event.type,
+        event.notes || null,
+        event.vehicleId || null,
+        event.position || null,
+        event.odometer ?? null,
+        event.locationId || null,
+        event.saleId || null,
+        event.supplierId || null,
+        event.createdAt,
+      ]
+    );
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to sync inventory unit event:', e.message);
+  }
+}
+
+/** Unit removal cascades: its lifecycle log leaves with it. */
+export async function liveSyncInventoryUnitEventsBulk(unitId: string) {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    await pool.query('DELETE FROM inventory_unit_events WHERE unit_id = ?', [unitId]);
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to clear a unit\'s events:', e.message);
   }
 }
 
@@ -2799,6 +3114,20 @@ export async function liveSyncStockMovement(item: Item, movement: StockMovementR
   if (!pool) return;
   const delta = Number(movement.quantity) || 0;
   try {
+    // Resolve the REAL master location id up front so BOTH the ledger row and
+    // the per-location mapping increment carry it (a movement without a valid
+    // item_locations id is invisible to every location JOIN).
+    let locId: string | undefined = movement.locationId || undefined;
+    if (!locId && locationName?.trim()) {
+      const [idRows]: [any[], any] = await pool.query(
+        `SELECT id FROM item_locations WHERE LOWER(TRIM(name)) = LOWER(?) LIMIT 1`,
+        [locationName.trim()]
+      );
+      locId = idRows?.[0]?.id;
+      if (!locId) {
+        console.warn(`[Azure MySQL LiveSync] stock movement: location "${locationName}" not found in item_locations — per-location increment skipped for item ${item.id}`);
+      }
+    }
     await pool.query(
       `INSERT INTO stock_movements (
         id, item_id, location_id, movement_type, quantity,
@@ -2810,7 +3139,7 @@ export async function liveSyncStockMovement(item: Item, movement: StockMovementR
       [
         movement.id,
         item.id,
-        movement.locationId || null,
+        locId || null,
         movement.type,
         delta,
         // Running balance anchored to the DB's own pre-delta current_stock
@@ -2845,21 +3174,37 @@ export async function liveSyncStockMovement(item: Item, movement: StockMovementR
       await liveSyncItem(item);
     }
 
-    // Atomic per-location increment
-    if (movement.locationId || locationName?.trim()) {
-      const fallbackLocId = `loc-${locationName!.trim().toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
-      const locId = movement.locationId || fallbackLocId;
+    // Atomic per-location increment — HARDENED (2026-11-13): a movement's
+    // delta must NEVER silently miss item_location_mapping (that froze the
+    // per-location qty while the ledger row still showed the movement).
+    // Increment the existing row; when the row is MISSING, CREATE it
+    //      carrying the delta (negative allowed — the project permits
+    //      negative stock; the item total already applied the delta).
+    if (locId) {
       const now = new Date().toISOString();
       const [locRes]: any = await pool.query(
         `UPDATE item_location_mapping SET current_stock = current_stock + ?, updated_at = ? WHERE item_id = ? AND location_id = ?`,
         [delta, now, item.id, locId]
       );
-      if (!locRes.affectedRows && delta > 0) {
+      if (!locRes.affectedRows) {
+        // Mapping row absent under the real id — clean this item's PHANTOM
+        // mapping rows first (location_id not in the master: legacy slug-era
+        // writes that can never JOIN to a name and never receive updates),
+        // then insert the real-id row with the delta so the per-location qty
+        // is never left behind.
         await pool.query(
-          `INSERT IGNORE INTO item_location_mapping (id, item_id, location_id, opening_stock, current_stock, min_stock_level, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [`ilm-${item.id}-${locId}`, item.id, locId, 0, delta, 0, now, now]
+          `DELETE FROM item_location_mapping
+           WHERE item_id = ? AND location_id NOT IN (SELECT id FROM item_locations)`,
+          [item.id]
         );
+        const [insRes]: any = await pool.query(
+          `INSERT IGNORE INTO item_location_mapping (id, item_id, location_id, opening_stock, current_stock, min_stock_level, created_at, updated_at)
+           VALUES (?, ?, ?, 0, ?, 0, ?, ?)`,
+          [`ilm-${item.id}-${locId}`, item.id, locId, delta, now, now]
+        );
+        if (!insRes.affectedRows) {
+          console.warn(`[Azure MySQL LiveSync] stock movement: mapping row for item ${item.id} @ ${locId} could not be created — per-location qty unchanged`);
+        }
       }
     }
   } catch (e: any) {

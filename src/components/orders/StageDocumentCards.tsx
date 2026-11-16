@@ -95,6 +95,11 @@ export function SaleStageDocCard({ doc, order, currencyCode, onOpenDocument, onV
                 <tr key={idx}>
                   <td className="py-1.5 px-2 font-semibold text-[var(--color-on-surface)] truncate max-w-[220px]">
                     {i.itemCode ? `${i.itemCode} (${i.itemName})` : i.itemName}
+                    {i.produceDirect && (
+                      <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded-full bg-[var(--color-primary-container)] text-[var(--color-primary)] text-[8px] font-bold uppercase tracking-wide align-middle">
+                        Produced · direct dispatch
+                      </span>
+                    )}
                   </td>
                   <td className="py-1.5 px-2 text-[var(--color-on-surface-variant)] font-medium">{i.location || 'Default Yard'}</td>
                   <td className="py-1.5 px-2 text-right font-bold text-[var(--color-on-surface)]">{i.quantity.toLocaleString('en-IN')} {i.unit}</td>

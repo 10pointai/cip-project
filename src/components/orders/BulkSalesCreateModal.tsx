@@ -9,9 +9,23 @@ import {
   CheckCircle2,
   Boxes,
 } from 'lucide-react';
-import { Party, Item, CompanySettings, SalesStage } from '../../types';
+import { Party, Item, CompanySettings, SalesStage, BatchMix } from '../../types';
 import { cloudStore } from '../../services/cloudStore';
 import { SearchableSelect } from './SearchableSelect';
+
+/**
+ * Produce-&-sell-directly run config captured per line (client draft — the
+ * server persists it on the production_batches run row, not the sale line;
+ * same shape as the single-create form's DirectRunConfig).
+ */
+interface BulkRunConfig {
+  date: string;
+  supervisorName: string;
+  temperature: string;
+  notes: string;
+  /** ingredient itemId → the stock location its consumption leaves from */
+  sources: Record<string, string>;
+}
 
 /** One item line inside a draft document. */
 interface BulkItemLine {
@@ -22,6 +36,10 @@ interface BulkItemLine {
   quantity: string;
   rate: string;
   gstRate: string;
+  /** PRODUCE & SELL DIRECTLY: a run bound to the eventual sale makes this
+   *  line's output (never enters stock) */
+  produceDirect?: boolean;
+  production?: BulkRunConfig;
 }
 
 /** One draft document: its own stage type, date, party, item LINES (one or
@@ -32,6 +50,9 @@ interface BulkDoc {
   id: string;
   stage: SalesStage;
   date: string;
+  /** Reference number typed by the user — wins over the prefilled auto
+   *  number (undefined/empty = the docNumbers suggestion is used at save) */
+  number?: string;
   partyId: string;
   /** Pasted party text that could not be matched — flagged until fixed */
   partyRaw?: string;
@@ -166,6 +187,73 @@ export function BulkSalesCreateModal({
     }
   }, [isOpen]);
 
+  // --- PRODUCE & SELL DIRECTLY (2026-11-16) — same semantics as the single-
+  // create form: the recipe resolves to the item's ONE batch mix (one active
+  // recipe per output item is strict), the run quantity stays locked to the
+  // line quantity, and the output never enters stockyard stock (raw materials
+  // still consume FIFO; the eventual sale posts no dispatch outward).
+  const batchMixes = useMemo(() => {
+    try {
+      return cloudStore.getBatchMixes();
+    } catch {
+      return [];
+    }
+  }, [isOpen]);
+  const activeMixByItem = useMemo(() => {
+    const map = new Map<string, BatchMix>();
+    for (const m of batchMixes) {
+      if (m.isActive !== false) map.set(m.outputItemId, m);
+    }
+    return map;
+  }, [batchMixes]);
+
+  /** Seed a run config for an item: recipe + default sourcing locations. */
+  const defaultRunConfig = (itemId: string, date: string): BulkRunConfig | undefined => {
+    const mix = activeMixByItem.get(itemId);
+    if (!mix) return undefined;
+    const sources: Record<string, string> = {};
+    for (const ing of mix.ingredients || []) {
+      const ingItem = items.find((it) => it.id === ing.itemId);
+      if (!ingItem || ingItem.type === 'service') continue;
+      const rawLocs = ingItem.locations && ingItem.locations.length > 0
+        ? ingItem.locations.map((l) => l.locationName?.trim() || '')
+        : (ingItem.stockLocation || '').split(',').map((s) => s.trim());
+      sources[ing.itemId] = rawLocs.filter(Boolean)[0] || '';
+    }
+    return { date, supervisorName: '', temperature: '', notes: '', sources };
+  };
+
+  /** Assigned locations of an item (deduped display names). */
+  const itemLocationChoices = (item?: Item) => {
+    if (!item) return [] as string[];
+    const raw = item.locations && item.locations.length > 0
+      ? item.locations.map((l) => l.locationName?.trim() || '')
+      : (item.stockLocation || '').split(',').map((s) => s.trim());
+    const seen = new Set<string>();
+    return raw.filter((n) => {
+      if (!n || seen.has(n.toLowerCase())) return false;
+      seen.add(n.toLowerCase());
+      return true;
+    });
+  };
+
+  const toggleLineProduce = (doc: BulkDoc, line: BulkItemLine) => {
+    if (line.produceDirect) {
+      patchLine(doc.id, line.id, { produceDirect: false, production: undefined });
+    } else {
+      const cfg = defaultRunConfig(line.itemId, doc.date);
+      if (!cfg) return; // recipe-less item — the toggle renders disabled
+      patchLine(doc.id, line.id, { produceDirect: true, production: cfg });
+    }
+  };
+
+  const setLineIngredientSource = (doc: BulkDoc, line: BulkItemLine, ingredientItemId: string, locationName: string) => {
+    const base = line.production || defaultRunConfig(line.itemId, doc.date) || { date: doc.date, supervisorName: '', temperature: '', notes: '', sources: {} };
+    patchLine(doc.id, line.id, {
+      production: { ...base, sources: { ...base.sources, [ingredientItemId]: locationName } },
+    });
+  };
+
   // Per-document numbers: each document is numbered from ITS OWN stage's
   // sequence (QUO-… / SO-… / INV-…), always skipping every number already in
   // the books plus the ones handed out earlier in this batch.
@@ -184,6 +272,12 @@ export function BulkSalesCreateModal({
     }
     const mk = (prefix: string, n: number) =>
       prefix === 'RST' ? String(n).padStart(4, '0') : `${prefix}-${year}-${String(n).padStart(4, '0')}`;
+    // Hand-typed reference numbers are RESERVED too — the auto suggestions
+    // never collide with what the user typed on another document.
+    for (const d of docs) {
+      const typed = (d.number || '').trim();
+      if (typed) used.add(typed);
+    }
     return docs.map((doc) => {
       let prefix = PREFIX_BY_STAGE[doc.stage] || 'SO';
       if (doc.stage === 'sales_order') prefix = 'RST';
@@ -195,7 +289,7 @@ export function BulkSalesCreateModal({
       return num;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stagePattern, existingNumbers, docs.length]);
+  }, [stagePattern, existingNumbers, docs.length, docs.map((d) => d.number).join('|')]);
 
   // Per-line totals (same 2dp rounding as the single-create form)
   const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -271,15 +365,27 @@ export function BulkSalesCreateModal({
   const handleLineChange = (doc: BulkDoc, line: BulkItemLine, field: keyof BulkItemLine, value: string) => {
     if (field === 'itemId') {
       const prod = productItems.find((p) => p.id === value);
+      const patch: Partial<BulkItemLine> = { itemId: value, itemRaw: undefined };
       if (prod) {
-        patchLine(doc.id, line.id, { itemId: value, itemRaw: undefined, rate: String(prod.salePrice ?? 0), gstRate: String(prod.taxRateGst ?? 0) });
-      } else {
-        patchLine(doc.id, line.id, { itemId: value, itemRaw: undefined });
+        patch.rate = String(prod.salePrice ?? 0);
+        patch.gstRate = String(prod.taxRateGst ?? 0);
       }
+      // Produce-direct follows the item: the run config re-seeds; a
+      // recipe-less item drops the toggle (the server refuses recipe-less
+      // produce lines outright).
+      if (line.produceDirect) {
+        patch.produceDirect = Boolean(activeMixByItem.get(value));
+        patch.production = defaultRunConfig(value, doc.date);
+      }
+      patchLine(doc.id, line.id, patch);
       return;
     }
     patchLine(doc.id, line.id, { [field]: value } as Partial<BulkItemLine>);
   };
+
+  /** Runs can't ride asset lines — asset items ship register units. */
+  const isBulkAssetLine = (itemId: string) =>
+    items.find((it) => it.id === itemId)?.type === 'asset';
 
   const addDocument = (count: number) => {
     setDocs((prev) => [...prev, ...Array.from({ length: count }, emptyDoc)]);
@@ -428,9 +534,29 @@ export function BulkSalesCreateModal({
 
   // --- Submit ----------------------------------------------------------------
   const handleSubmitBatch = () => {
+    // FINAL reference numbers: a typed number wins; empty falls back to the
+    // auto suggestion at save time. Typing is validated here.
+    const finalNumbers = docs.map((doc, i) => (doc.number || '').trim() || docNumbers[i] || '');
+    const firstSeenNum = new Map<string, number>();
+    for (let i = 0; i < finalNumbers.length; i++) {
+      const typed = (docs[i].number || '').trim();
+      const num = finalNumbers[i];
+      // Auto suggestions are unique by construction; typed numbers are not
+      if (typed) {
+        if (existingNumbers.includes(typed)) {
+          setError(`Document ${i + 1} (${typed}): that reference number is already in use in the books — pick a different one.`);
+          return;
+        }
+        if (firstSeenNum.has(num)) {
+          setError(`Documents ${firstSeenNum.get(num)! + 1} and ${i + 1}: both use the reference number "${num}" — pick different numbers.`);
+          return;
+        }
+      }
+      if (num) firstSeenNum.set(num, i);
+    }
     for (let i = 0; i < docs.length; i++) {
       const doc = docs[i];
-      const num = docNumbers[i] || `document ${i + 1}`;
+      const num = finalNumbers[i] || `document ${i + 1}`;
       if (!doc.partyId) {
         setError(`Document ${i + 1} (${num}): Please select a Party.`);
         return;
@@ -454,6 +580,27 @@ export function BulkSalesCreateModal({
       if (validLines.length === 0) {
         setError(`Document ${i + 1} (${num}): Add at least one valid item with a quantity and rate greater than zero.`);
         return;
+      }
+      // PRODUCE & SELL DIRECTLY: every produce-direct line needs its recipe
+      // (the toggle renders disabled without one) and every material
+      // ingredient needs a sourcing location when the ingredient tracks
+      // assigned locations.
+      for (const line of validLines) {
+        if (!line.produceDirect) continue;
+        const lineItem = items.find((it) => it.id === line.itemId);
+        const mix = activeMixByItem.get(line.itemId);
+        if (!mix) {
+          setError(`Document ${i + 1} (${num}): No recipe (batch mix) exists for "${lineItem?.name || 'this item'}" — create one in the Production module first.`);
+          return;
+        }
+        for (const ing of mix.ingredients || []) {
+          const ingItem = items.find((it) => it.id === ing.itemId);
+          if (!ingItem || ingItem.type === 'service') continue;
+          if (itemLocationChoices(ingItem).length > 0 && !line.production?.sources?.[ing.itemId]) {
+            setError(`Document ${i + 1} (${num}): Pick the sourcing location for ${ingItem.name} on the "${lineItem?.name}" production run.`);
+            return;
+          }
+        }
       }
       if (!doc.date) {
         setError(`Document ${i + 1} (${num}): Please pick the document date.`);
@@ -485,12 +632,31 @@ export function BulkSalesCreateModal({
               : product.stockLocation
                 ? product.stockLocation.split(',').map((s) => ({ locationName: s.trim() }))
                 : [];
+          // PRODUCE & SELL DIRECTLY: the run config rides the payload once —
+          // the server records it on the sale-bound run (recipe auto-resolved
+          // by item, qty locked, sourcing locations)
+          const runMix = line.produceDirect ? activeMixByItem.get(line.itemId) : undefined;
+          const runSrcs: Record<string, string> = line.production?.sources || {};
           return {
             itemId: line.itemId,
             quantity: Number(line.quantity),
             rate: Number(line.rate),
             gstRate: Number(line.gstRate) || 0,
             locationName: prodLocs[0]?.locationName || undefined,
+            produceDirect: runMix ? true : undefined,
+            production: runMix
+              ? {
+                  date: line.production?.date || doc.date,
+                  supervisorName: line.production?.supervisorName?.trim() || undefined,
+                  mixTemperatureCelsius: Number(line.production?.temperature) > 0
+                    ? Number(line.production!.temperature)
+                    : undefined,
+                  notes: line.production?.notes?.trim() || undefined,
+                  itemLocations: Object.entries(runSrcs)
+                    .filter(([, loc]) => loc && loc.trim())
+                    .map(([ingredientItemId, loc]) => ({ itemId: ingredientItemId, locationName: loc })),
+                }
+              : undefined,
           };
         });
       const { subtotal, taxAmount } = calcDoc(doc);
@@ -502,7 +668,7 @@ export function BulkSalesCreateModal({
       const updateInventory = moneyStage ? true : false;
       // Dispatch: own fleet (FK) or OUTSOURCED (typed plate on the master)
       onAddSale({
-        saleNumber: docNumbers[i],
+        saleNumber: finalNumbers[i],
         partyId: doc.partyId,
         date: doc.date,
         ...(doc.vehicleId === '__out__'
@@ -525,7 +691,7 @@ export function BulkSalesCreateModal({
         totalAmount: docGrand(doc),
         stage: {
           stageType: doc.stage,
-          stageNumber: docNumbers[i],
+          stageNumber: finalNumbers[i],
           date: doc.date,
           // 2026-10-28 client rule: forced dispatch + forced credit at the
           // money stages; quotation carries no flow
@@ -578,7 +744,7 @@ export function BulkSalesCreateModal({
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {error && (
-            <div className="p-3 rounded-2xl bg-[var(--color-error-container)]/40 border border-[var(--color-error)]/40 flex items-center justify-between text-xs text-[var(--color-error)] font-medium">
+            <div className="p-3 rounded-2xl bg-[var(--color-error-container)]/40 border border-[var(--color-error)]/40 flex items-center justify-between text-[13px] text-[var(--color-error)] font-medium">
               <div className="flex items-center gap-2">
                 <AlertTriangle className="w-4 h-4 shrink-0" />
                 <span>{error}</span>
@@ -595,38 +761,45 @@ export function BulkSalesCreateModal({
               its document-level columns spanning them */}
           <div className="border border-[var(--color-outline-variant)] rounded-2xl bg-[var(--color-surface-container)] overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full text-left min-w-[3010px]">
+              <table className="w-full text-left min-w-[3730px]">
                 <thead>
-                  <tr className="bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] font-bold text-[10px] uppercase border-b border-[var(--color-outline-variant)]">
-                    <th className="py-2.5 px-2 w-10 text-center">#</th>
-                    <th className="py-2.5 px-2 w-48">Type</th>
-                    <th className="py-2.5 px-3 min-w-[170px]">REF/RST</th>
-                    <th className="py-2.5 px-3 w-48">Date</th>
-                    <th className="py-2.5 px-3 min-w-[240px]">Party</th>
-                    <th className="py-2.5 px-3 min-w-[260px]">Item / Product</th>
+                  <tr className="bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] font-bold text-[11px] uppercase border-b border-[var(--color-outline-variant)]">
+                    <th className="py-2.5 px-2 w-12 text-center">#</th>
+                    <th className="py-2.5 px-2 w-56">Type</th>
+                    <th className="py-2.5 px-3 min-w-[224px]">REF/RST</th>
+                    <th className="py-2.5 px-3 w-56">Date</th>
+                    <th className="py-2.5 px-3 min-w-[300px]">Party</th>
+                    <th className="py-2.5 px-3 min-w-[320px]">Item / Product</th>
+                    <th className="py-2.5 px-2 w-20 text-center">Produce</th>
                     <th className="py-2.5 px-2 w-16"></th>
-                    <th className="py-2.5 px-3 w-32">Qty</th>
-                    <th className="py-2.5 px-3 w-36">Rate ({settings.currency?.symbol || '₹'})</th>
-                    <th className="py-2.5 px-3 w-28">GST</th>
-                    <th className="py-2.5 px-3 w-32 text-right">Line Amount</th>
-                    <th className="py-2.5 px-3 w-36 text-right">Doc Total</th>
+                    <th className="py-2.5 px-3 w-40">Qty</th>
+                    <th className="py-2.5 px-3 w-44">Rate ({settings.currency?.symbol || '₹'})</th>
+                    <th className="py-2.5 px-3 w-36">GST</th>
+                    <th className="py-2.5 px-3 w-40 text-right">Line Amount</th>
+                    <th className="py-2.5 px-3 w-44 text-right">Doc Total</th>
                     {/* Update Stock + Payment Settlement columns REMOVED
                         (2026-10-28): stock deducts and the flow books credit
                         automatically at the money stages — nothing to choose */}
-                    <th className="py-2.5 px-3 min-w-[190px]">Vehicle *</th>
-                    <th className="py-2.5 px-3 w-28">Weight (MT)</th>
-                    <th className="py-2.5 px-3 w-28">Distance (km)</th>
-                    <th className="py-2.5 px-3 min-w-[240px]">Site / Drop Address</th>
-                    <th className="py-2.5 px-3 min-w-[200px]">Fleet Cost (₹/T-km)</th>
-                    <th className="py-2.5 px-2 w-24 text-center">Include Transport Cost</th>
-                    <th className="py-2.5 px-3 w-32 text-right">Doc Total</th>
-                    <th className="py-2.5 px-2 w-10"></th>
+                    <th className="py-2.5 px-3 min-w-[240px]">Vehicle *</th>
+                    <th className="py-2.5 px-3 w-36">Weight (MT)</th>
+                    <th className="py-2.5 px-3 w-36">Distance (km)</th>
+                    <th className="py-2.5 px-3 min-w-[300px]">Site / Drop Address</th>
+                    <th className="py-2.5 px-3 min-w-[260px]">Fleet Cost (₹/T-km)</th>
+                    <th className="py-2.5 px-2 w-28 text-center">Include Transport Cost</th>
+                    <th className="py-2.5 px-3 w-44 text-right">Doc Total</th>
+                    <th className="py-2.5 px-2 w-12"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--color-outline-variant)]/60">
                   {docs.map((doc, di) => {
                     const docNum = docNumbers[di];
                     const lines = doc.items;
+                    // Produce-direct lines emit an extra config row each — the
+                    // document-level rowSpan cells must span them all too
+                    const expandedRows = lines.filter(
+                      (l) => l.produceDirect && activeMixByItem.get(l.itemId)
+                    ).length;
+                    const docRowSpan = lines.length + expandedRows;
                     return lines.map((line, li) => {
                       const isGroupStart = li === 0;
                       const isGroupEnd = li === lines.length - 1;
@@ -635,47 +808,59 @@ export function BulkSalesCreateModal({
                       const itemUnmatched = !line.itemId && Boolean(line.itemRaw);
                       const partyUnmatched = isGroupStart && !doc.partyId && Boolean(doc.partyRaw);
                       const docCalc = calcDoc(doc);
+                      const lineMix = line.produceDirect ? activeMixByItem.get(line.itemId) : undefined;
                       return (
+                        <React.Fragment key={line.id}>
                         <tr
-                          key={line.id}
                           className={`bg-[var(--color-surface-container-lowest)] ${isGroupStart && di > 0 ? 'border-t-2 border-t-[color:var(--color-outline-variant)]' : ''}`}
                         >
-                          {/* Document-level cells span the document's item rows */}
+                          {/* Document-level cells span the document's item rows
+                              (plus each produce-direct line's config row) */}
                           {isGroupStart && (
                             <>
-                              <td rowSpan={lines.length} className="py-2 px-2 text-center align-top">
+                              <td rowSpan={docRowSpan} className="py-2 px-2 text-center align-top">
                                 <div className="pt-1">
-                                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-lg bg-[var(--color-surface-container-high)] text-[10px] font-black text-[var(--color-on-surface-variant)]">
+                                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-lg bg-[var(--color-surface-container-high)] text-[11px] font-black text-[var(--color-on-surface-variant)]">
                                     {di + 1}
                                   </span>
                                 </div>
                               </td>
-                              <td rowSpan={lines.length} className="py-2 px-2 align-top">
+                              <td rowSpan={docRowSpan} className="py-2 px-2 align-top">
                                 <select
                                   value={doc.stage}
                                   onChange={(e) => setDocStage(doc, e.target.value as SalesStage)}
-                                  className="w-full px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-[11px] font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                                  className="w-full px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                                 >
                                   {STAGE_CHOICES.map((s) => (
                                     <option key={s.id} value={s.id}>{s.label}</option>
                                   ))}
                                 </select>
                               </td>
-                              <td rowSpan={lines.length} className="py-2 px-3 align-top text-xs font-black text-[var(--color-on-surface)] whitespace-nowrap">
-                                <span className="block pt-1.5">{docNum || '—'}</span>
+                              <td rowSpan={docRowSpan} className="py-2 px-3 align-top">
+                                {/* REF/RST is PREFILLED but EDITABLE (2026-11-16):
+                                    typed value wins; clearing falls back to the
+                                    auto suggestion at save time */}
+                                <input
+                                  type="text"
+                                  value={doc.number ?? (docNum || '')}
+                                  onChange={(e) => patchDoc(doc.id, { number: e.target.value })}
+                                  placeholder={docNum || '—'}
+                                  title="Reference number — prefilled, editable"
+                                  className={`w-full px-2 py-1.5 bg-[var(--color-surface-container)] border rounded-lg text-[13px] font-black text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] ${doc.number !== undefined && doc.number.trim() && doc.number.trim() !== docNum ? 'border-[var(--color-primary)]' : 'border-[var(--color-outline-variant)]'}`}
+                                />
                                 <span className="block text-[9px] text-[var(--color-on-surface-variant)] font-semibold mt-0.5">
                                   {lines.length} item{lines.length !== 1 ? 's' : ''}
                                 </span>
                               </td>
-                              <td rowSpan={lines.length} className="py-2 px-3 align-top">
+                              <td rowSpan={docRowSpan} className="py-2 px-3 align-top">
                                 <input
                                   type="date"
                                   value={doc.date}
                                   onChange={(e) => patchDoc(doc.id, { date: e.target.value })}
-                                  className="w-full mt-0.5 px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                                  className="w-full mt-0.5 px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-[13px] font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                                 />
                               </td>
-                              <td rowSpan={lines.length} className="py-2 px-3 align-top">
+                              <td rowSpan={docRowSpan} className="py-2 px-3 align-top">
                                 <div className={`mt-0.5 ${partyUnmatched ? 'rounded-lg ring-1 ring-[var(--color-error)]/60' : ''}`}>
                                   <SearchableSelect
                                     value={doc.partyId}
@@ -732,6 +917,40 @@ export function BulkSalesCreateModal({
                             </div>
                           </td>
 
+                          {/* PRODUCE & SELL DIRECTLY — the run toggle for this
+                              line: ON binds a production run to the eventual
+                              sale (recipe-less items render it disabled) */}
+                          <td className="py-1.5 px-1.5 text-center align-center">
+                            {(() => {
+                              if (isBulkAssetLine(line.itemId)) {
+                                return <span className="text-[11px] font-semibold text-[var(--color-on-surface-variant)]">—</span>;
+                              }
+                              const noRecipe = Boolean(line.itemId) && !activeMixByItem.get(line.itemId);
+                              return (
+                                <div className="flex flex-col items-center gap-1">
+                                  <button
+                                    type="button"
+                                    role="switch"
+                                    aria-checked={Boolean(line.produceDirect)}
+                                    disabled={noRecipe}
+                                    title={noRecipe
+                                      ? 'No recipe (batch mix) exists for this item — create one in the Production module first.'
+                                      : line.produceDirect
+                                        ? 'Produce & sell directly is ON — the run ships straight to the party'
+                                        : 'Produce this item in a production run bound to the sale'}
+                                    onClick={() => toggleLineProduce(doc, line)}
+                                    className={`relative w-9 h-5 rounded-full transition-colors ${line.produceDirect ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-outline-variant)]'} ${noRecipe ? 'opacity-40 cursor-not-allowed' : ''}`}
+                                  >
+                                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${line.produceDirect ? 'translate-x-4' : ''}`} />
+                                  </button>
+                                  {noRecipe && (
+                                    <span className="text-[8px] font-bold text-[var(--color-on-surface-variant)] leading-tight">No recipe</span>
+                                  )}
+                                </div>
+                              );
+                            })()}
+                          </td>
+
                           {/* Item-line actions — ＋ Item on the group's last line,
                               ✕ per line — right after the item column */}
                           <td className="py-1.5 px-1.5 text-center align-middle w-16">
@@ -765,12 +984,12 @@ export function BulkSalesCreateModal({
                                 placeholder="0"
                                 value={line.quantity}
                                 onChange={(e) => handleLineChange(doc, line, 'quantity', e.target.value)}
-                                className="w-full px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                                className="w-full px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-[13px] font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                               />
                               {/* The chosen item's unit rides the quantity input */}
                               {(() => {
                                 const unitProd = items.find((it) => it.id === line.itemId);
-                                return unitProd ? <span className="text-[10px] text-[var(--color-on-surface-variant)] font-semibold whitespace-nowrap">{unitProd.unit}</span> : null;
+                                return unitProd ? <span className="text-[11px] text-[var(--color-on-surface-variant)] font-semibold whitespace-nowrap">{unitProd.unit}</span> : null;
                               })()}
                             </div>
                           </td>
@@ -781,7 +1000,7 @@ export function BulkSalesCreateModal({
                               placeholder="0.00"
                               value={line.rate}
                               onChange={(e) => handleLineChange(doc, line, 'rate', e.target.value)}
-                              className="w-full px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                              className="w-full px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-[13px] font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                             />
                           </td>
                           <td className="py-1.5 px-3">
@@ -803,14 +1022,14 @@ export function BulkSalesCreateModal({
                               ]}
                             />
                           </td>
-                          <td className="py-1.5 px-3 text-right text-xs font-bold text-[var(--color-on-surface)] whitespace-nowrap">
+                          <td className="py-1.5 px-3 text-right text-[13px] font-bold text-[var(--color-on-surface)] whitespace-nowrap">
                             {formatCurrency2(calc.totalAmount)}
                           </td>
 
                           {/* Document total (this document's lines summed) — kept blue */}
                           {isGroupStart && (
-                            <td rowSpan={lines.length} className="py-2 px-3 align-top text-right">
-                              <span className="block pt-1 text-xs font-black text-[var(--color-primary)] whitespace-nowrap">
+                            <td rowSpan={docRowSpan} className="py-2 px-3 align-top text-right">
+                              <span className="block pt-1 text-[13px] font-black text-[var(--color-primary)] whitespace-nowrap">
                                 {formatCurrency2(round2(docCalc.totalAmount + fleetCostOf(doc) + fleetGstOf(doc)))}
                               </span>
                               <span className="block text-[9px] text-[var(--color-on-surface-variant)] font-semibold">Doc Total · GST Incl.</span>
@@ -826,7 +1045,7 @@ export function BulkSalesCreateModal({
                                   as the Add Sale form — own fleet or OUTSOURCED)
                                   + ONE common doc weight + distance + drop site
                                   — the auto-derived trip slip derives from these */}
-                              <td rowSpan={lines.length} className="py-2 px-3 align-top">
+                              <td rowSpan={docRowSpan} className="py-2 px-3 align-top">
                                 {doc.vehicleId === '__out__' ? (
                                   <div className="space-y-1">
                                     <input
@@ -835,7 +1054,7 @@ export function BulkSalesCreateModal({
                                       placeholder="RJ-14-AB-9012"
                                       value={doc.outsourcedNo}
                                       onChange={(e) => patchDoc(doc.id, { outsourcedNo: e.target.value.toUpperCase() })}
-                                      className="w-full mt-0.5 px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-primary)] rounded-lg text-[11px] font-mono font-bold text-[var(--color-on-surface)] focus:outline-none"
+                                      className="w-full mt-0.5 px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-primary)] rounded-lg text-xs font-mono font-bold text-[var(--color-on-surface)] focus:outline-none"
                                       title="Outsourced / market vehicle — type the plate yourself"
                                     />
                                     <button
@@ -868,34 +1087,34 @@ export function BulkSalesCreateModal({
                                   </div>
                                 )}
                               </td>
-                              <td rowSpan={lines.length} className="py-2 px-3 align-top">
+                              <td rowSpan={docRowSpan} className="py-2 px-3 align-top">
                                 <input
                                   type="number"
                                   step="any"
                                   placeholder="e.g. 24.5"
                                   value={doc.weight}
                                   onChange={(e) => patchDoc(doc.id, { weight: e.target.value })}
-                                  className="w-full mt-0.5 px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                                  className="w-full mt-0.5 px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-[13px] font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                                   title="Load weight of the WHOLE document in metric tonnes (one common value for all its items) — rides the dispatch trip slip"
                                 />
                               </td>
-                              <td rowSpan={lines.length} className="py-2 px-3 align-top">
+                              <td rowSpan={docRowSpan} className="py-2 px-3 align-top">
                                 <input
                                   type="number"
                                   step="any"
                                   placeholder="e.g. 42"
                                   value={doc.distanceKm}
                                   onChange={(e) => patchDoc(doc.id, { distanceKm: e.target.value })}
-                                  className="w-full mt-0.5 px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                                  className="w-full mt-0.5 px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-[13px] font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                                 />
                               </td>
-                              <td rowSpan={lines.length} className="py-2 px-3 align-top">
+                              <td rowSpan={docRowSpan} className="py-2 px-3 align-top">
                                 <input
                                   type="text"
                                   placeholder="e.g. NH-48 Site, Km 42"
                                   value={doc.siteAddress}
                                   onChange={(e) => patchDoc(doc.id, { siteAddress: e.target.value })}
-                                  className="w-full mt-0.5 px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                                  className="w-full mt-0.5 px-2 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-[13px] font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                                 />
                               </td>
 
@@ -903,7 +1122,7 @@ export function BulkSalesCreateModal({
                                   captured (saved with the sale even when the
                                   include-toggle is off). For an OUTSOURCED
                                   vehicle the cell is left EMPTY. */}
-                              <td rowSpan={lines.length} className="py-2 px-3 align-top">
+                              <td rowSpan={docRowSpan} className="py-2 px-3 align-top">
                                 {isOutsourcedDoc(doc) ? (
                                   <span className="text-[var(--color-on-surface-variant)] font-semibold">—</span>
                                 ) : (
@@ -914,13 +1133,13 @@ export function BulkSalesCreateModal({
                                       placeholder="₹/T-km"
                                       value={doc.freightRate}
                                       onChange={(e) => patchDoc(doc.id, { freightRate: e.target.value })}
-                                      className="w-16 px-1.5 py-1 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-[10px] font-mono font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                                      className="w-16 px-1.5 py-1 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-[11px] font-mono font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                                       title="Rate per tonne per KM"
                                     />
                                     <select
                                       value={doc.freightGst}
                                       onChange={(e) => patchDoc(doc.id, { freightGst: e.target.value })}
-                                      className="py-1 pl-1 pr-0.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-[10px] font-bold text-[var(--color-on-surface)] focus:outline-none"
+                                      className="py-1 pl-1 pr-0.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg text-[11px] font-bold text-[var(--color-on-surface)] focus:outline-none"
                                       title="GST on the fleet-cost row"
                                     >
                                       <option value="0">0%</option>
@@ -935,7 +1154,7 @@ export function BulkSalesCreateModal({
                                     toggle is ON — never a zero/excluded line */}
                                 {doc.includeTransport && !isOutsourcedDoc(doc) && (
                                   Number(doc.weight) > 0 && Number(doc.distanceKm) > 0 && Number(doc.freightRate) > 0 ? (
-                                    <p className="text-[10px] font-black text-[var(--color-primary)] whitespace-nowrap mt-1">
+                                    <p className="text-[11px] font-black text-[var(--color-primary)] whitespace-nowrap mt-1">
                                       {fleetCostOf(doc).toFixed(2)}
                                       {toNum(doc.freightGst) > 0 && (
                                         <span className="font-bold"> +{fleetGstOf(doc).toFixed(2)} GST</span>
@@ -951,7 +1170,7 @@ export function BulkSalesCreateModal({
                                   fleet cost + its GST to the document; OFF adds
                                   nothing. For an OUTSOURCED vehicle the cell is
                                   left EMPTY. */}
-                              <td rowSpan={lines.length} className="py-2 px-2 align-top text-center">
+                              <td rowSpan={docRowSpan} className="py-2 px-2 align-top text-center">
                                 {isOutsourcedDoc(doc) ? (
                                   <span className="text-[var(--color-on-surface-variant)] font-semibold">—</span>
                                 ) : (
@@ -977,8 +1196,8 @@ export function BulkSalesCreateModal({
                               {/* Document total repeated right after the Fleet
                                   Cost column so the dispatch columns read
                                   together (incl. fleet cost + its GST) */}
-                              <td rowSpan={lines.length} className="py-2 px-3 align-top text-right">
-                                <span className="block pt-1 text-xs font-black text-[var(--color-primary)] whitespace-nowrap">
+                              <td rowSpan={docRowSpan} className="py-2 px-3 align-top text-right">
+                                <span className="block pt-1 text-[13px] font-black text-[var(--color-primary)] whitespace-nowrap">
                                   {formatCurrency2(docGrand(doc))}
                                 </span>
                               </td>
@@ -987,7 +1206,7 @@ export function BulkSalesCreateModal({
 
                           {/* Whole-document remove — spans the document's rows */}
                           {isGroupStart && (
-                            <td rowSpan={lines.length} className="py-2 px-2 text-center align-top">
+                            <td rowSpan={docRowSpan} className="py-2 px-2 text-center align-top">
                               <button
                                 type="button"
                                 disabled={docs.length === 1}
@@ -1000,6 +1219,65 @@ export function BulkSalesCreateModal({
                             </td>
                           )}
                         </tr>
+
+                        {/* PRODUCE & SELL DIRECTLY: the run config row —
+                            minimum-space ingredient sourcing. It spans ONLY
+                            Item → Qty (the document-level cells already span
+                            the rest) — never stretches under Rate/GST/Amount */}
+                        {lineMix && (
+                          <tr>
+                            <td colSpan={4} className="px-3 pb-1.5">
+                              <table className="table-fixed text-left text-[9px] align-middle">
+                                <colgroup>
+                                  <col className="w-20" />
+                                  <col className="w-20" />
+                                  <col className="w-40" />
+                                </colgroup>
+                                <tbody>
+                                  {lineMix.ingredients.map((ing) => {
+                                    const ingItem = items.find((it) => it.id === ing.itemId);
+                                    const basis = ing.basis || 'quantity';
+                                    const runQty = Number(line.quantity) || 0;
+                                    const refQty = Number(lineMix.referenceOutputQty) || 0;
+                                    const est = basis === 'percentage'
+                                      ? (Number(ing.percentage) || 0) * runQty / 100
+                                      : refQty > 0
+                                        ? (Number(ing.quantity) || 0) * runQty / refQty
+                                        : 0;
+                                    const isService = ingItem?.type === 'service';
+                                    const ingLocs = itemLocationChoices(ingItem);
+                                    return (
+                                      <tr key={ing.itemId}>
+                                        <td className="py-0.5 pr-2 font-semibold text-[var(--color-on-surface-variant)] truncate">
+                                          {ingItem ? ingItem.code : '—'}
+                                        </td>
+                                        <td className="py-0.5 pr-2 font-semibold text-[var(--color-on-surface-variant)] whitespace-nowrap">
+                                          {isService ? 'service' : `${Number(est.toFixed(4))} ${ingItem?.unit || ''}`}
+                                        </td>
+                                        <td className="py-0.5">
+                                          {isService ? (
+                                            <span className="py-0.5 font-semibold text-[var(--color-on-surface-variant)]">no stock post</span>
+                                          ) : ingLocs.length === 0 ? (
+                                            <span className="py-0.5 font-semibold text-[var(--color-on-surface-variant)]">no location</span>
+                                          ) : (
+                                            <SearchableSelect
+                                              value={line.production?.sources?.[ing.itemId] || ''}
+                                              onChange={(v) => setLineIngredientSource(doc, line, ing.itemId, v)}
+                                              placeholder="Source location..."
+                                              inputClass="text-[9px] font-semibold"
+                                              options={ingLocs.map((locName) => ({ value: locName, label: locName }))}
+                                            />
+                                          )}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </td>
+                          </tr>
+                        )}
+                        </React.Fragment>
                       );
                     });
                   })}
@@ -1013,14 +1291,14 @@ export function BulkSalesCreateModal({
                 <button
                   type="button"
                   onClick={() => addDocument(1)}
-                  className="inline-flex items-center gap-1 px-4 py-1.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-[11px] font-bold hover:opacity-90 transition-all"
+                  className="inline-flex items-center gap-1 px-4 py-1.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold hover:opacity-90 transition-all"
                 >
                   <Plus className="w-3.5 h-3.5" /> Add Row
                 </button>
                 <button
                   type="button"
                   onClick={() => addDocument(5)}
-                  className="inline-flex items-center gap-1 px-4 py-1.5 border border-[var(--color-outline-variant)] text-[var(--color-on-surface)] rounded-full text-[11px] font-bold hover:bg-[var(--color-surface-container-high)] transition-colors"
+                  className="inline-flex items-center gap-1 px-4 py-1.5 border border-[var(--color-outline-variant)] text-[var(--color-on-surface)] rounded-full text-xs font-bold hover:bg-[var(--color-surface-container-high)] transition-colors"
                 >
                   <Plus className="w-3.5 h-3.5" /> Add 5 Rows
                 </button>
@@ -1038,14 +1316,14 @@ export function BulkSalesCreateModal({
           <button
             type="button"
             onClick={onClose}
-            className="px-5 py-2.5 border border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] rounded-full text-xs font-semibold hover:bg-[var(--color-surface-container-high)] transition-colors"
+            className="px-5 py-2.5 border border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] rounded-full text-[13px] font-semibold hover:bg-[var(--color-surface-container-high)] transition-colors"
           >
             Cancel
           </button>
           <button
             type="button"
             onClick={handleSubmitBatch}
-            className="px-6 py-2.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-semibold hover:opacity-90 transition-all shadow-xs"
+            className="px-6 py-2.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-[13px] font-semibold hover:opacity-90 transition-all shadow-xs"
           >
             Create {docs.length} Document{docs.length !== 1 ? 's' : ''}
           </button>

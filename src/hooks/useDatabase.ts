@@ -9,6 +9,8 @@ import {
   ItemUnit,
   ItemLocation,
   ProductionBatchRun,
+  BatchMix,
+  InventoryUnit,
   Order,
   Sale,
   Purchase,
@@ -43,6 +45,8 @@ export function useDatabase() {
   const [units, setUnits] = useState<ItemUnit[]>(() => cloudStore.getUnits());
   const [locations, setLocations] = useState<ItemLocation[]>(() => cloudStore.getLocations());
   const [productionBatches, setProductionBatches] = useState<ProductionBatchRun[]>(() => cloudStore.getProductionBatches());
+  const [batchMixes, setBatchMixes] = useState<BatchMix[]>(() => cloudStore.getBatchMixes());
+  const [inventoryUnits, setInventoryUnits] = useState<InventoryUnit[]>(() => cloudStore.getInventoryUnits());
   const [orders, setOrders] = useState<Order[]>(() => cloudStore.getOrders()); // legacy rows
   const [sales, setSales] = useState<Sale[]>(() => cloudStore.getSales());
   const [saleInvoices, setSaleInvoices] = useState<SaleInvoice[]>(() => cloudStore.getSaleInvoices());
@@ -80,6 +84,8 @@ export function useDatabase() {
     setUnits(cloudStore.getUnits());
     setLocations(cloudStore.getLocations());
     setProductionBatches(cloudStore.getProductionBatches());
+    setBatchMixes(cloudStore.getBatchMixes());
+    setInventoryUnits(cloudStore.getInventoryUnits());
     setOrders(cloudStore.getOrders());
     setSales(cloudStore.getSales());
     setSaleInvoices(cloudStore.getSaleInvoices());
@@ -138,6 +144,8 @@ export function useDatabase() {
     units,
     locations,
     productionBatches,
+    batchMixes,
+    inventoryUnits,
     orders,
     sales,
     saleInvoices,

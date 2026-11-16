@@ -545,10 +545,149 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           raw_materials_consumed JSON,
           supervisor_name VARCHAR(128),
           mix_temperature_celsius INT,
+          sale_id VARCHAR(64) COMMENT 'FK sales_orders — direct-to-sale run (output skips stock)',
+          sale_item_id VARCHAR(64) COMMENT 'FK sales_order_items — the sale line this run produced for',
           notes TEXT,
           created_at VARCHAR(64) NOT NULL,
           INDEX idx_batch_date (date),
-          INDEX idx_batch_number (batch_number)
+          INDEX idx_batch_number (batch_number),
+          INDEX idx_batch_sale (sale_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      // 7a. BATCH MIXES (recipes) + their ingredient rows (2026-11-12).
+      // FK-only storage (Golden Rule §2): output_item_id / item_id reference
+      // the items master; NO name copies — every display resolves via JOIN.
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS batch_mixes (
+          id VARCHAR(64) PRIMARY KEY,
+          mix_number VARCHAR(64),
+          name VARCHAR(255) NOT NULL,
+          output_item_id VARCHAR(64) NOT NULL,
+          basis VARCHAR(16) NOT NULL DEFAULT 'quantity',
+          reference_output_qty DECIMAL(15,3) NULL,
+          notes TEXT,
+          is_active TINYINT(1) DEFAULT 1,
+          created_at VARCHAR(64) NOT NULL,
+          INDEX idx_mix_number (mix_number),
+          INDEX idx_mix_output_item (output_item_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS batch_mix_ingredients (
+          id VARCHAR(64) PRIMARY KEY,
+          batch_mix_id VARCHAR(64) NOT NULL,
+          item_id VARCHAR(64) NOT NULL,
+          basis VARCHAR(16) NOT NULL DEFAULT 'quantity',
+          quantity DECIMAL(15,4) NULL,
+          percentage DECIMAL(15,4) NULL,
+          INDEX idx_bmi_mix (batch_mix_id),
+          INDEX idx_bmi_item (item_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+      // Per-ROW sizing basis (2026-11-12 correction: bitumen in % and LDO in
+      // MT must mix freely on ONE recipe — basis is a per-ingredient column,
+      // not a recipe-level selector). Legacy deployments that created the
+      // table this morning get the column added idempotently.
+      try {
+        const [bmiCols]: any = await conn.query('SHOW COLUMNS FROM batch_mix_ingredients');
+        const bmiColNames = (bmiCols || []).map((c: any) => c.Field);
+        if (!bmiColNames.includes('basis')) {
+          await conn.query(`ALTER TABLE batch_mix_ingredients ADD COLUMN basis VARCHAR(16) NOT NULL DEFAULT 'quantity' AFTER item_id`);
+        }
+      } catch (bmiErr: any) {
+        console.warn('[MySQL Migration] batch_mix_ingredients basis column notice:', bmiErr.message);
+      }
+      // production_batches gains its recipe ancestry FK + costing snapshots
+      // (numeric facts per §2 exception 3); mixes keep running with NULLs.
+      // Produce-&-sell-directly (2026-11-16): sale_id/sale_item_id FKs bind a
+      // run to the sale line it was recorded from; a run carries both when its
+      // output never entered stock (direct-to-sale) — no output lot inward.
+      try {
+        const [batchCols]: any = await conn.query('SHOW COLUMNS FROM production_batches');
+        const batchColNames = (batchCols || []).map((c: any) => c.Field);
+        if (!batchColNames.includes('batch_mix_id')) {
+          await conn.query('ALTER TABLE production_batches ADD COLUMN batch_mix_id VARCHAR(64) NULL AFTER raw_materials_consumed, ADD INDEX idx_batch_mix (batch_mix_id)');
+        }
+        if (!batchColNames.includes('output_rate')) {
+          await conn.query('ALTER TABLE production_batches ADD COLUMN output_rate DECIMAL(15,4) NULL AFTER batch_mix_id, ADD COLUMN output_value DECIMAL(15,2) NULL AFTER output_rate');
+        }
+        if (!batchColNames.includes('sale_id')) {
+          await conn.query('ALTER TABLE production_batches ADD COLUMN sale_id VARCHAR(64) NULL AFTER mix_temperature_celsius, ADD COLUMN sale_item_id VARCHAR(64) NULL AFTER sale_id, ADD INDEX idx_batch_sale (sale_id)');
+        }
+      } catch (bErr: any) {
+        console.warn('[MySQL Migration] production_batches batch-mix columns notice:', bErr.message);
+      }
+
+      // 7b. TRACKABLE INVENTORY (2026-11-13) — asset-type items are catalog
+      // headers; each physical unit is one register row here. FK-only storage
+      // (item_id, location_id, vehicle_id, party_id/supplier, sale_id) —
+      // names resolve via JOINs at read time. serial is unique PER ITEM.
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS inventory_units (
+          id VARCHAR(64) PRIMARY KEY,
+          item_id VARCHAR(64) NOT NULL,
+          serial_number VARCHAR(128) NOT NULL,
+          status VARCHAR(32) NOT NULL DEFAULT 'in_stock',
+          location_id VARCHAR(64) NULL,
+          vehicle_id VARCHAR(64) NULL,
+          position VARCHAR(64) NULL,
+          fit_odometer DECIMAL(15,2) NULL,
+          party_id VARCHAR(64) NULL,
+          purchase_date VARCHAR(32) NULL,
+          purchase_cost DECIMAL(15,2) NULL,
+          warranty_expiry VARCHAR(32) NULL,
+          sale_id VARCHAR(64) NULL,
+          unit_condition VARCHAR(32) NULL,
+          notes TEXT,
+          purchase_id VARCHAR(64) NULL COMMENT 'FK purchase_order — the purchase that received this unit (2026-11-16)',
+          attributes JSON COMMENT 'user-defined attribute values keyed by the declared keys (2026-11-16)',
+          created_at VARCHAR(64) NOT NULL,
+          updated_at VARCHAR(64),
+          UNIQUE KEY uq_unit_serial_per_item (item_id, serial_number),
+          INDEX idx_unit_item (item_id),
+          INDEX idx_unit_status (status),
+          INDEX idx_unit_vehicle (vehicle_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+      // DYNAMIC ATTRIBUTES (serialized inventory, 2026-11-16): the item master
+      // declares the per-unit key list; units store values keyed by them.
+      // Existing deployments gain both JSON columns idempotently.
+      try {
+        const [attrItemCols]: any = await conn.query('SHOW COLUMNS FROM items');
+        const attrItemNames = (attrItemCols || []).map((c: any) => c.Field);
+        if (!attrItemNames.includes('attributes')) {
+          await conn.query('ALTER TABLE items ADD COLUMN attributes JSON NULL');
+        }
+        const [attrUnitCols]: any = await conn.query('SHOW COLUMNS FROM inventory_units');
+        const attrUnitNames = (attrUnitCols || []).map((c: any) => c.Field);
+        if (!attrUnitNames.includes('attributes')) {
+          await conn.query('ALTER TABLE inventory_units ADD COLUMN attributes JSON NULL AFTER notes');
+        }
+        if (!attrUnitNames.includes('purchase_id')) {
+          await conn.query('ALTER TABLE inventory_units ADD COLUMN purchase_id VARCHAR(64) NULL AFTER sale_id, ADD INDEX idx_unit_purchase (purchase_id)');
+        }
+      } catch (attrErr: any) {
+        console.warn('[MySQL Migration] attribute columns notice:', attrErr.message);
+      }
+      // Append-only lifecycle log (mirrors stock_movements): FKs + numeric
+      // snapshots only; narrative never breaks across renames.
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS inventory_unit_events (
+          id VARCHAR(64) PRIMARY KEY,
+          unit_id VARCHAR(64) NOT NULL,
+          date VARCHAR(64) NOT NULL,
+          type VARCHAR(32) NOT NULL,
+          notes TEXT,
+          vehicle_id VARCHAR(64) NULL,
+          position VARCHAR(64) NULL,
+          odometer DECIMAL(15,2) NULL,
+          location_id VARCHAR(64) NULL,
+          sale_id VARCHAR(64) NULL,
+          party_id VARCHAR(64) NULL,
+          created_at VARCHAR(64) NOT NULL,
+          INDEX idx_ue_unit (unit_id),
+          INDEX idx_ue_date (date)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
@@ -1666,10 +1805,26 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           location_id VARCHAR(64) COMMENT 'FK item_locations — dispatched from',
           item_notes TEXT,
           weight_tonnes DECIMAL(12,3) COMMENT 'line load weight (MT) — sums into the trip slip load',
+          unit_ids JSON COMMENT 'FKs inventory_units — the register units sold on this line (asset items)',
+          produce_direct TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'output manufactured by a sale-bound run — dispatch posts no outward',
           INDEX idx_soi_sale (sale_id),
           INDEX idx_soi_item (item_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
+      // Sales-ladder unit linkage (2026-11-13): existing deployments gain the
+      // register-unit array column idempotently; produce-direct flag (2026-11-16).
+      try {
+        const [soiUnitCols]: any = await conn.query('SHOW COLUMNS FROM sales_order_items');
+        const soiUnitNames = (soiUnitCols || []).map((c: any) => c.Field);
+        if (!soiUnitNames.includes('unit_ids')) {
+          await conn.query('ALTER TABLE sales_order_items ADD COLUMN unit_ids JSON NULL AFTER weight_tonnes');
+        }
+        if (!soiUnitNames.includes('produce_direct')) {
+          await conn.query('ALTER TABLE sales_order_items ADD COLUMN produce_direct TINYINT(1) NOT NULL DEFAULT 0 AFTER unit_ids');
+        }
+      } catch (soiUnitErr: any) {
+        console.warn('[MySQL Migration] sales_order_items unit_ids column notice:', soiUnitErr.message);
+      }
 
       await conn.query(`
         CREATE TABLE IF NOT EXISTS sales_order_stages (
@@ -1727,10 +1882,23 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           shortage_quantity DECIMAL(15,3) DEFAULT NULL,
           overage_quantity DECIMAL(15,3) DEFAULT NULL,
           item_notes TEXT,
+          unit_entry JSON COMMENT 'SERIALIZED line (2026-11-16): serial + declared-key values for the ONE unit this line enters',
           INDEX idx_poi_purchase (purchase_id),
           INDEX idx_poi_item (item_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
+      // purchase_order_items gains the serialized-line unit entry idempotently
+      // (in a separate guarded block: the table is created AFTER the
+      // inventory_units section where the other attribute ALTERs live).
+      try {
+        const [poiCols]: any = await conn.query('SHOW COLUMNS FROM purchase_order_items');
+        const poiNames = (poiCols || []).map((c: any) => c.Field);
+        if (!poiNames.includes('unit_entry')) {
+          await conn.query('ALTER TABLE purchase_order_items ADD COLUMN unit_entry JSON NULL AFTER item_notes');
+        }
+      } catch (poiUnitErr: any) {
+        console.warn('[MySQL Migration] purchase_order_items unit_entry column notice:', poiUnitErr.message);
+      }
 
       await conn.query(`
         CREATE TABLE IF NOT EXISTS purchase_order_stages (

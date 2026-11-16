@@ -7,6 +7,9 @@ import {
   ItemUnit,
   ItemLocation,
   ProductionBatchRun,
+  BatchMix,
+  InventoryUnit,
+  InventoryUnitEvent,
   Order,
   Sale,
   SaleInvoice,
@@ -88,6 +91,10 @@ export interface SyncPayload {
   units: ItemUnit[];
   locations: ItemLocation[];
   productionBatches: ProductionBatchRun[];
+  /** Batch mixes (recipes) — production feature (2026-11-12) */
+  batchMixes?: BatchMix[];
+  /** Trackable inventory — unit register of asset-type items (2026-11-13) */
+  inventoryUnits?: InventoryUnit[];
   orders: Order[];
   sales: Sale[];
   salesInvoices?: SaleInvoice[];
@@ -640,6 +647,113 @@ class ApiClient {
   public async deleteBatch(id: string): Promise<{ success: boolean }> {
     return this.request<{ success: boolean }>(`/batches/${id}`, {
       method: 'DELETE',
+    });
+  }
+
+  // Batch Mixes (recipes)
+  public async getBatchMixes(): Promise<{ success: boolean; data: BatchMix[] }> {
+    return this.request<{ success: boolean; data: BatchMix[] }>('/batch-mixes');
+  }
+
+  public async getNextBatchMixNumber(): Promise<{ success: boolean; data: { nextMixNumber: string } }> {
+    return this.request<{ success: boolean; data: { nextMixNumber: string } }>('/batch-mixes/next-number');
+  }
+
+  public async createBatchMix(mix: Partial<BatchMix>): Promise<{ success: boolean; data: BatchMix }> {
+    return this.request<{ success: boolean; data: BatchMix }>('/batch-mixes', {
+      method: 'POST',
+      body: JSON.stringify(mix),
+    });
+  }
+
+  public async updateBatchMix(id: string, updates: Partial<BatchMix>): Promise<{ success: boolean; data: BatchMix }> {
+    return this.request<{ success: boolean; data: BatchMix }>(`/batch-mixes/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  }
+
+  public async deleteBatchMix(id: string): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(`/batch-mixes/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  // Trackable Inventory (unit register of asset-type items)
+  public async getInventoryUnits(itemId?: string): Promise<{ success: boolean; data: InventoryUnit[] }> {
+    return this.request<{ success: boolean; data: InventoryUnit[] }>(`/inventory-units${itemId ? `?itemId=${encodeURIComponent(itemId)}` : ''}`);
+  }
+
+  public async getInventoryUnitEvents(unitId?: string): Promise<{ success: boolean; data: InventoryUnitEvent[] }> {
+    return this.request<{ success: boolean; data: InventoryUnitEvent[] }>(`/inventory-units/events${unitId ? `?unitId=${encodeURIComponent(unitId)}` : ''}`);
+  }
+
+  public async createInventoryUnit(unit: Partial<InventoryUnit> & { itemId: string; serialNumber: string }): Promise<{ success: boolean; data: InventoryUnit }> {
+    return this.request<{ success: boolean; data: InventoryUnit }>('/inventory-units', {
+      method: 'POST',
+      body: JSON.stringify(unit),
+    });
+  }
+
+  public async createInventoryUnitsBulk(units: Array<Partial<InventoryUnit> & { itemId: string; serialNumber: string }>): Promise<{ success: boolean; data: InventoryUnit[] }> {
+    return this.request<{ success: boolean; data: InventoryUnit[] }>('/inventory-units/bulk', {
+      method: 'POST',
+      body: JSON.stringify({ units }),
+    });
+  }
+
+  public async updateInventoryUnit(id: string, updates: Partial<InventoryUnit>): Promise<{ success: boolean; data: InventoryUnit }> {
+    return this.request<{ success: boolean; data: InventoryUnit }>(`/inventory-units/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  }
+
+  public async deployInventoryUnit(id: string, payload: { vehicleId: string; position?: string; odometer?: number; notes?: string }): Promise<{ success: boolean; data: InventoryUnit }> {
+    return this.request<{ success: boolean; data: InventoryUnit }>(`/inventory-units/${id}/deploy`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async returnInventoryUnit(id: string, payload: { locationId?: string; condition?: string; odometer?: number; notes?: string } = {}): Promise<{ success: boolean; data: InventoryUnit }> {
+    return this.request<{ success: boolean; data: InventoryUnit }>(`/inventory-units/${id}/return`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async maintainInventoryUnit(id: string, payload: { notes?: string } = {}): Promise<{ success: boolean; data: InventoryUnit }> {
+    return this.request<{ success: boolean; data: InventoryUnit }>(`/inventory-units/${id}/maintenance`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async restoreInventoryUnit(id: string, payload: { locationId?: string; condition?: string; notes?: string } = {}): Promise<{ success: boolean; data: InventoryUnit }> {
+    return this.request<{ success: boolean; data: InventoryUnit }>(`/inventory-units/${id}/restore`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async scrapInventoryUnit(id: string, payload: { notes?: string } = {}): Promise<{ success: boolean; data: InventoryUnit }> {
+    return this.request<{ success: boolean; data: InventoryUnit }>(`/inventory-units/${id}/scrap`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async deleteInventoryUnit(id: string): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(`/inventory-units/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  public async linkUnitsToSale(unitIds: string[], saleId: string, notes?: string): Promise<{ success: boolean; data: InventoryUnit[] }> {
+    return this.request<{ success: boolean; data: InventoryUnit[] }>('/inventory-units/link-sale', {
+      method: 'POST',
+      body: JSON.stringify({ unitIds, saleId, notes }),
     });
   }
 
