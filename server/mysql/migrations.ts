@@ -670,6 +670,35 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
       } catch (attrErr: any) {
         console.warn('[MySQL Migration] attribute columns notice:', attrErr.message);
       }
+      // Fleet diesel from inventory (2026-11-17): the expense row snapshots
+      // WHICH diesel item/location each fill was issued from (nullable —
+      // legacy direct fills predate the rule).
+      try {
+        const [vxeCols]: any = await conn.query('SHOW COLUMNS FROM vehicle_expense_entries');
+        const vxeNames = (vxeCols || []).map((c: any) => c.Field);
+        if (!vxeNames.includes('diesel_item_id')) {
+          await conn.query('ALTER TABLE vehicle_expense_entries ADD COLUMN diesel_item_id VARCHAR(64) NULL AFTER amount');
+        }
+        if (!vxeNames.includes('diesel_location_id')) {
+          await conn.query('ALTER TABLE vehicle_expense_entries ADD COLUMN diesel_location_id VARCHAR(64) NULL AFTER diesel_item_id, ADD INDEX idx_vxe_diesel_loc (diesel_location_id)');
+        }
+      } catch (dieselColErr: any) {
+        console.warn('[MySQL Migration] diesel columns notice:', dieselColErr.message);
+      }
+      // STOCK TRANSFER (2026-11-17): the From/To location FKs of a transfer
+      // adjustment document.
+      try {
+        const [isaCols]: any = await conn.query('SHOW COLUMNS FROM item_stock_adjustments');
+        const isaNames = (isaCols || []).map((c: any) => c.Field);
+        if (!isaNames.includes('from_location_id')) {
+          await conn.query('ALTER TABLE item_stock_adjustments ADD COLUMN from_location_id VARCHAR(64) NULL AFTER location_id');
+        }
+        if (!isaNames.includes('to_location_id')) {
+          await conn.query('ALTER TABLE item_stock_adjustments ADD COLUMN to_location_id VARCHAR(64) NULL AFTER from_location_id');
+        }
+      } catch (transferColErr: any) {
+        console.warn('[MySQL Migration] transfer columns notice:', transferColErr.message);
+      }
       // Append-only lifecycle log (mirrors stock_movements): FKs + numeric
       // snapshots only; narrative never breaks across renames.
       await conn.query(`
@@ -2766,32 +2795,10 @@ export async function seedMysqlFromSnapshot(): Promise<{ success: boolean; messa
         );
       }
 
-      // Seed tyres
-      for (const tyr of (snapshot.tyres || []) as any[]) {
-        await conn.query(
-          `REPLACE INTO tyres (id, serial_number, brand, model, size, status, mounted_vehicle_id, mounted_vehicle_number, axle_position, current_tread_depth_mm, initial_tread_depth_mm, total_km_run, purchase_date, cost, notes, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            tyr.id,
-            tyr.serialNumber,
-            tyr.brand,
-            tyr.model || null,
-            tyr.size,
-            tyr.status || 'in_use',
-            tyr.mountedVehicleId || null,
-            tyr.mountedVehicleNumber || null,
-            tyr.axlePosition || null,
-            tyr.currentTreadDepthMm || 0,
-            tyr.initialTreadDepthMm || 15,
-            tyr.totalKmRun || 0,
-            tyr.purchaseDate || null,
-            tyr.cost || 0,
-            tyr.notes || null,
-            tyr.createdAt || null,
-            tyr.updatedAt || null,
-          ]
-        );
-      }
+      // Seed tyres — RETIRED (2026-11-17): the legacy standalone tyre table is
+      // no longer seeded (snapshot.tyres was always empty + the feature now
+      // runs on inventory_units). The `tyres` table stays on the server,
+      // unwritten.
 
       // Seed documents + order document mapping tables
       for (const doc of (snapshot.documents || []) as any[]) {

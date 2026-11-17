@@ -20,7 +20,9 @@ import {
   Vehicle,
   Driver,
   TripSlip,
-  Tyre,
+  TYRE_POSITIONS,
+  isTyreItemName,
+  isDieselItemName,
   InventoryUnit,
   InventoryUnitEvent,
   InventoryUnitStatus,
@@ -102,7 +104,6 @@ import {
   liveSyncAppDefault,
   liveSyncDriver,
   liveSyncTripSlip,
-  liveSyncTyre,
   liveSyncEmployee,
   liveSyncAttendance,
   liveSyncLeave,
@@ -140,7 +141,6 @@ import {
   SEED_VEHICLES,
   SEED_DRIVERS,
   SEED_TRIP_SLIPS,
-  SEED_TYRES,
   SEED_EMPLOYEES,
   SEED_ATTENDANCE,
   SEED_LEAVES,
@@ -186,7 +186,6 @@ export interface DatabaseSchema {
   vehicles: Vehicle[];
   drivers: Driver[];
   tripSlips: TripSlip[];
-  tyres: Tyre[];
   employees: Employee[];
   attendance: EmployeeAttendance[];
   leaves: EmployeeLeave[];
@@ -279,7 +278,6 @@ class ServerLocalDatabase {
       vehicles: JSON.parse(JSON.stringify(SEED_VEHICLES)),
       drivers: JSON.parse(JSON.stringify(SEED_DRIVERS)),
       tripSlips: JSON.parse(JSON.stringify(SEED_TRIP_SLIPS)),
-      tyres: JSON.parse(JSON.stringify(SEED_TYRES)),
       employees: JSON.parse(JSON.stringify(SEED_EMPLOYEES)),
       attendance: JSON.parse(JSON.stringify(SEED_ATTENDANCE)),
       leaves: JSON.parse(JSON.stringify(SEED_LEAVES)),
@@ -499,7 +497,6 @@ class ServerLocalDatabase {
         vehicles: this.data.vehicles.length,
         drivers: this.data.drivers.length,
         tripSlips: this.data.tripSlips.length,
-        tyres: this.data.tyres.length,
         employees: this.data.employees.length,
         attendance: this.data.attendance.length,
         leaves: this.data.leaves.length,
@@ -873,6 +870,22 @@ class ServerLocalDatabase {
     // the item spread (never persisted on the item row) and link below.
     const createDocIds = this.extractDocumentIds(data);
     delete (data as any).documentIds;
+    // TYPE SANITATION (2026-11-17): rows saved during the onClick={handleOpenAdd}
+    // bug carried a CLICK-EVENT object as their `type` — only the real
+    // ItemType strings may persist (invalid values fall back per-path below).
+    if (data.type !== undefined && !['product', 'service', 'asset'].includes(data.type)) {
+      delete (data as any).type;
+    }
+    // DIESEL PRICING LOCK (2026-11-17, client directive): the diesel item has
+    // NO procured cost of its own — purchase/opening cost are ALWAYS the
+    // global diesel_rate (app_defaults snapshot at save time).
+    const dieselRateMaster = Number(this.getAppDefault('diesel_rate')) || 0;
+    if (isDieselItemName(data.name) && dieselRateMaster > 0) {
+      data.purchasePrice = dieselRateMaster;
+      if (data.openingStockPrice !== undefined || Number(data.openingStock) > 0) {
+        data.openingStockPrice = dieselRateMaster;
+      }
+    }
     const existingIdx = this.data.items.findIndex((i) => i.id === newId);
 
     // Normalize multiple locations if provided
@@ -968,20 +981,43 @@ class ServerLocalDatabase {
     // Defensive strip: edit-mode uploads link immediately via the documents
     // endpoint, so documentIds should never ride an update — never persist it.
     delete (updates as any).documentIds;
+    // TYPE SANITATION (2026-11-17): same as createItem — a corrupted
+    // (event-object) type never re-persists; the field is simply dropped so
+    // the stored value survives.
+    if (updates.type !== undefined && !['product', 'service', 'asset'].includes(updates.type)) {
+      delete (updates as any).type;
+    }
     const existing = this.data.items[index];
+    // DIESEL PRICING LOCK (2026-11-17): on a diesel item the procured cost is
+    // fixed at the global diesel_rate — any purchase/opening price riding an
+    // edit is overwritten with the snapshot.
+    const dieselRateMaster = Number(this.getAppDefault('diesel_rate')) || 0;
+    const isDieselMasterName = isDieselItemName(updates.name ?? existing.name);
+    if (isDieselMasterName && dieselRateMaster > 0) {
+      if (updates.purchasePrice !== undefined) updates.purchasePrice = dieselRateMaster;
+      if (updates.openingStockPrice !== undefined) updates.openingStockPrice = dieselRateMaster;
+    }
 
     // TYPE GUARD (trackable, 2026-11-13): an item's type may change ONLY while
     // nothing depends on it — no stock-movement history (the aggregate ledger)
     // and no register units. A "Tyre" mistakenly created as a Stock Item can be
     // converted to Trackable until its first movement / unit; after that the
     // type is frozen to keep the registers meaningful.
+    // CORRUPTION REPAIR (2026-11-17): an existing type that is not a real
+    // ItemType string (the onClick-event bug row) is not a type at all —
+    // normalizing it to a valid one is always allowed, history or not.
+    const existingTypeCorrupt = !['product', 'service', 'asset'].includes(existing.type);
     if (updates.type && updates.type !== existing.type) {
-      const hasMovements = (this.data.stockMovements || []).some((m) => m.itemId === id);
-      const hasRegisterUnits = (this.data.inventoryUnits || []).some((u) => u.itemId === id);
-      if (hasMovements || hasRegisterUnits) {
-        throw new Error(`"${existing.name}" carries stock history / registered units — its type can no longer change.`);
+      if (existingTypeCorrupt) {
+        this.logAudit('UPDATE', 'ITEM', id, `Item ${existing.name} corrupted type repaired → ${updates.type}`);
+      } else {
+        const hasMovements = (this.data.stockMovements || []).some((m) => m.itemId === id);
+        const hasRegisterUnits = (this.data.inventoryUnits || []).some((u) => u.itemId === id);
+        if (hasMovements || hasRegisterUnits) {
+          throw new Error(`"${existing.name}" carries stock history / registered units — its type can no longer change.`);
+        }
+        this.logAudit('UPDATE', 'ITEM', id, `Item ${existing.name} type changed ${existing.type} → ${updates.type}`);
       }
-      this.logAudit('UPDATE', 'ITEM', id, `Item ${existing.name} type changed ${existing.type} → ${updates.type}`);
     }
 
     let locations = updates.locations !== undefined ? updates.locations : existing.locations;
@@ -1057,7 +1093,7 @@ class ServerLocalDatabase {
     return true;
   }
 
-  public adjustItemStock(id: string, delta: number, logType: 'purchase_inward' | 'production_output' | 'production_consumed' | 'production_consumed_reversal' | 'sale_dispatch' | 'opening' | 'adjustment_increase' | 'adjustment_decrease' | 'dispatch_reversal' | 'inward_reversal', refNo?: string, notes?: string, locationName?: string, partyId?: string, rate?: number, referenceId?: string): Item {
+  public adjustItemStock(id: string, delta: number, logType: 'purchase_inward' | 'production_output' | 'production_consumed' | 'production_consumed_reversal' | 'sale_dispatch' | 'opening' | 'adjustment_increase' | 'adjustment_decrease' | 'dispatch_reversal' | 'inward_reversal' | 'diesel_issue' | 'diesel_issue_reversal' | 'transfer_out' | 'transfer_in', refNo?: string, notes?: string, locationName?: string, partyId?: string, rate?: number, referenceId?: string): Item {
     const item = this.findItemRaw(id);
     if (!item) throw new Error(`Item ${id} not found.`);
     // TRACKABLE (asset) items carry NO aggregate stock — their physical units
@@ -1218,6 +1254,17 @@ class ServerLocalDatabase {
       // the referenceId.
       case 'production_consumed_reversal':
         movement.referenceType = 'production_batch';
+        break;
+      // Fleet diesel fuel-fill: the ledger row belongs to the vehicle
+      // expense entry (referenceId = entry id) — a stock trace of the fill.
+      case 'diesel_issue':
+      case 'diesel_issue_reversal':
+        movement.referenceType = 'vehicle_expense';
+        break;
+      // Stock transfer legs: both ledger rows trace to the adjustment doc
+      case 'transfer_out':
+      case 'transfer_in':
+        movement.referenceType = 'stock_adjustment';
         break;
       default:
         movement.referenceType = referenceId ? 'order_document' : 'order';
@@ -1429,7 +1476,20 @@ class ServerLocalDatabase {
       if (adj.locationId && Array.isArray(item.locations) && !locationName) {
         locationName = item.locations.find((l) => l.locationId === adj.locationId)?.locationName || locationName;
       }
-      return { ...adj, itemName: item.name, itemCode: item.code, unit: item.unit, location: locationName };
+      return {
+        ...adj,
+        itemName: item.name,
+        itemCode: item.code,
+        unit: item.unit,
+        location: locationName,
+        // STOCK TRANSFER (2026-11-17): From/To names resolve live by FK
+        fromLocationName: adj.fromLocationId
+          ? (this.data.locations || []).find((ml) => ml.id === adj.fromLocationId)?.name || adj.fromLocationName
+          : adj.fromLocationName,
+        toLocationName: adj.toLocationId
+          ? (this.data.locations || []).find((ml) => ml.id === adj.toLocationId)?.name || adj.toLocationName
+          : adj.toLocationName,
+      };
     }
     return { ...adj, location: locationName };
   }
@@ -1461,7 +1521,48 @@ class ServerLocalDatabase {
     const qty = Number(adjData.quantity) || 0;
     const rate = Number(adjData.rate) || 0;
     const totalVal = Math.round(qty * rate * 100) / 100;
-    const newStock = adjData.type === 'increase' ? prevStock + qty : Math.max(0, prevStock - qty);
+    const newStock = adjData.type === 'increase' ? prevStock + qty : adjData.type === 'decrease' ? Math.max(0, prevStock - qty) : prevStock;
+
+    // ===== STOCK TRANSFER (2026-11-17, client directive): ONE adjustment
+    // document, From → To location of the SAME item; the item total never
+    // changes. Both ledger legs (transfer_out at the source, transfer_in at
+    // the destination) trace to this doc. Value-neutral: the legs price at
+    // the item's blended valuation rate.
+    const isTransfer = adjData.type === 'transfer';
+    let fromLocationId: string | undefined;
+    let toLocationId: string | undefined;
+    let fromBucket: ItemLocationStock | undefined;
+    let toBucket: ItemLocationStock | undefined;
+    if (isTransfer) {
+      if (!item) throw new Error('Pick the item to transfer its stock.');
+      if (qty <= 0) throw new Error('The transfer quantity is required (must be more than zero).');
+      fromLocationId = adjData.fromLocationId || adjData.locationId;
+      toLocationId = adjData.toLocationId;
+      if (!fromLocationId || !toLocationId) throw new Error('A transfer needs both a FROM and a TO location.');
+      if (fromLocationId === toLocationId) throw new Error('A transfer cannot move stock between the same location — pick a different destination.');
+      // FROM/TO resolve by FK first, then by NAME (legacy item buckets without
+      // a locationId reach the transfer as a display name).
+      const masterFrom = (this.data.locations || []).find((l) => l.id === fromLocationId || l.name?.trim().toLowerCase() === String(fromLocationId).trim().toLowerCase());
+      const masterTo = (this.data.locations || []).find((l) => l.id === toLocationId || l.name?.trim().toLowerCase() === String(toLocationId).trim().toLowerCase());
+      if (!masterFrom) throw new Error('The FROM location was not found.');
+      if (!masterTo) throw new Error('The TO location was not found.');
+      const buckets = item.locations && item.locations.length > 0
+        ? item.locations
+        : (item.stockLocation ? item.stockLocation.split(',').map((s) => ({ locationName: s.trim(), currentStock: item.currentStock })) : []);
+      const byIdOrName = (id: string) =>
+        buckets.find((b) => (b as any).locationId === id) ||
+        buckets.find((b) => (b.locationName || '').trim().toLowerCase() === (this.data.locations || []).find((l) => l.id === id)?.name?.trim().toLowerCase());
+      fromBucket = byIdOrName(fromLocationId);
+      toBucket = byIdOrName(toLocationId);
+      if (!fromBucket) throw new Error(`The item is not stocked at ${masterFrom.name} (FROM) — it cannot be the transfer source (not found).`);
+      const available = Number(fromBucket.currentStock) || 0;
+      if (qty > available) {
+        throw new Error(`Stock at ${masterFrom.name} is ${available.toLocaleString('en-IN')} ${item.unit} — cannot transfer ${qty.toLocaleString('en-IN')} ${item.unit}.`);
+      }
+    }
+    const transferRate = isTransfer && item
+      ? computeItemValuation(item, (this.data.stockMovements || []).filter((m) => m.itemId === item.id)).valuationRate
+      : rate;
 
     const newAdj: ItemStockAdjustment = {
       id: newId,
@@ -1478,24 +1579,59 @@ class ServerLocalDatabase {
       previousStock: prevStock,
       newStock: newStock,
       reason: adjData.reason || 'Inventory Stock Reconciliation',
-      location: adjData.location || item?.stockLocation || '',  // display field; resolved live on read
+      location: isTransfer
+        ? ((this.data.locations || []).find((l) => l.id === fromLocationId)?.name || '')
+        : (adjData.location || item?.stockLocation || ''),  // display field; resolved live on read
+      ...(isTransfer ? { fromLocationId, toLocationId } : {}),
       referenceNumber: adjData.referenceNumber || '',
       notes: adjData.notes || '',
       createdAt: adjData.createdAt || new Date().toISOString(),
     };
     // Store the FK of the chosen storage location (display name is resolved at read time)
-    newAdj.locationId = this.findItemRaw(newAdj.itemId)?.locations?.find(
-      (l) => (l.locationName || '').trim().toLowerCase() === (newAdj.location || '').trim().toLowerCase()
-    )?.locationId;
-    if (!newAdj.locationId) {
-      // A location typed freely without an exact item-location match: fall back to the item's own location copy
-      const fallbackName = (newAdj.location || '').trim().toLowerCase();
-      newAdj.locationId = (this.data.locations || []).find((ml) => ml.name?.trim().toLowerCase() === fallbackName)?.id;
+    if (isTransfer) {
+      newAdj.locationId = fromLocationId;
+    } else {
+      newAdj.locationId = this.findItemRaw(newAdj.itemId)?.locations?.find(
+        (l) => (l.locationName || '').trim().toLowerCase() === (newAdj.location || '').trim().toLowerCase()
+      )?.locationId;
+      if (!newAdj.locationId) {
+        // A location typed freely without an exact item-location match: fall back to the item's own location copy
+        const fallbackName = (newAdj.location || '').trim().toLowerCase();
+        newAdj.locationId = (this.data.locations || []).find((ml) => ml.name?.trim().toLowerCase() === fallbackName)?.id;
+      }
     }
 
     this.data.stockAdjustments.unshift(newAdj);
 
-    if (item) {
+    if (item && isTransfer) {
+      // Transfer legs — BOTH trace to this adjustment doc:
+      //  OUT at the source (blended WAC consumption, computed by the ledger)
+      //  IN at the destination (SAME blended rate ⇒ the item's total value is unchanged)
+      const fromName = (this.data.locations || []).find((l) => l.id === fromLocationId)?.name;
+      const toName = (this.data.locations || []).find((l) => l.id === toLocationId)?.name;
+      this.adjustItemStock(
+        item.id,
+        -qty,
+        'transfer_out',
+        newAdj.adjustmentNumber,
+        `[Stock Transfer] ${qty} ${newAdj.unit} ${fromName || ''} → ${toName || ''}`,
+        fromName,
+        undefined,
+        undefined,
+        newAdj.id,
+      );
+      this.adjustItemStock(
+        item.id,
+        qty,
+        'transfer_in',
+        newAdj.adjustmentNumber,
+        `[Stock Transfer] ${qty} ${newAdj.unit} ${fromName || ''} → ${toName || ''}`,
+        toName,
+        undefined,
+        transferRate > 0 ? transferRate : undefined,
+        newAdj.id,
+      );
+    } else if (item) {
       this.adjustItemStock(
         item.id,
         adjData.type === 'increase' ? qty : -qty,
@@ -1524,7 +1660,30 @@ class ServerLocalDatabase {
     this.data.stockAdjustments.splice(idx, 1);
 
     const item = this.getItemById(adj.itemId);
-    if (item) {
+    if (item && adj.type === 'transfer' && adj.fromLocationId && adj.toLocationId) {
+      // TRANSFER REVERSAL (2026-11-17): a deleted transfer moves the stock
+      // BACK — it returns to the source (at the transfer_in rate it entered)
+      // and leaves the destination.
+      const fromName = (this.data.locations || []).find((l) => l.id === adj.fromLocationId)?.name;
+      const toName = (this.data.locations || []).find((l) => l.id === adj.toLocationId)?.name;
+      const inRate = (this.data.stockMovements || [])
+        .filter((m) => m.itemId === adj.itemId && m.referenceNumber === adj.adjustmentNumber && m.type === 'transfer_in')
+        .map((m) => (Number(m.rate) > 0 ? Number(m.rate) : undefined))[0];
+      try {
+        this.adjustItemStock(
+          item.id, -adj.quantity, 'transfer_out', `REV-${adj.adjustmentNumber}`,
+          `Revert stock transfer ${adj.adjustmentNumber} — leaves ${toName || 'destination'}`,
+          toName, undefined, undefined, adj.id,
+        );
+        this.adjustItemStock(
+          item.id, adj.quantity, 'transfer_in', `REV-${adj.adjustmentNumber}`,
+          `Revert stock transfer ${adj.adjustmentNumber} — returns to ${fromName || 'source'}`,
+          fromName, undefined, inRate, adj.id,
+        );
+      } catch (e: any) {
+        console.error(`[DB] Failed to revert stock transfer ${adj.adjustmentNumber}:`, e.message);
+      }
+    } else if (item) {
       const revertDelta = adj.type === 'increase' ? -adj.quantity : adj.quantity;
       // Revert at the SAME storage the voucher touched: resolve the display name
       // live from the location FK so a rename never breaks the revert.
@@ -4379,7 +4538,11 @@ class ServerLocalDatabase {
     return event;
   }
 
-  /** Fit the unit onto a fleet vehicle (position + odometer at fitment). */
+  /** Fit the unit onto a fleet vehicle (position + odometer at fitment).
+   *  TYRE AWARENESS (client directive, 2026-11-17): a unit of a tyre-named
+   *  item MUST carry one of the 12 dumper positions (FL/FR/L1..L5/R1..R5)
+   *  and each position holds at most one fitted unit per vehicle; every
+   *  OTHER unit may ride a vehicle but never a position (it is stripped). */
   public deployInventoryUnit(id: string, data: any): InventoryUnit {
     const unit = this.data.inventoryUnits?.find((u) => u.id === id);
     if (!unit) throw new Error('Unit not found.');
@@ -4389,13 +4552,31 @@ class ServerLocalDatabase {
     const vehicle = this.requireRef(this.data.vehicles, vehicleId, 'Vehicle');
     if (!vehicle) throw new Error('Vehicle not found — pick it from the fleet master.');
 
+    const item = this.findItemRaw(unit.itemId);
+    const isTyre = isTyreItemName(item?.name);
+
+    let position: string | undefined;
+    if (isTyre) {
+      const raw = String(data.position || '').trim();
+      if (!raw) throw new Error(`Tyre ${unit.serialNumber} must be fitted at a wheel position — pick one of FL, FR, L1..L5, R1..R5.`);
+      position = raw.toUpperCase();
+      if (!TYRE_POSITIONS.includes(position as any)) {
+        throw new Error(`"${raw}" is not a valid tyre position — pick one of FL, FR, L1..L5, R1..R5.`);
+      }
+      const occupied = (this.data.inventoryUnits || []).find(
+        (u) => u.id !== id && u.vehicleId === vehicleId && (u.position || '').toUpperCase() === position,
+      );
+      if (occupied) {
+        throw new Error(`Position ${position} on ${vehicle.vehicleNo} is already occupied by unit ${occupied.serialNumber} — unload it first.`);
+      }
+    }
+
     const contextLocation = unit.locationId;
     unit.status = 'deployed';
     unit.vehicleId = vehicleId;
-    unit.position = data.position?.trim() || undefined;
+    unit.position = position ?? undefined;
     unit.fitOdometer = data.odometer !== undefined && data.odometer !== null && data.odometer !== '' ? Number(data.odometer) : unit.fitOdometer;
     unit.updatedAt = new Date().toISOString();
-    const item = this.findItemRaw(unit.itemId);
     this.postUnitEvent(unit, 'deployed', {
       notes: data.notes?.trim() || data.deployNotes?.trim() || `${item?.name || 'Unit'} ${unit.serialNumber} mounted on ${(vehicle as any).vehicleNo || 'vehicle'}${unit.position ? ` @ ${unit.position}` : ''}${unit.fitOdometer ? ` @ ${unit.fitOdometer} km` : ''}`,
       vehicleId,
@@ -4479,9 +4660,17 @@ class ServerLocalDatabase {
     if (!unit) throw new Error('Unit not found.');
     if (unit.status === 'sold') throw new Error(`Unit ${unit.serialNumber} was already sold.`);
     if (unit.status === 'scrapped') throw new Error(`Unit ${unit.serialNumber} is already scrapped.`);
+    // CLIENT DIRECTIVE (2026-11-17): an ASSIGNED unit (tyre fitted on a
+    // vehicle) cannot be scrapped — it must be unloaded to stock first.
+    if (unit.status === 'deployed') {
+      const veh = (this.data.vehicles || []).find((v: any) => v.id === unit.vehicleId);
+      throw new Error(`Unit ${unit.serialNumber} cannot be scrapped — it is still assigned to ${veh?.vehicleNo || 'its vehicle'}; unload it to spare stock first.`);
+    }
     const lastVehicleId = unit.vehicleId;
     const lastPosition = unit.position;
     unit.status = 'scrapped';
+    unit.vehicleId = undefined;
+    unit.position = undefined;
     unit.updatedAt = new Date().toISOString();
     const item = this.findItemRaw(unit.itemId);
     this.postUnitEvent(unit, 'scrapped', {
@@ -4491,6 +4680,26 @@ class ServerLocalDatabase {
       locationId: unit.locationId,
     });
     this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${unit.serialNumber} (${item?.name}) scrapped`);
+    this.save();
+    liveSyncInventoryUnit(unit);
+    return unit;
+  }
+
+  /** UN-SCRAP (2026-11-17) — bring a scrapped unit back to spare stock. The
+   *  reverse of scrapping; a SOLD unit can never come back (no unscrap path
+   *  once a unit carries a saleId). */
+  public unscrapInventoryUnit(id: string, data: any): InventoryUnit {
+    const unit = this.data.inventoryUnits?.find((u) => u.id === id);
+    if (!unit) throw new Error('Unit not found.');
+    if (unit.status !== 'scrapped') throw new Error(`Unit ${unit.serialNumber} cannot be unscrapped — it is not scrapped (current: ${unit.status.replace('_', ' ')}).`);
+    unit.status = 'in_stock';
+    unit.updatedAt = new Date().toISOString();
+    const item = this.findItemRaw(unit.itemId);
+    this.postUnitEvent(unit, 'unscrapped', {
+      notes: data?.notes?.trim() || `Unit ${unit.serialNumber} unscrapped — back to spare stock`,
+      locationId: unit.locationId,
+    });
+    this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${unit.serialNumber} (${item?.name}) unscrapped`);
     this.save();
     liveSyncInventoryUnit(unit);
     return unit;
@@ -4532,14 +4741,23 @@ class ServerLocalDatabase {
     for (const raw of unitIds) {
       const unit = this.data.inventoryUnits?.find((u) => u.id === raw);
       if (!unit) throw new Error('One of the units no longer exists.');
-      if (unit.status === 'sold') throw new Error(`Unit ${unit.serialNumber} is already sold.`);
-      if (unit.status === 'scrapped') throw new Error(`Unit ${unit.serialNumber} was scrapped — it cannot be sold.`);
+      if (unit.status === 'sold') throw new Error(`Unit ${unit.serialNumber} is already sold — a unit sale cannot be undone.`);
+      const item = this.findItemRaw(unit.itemId);
+      // CLIENT DIRECTIVE (2026-11-17): TYRES are sold only from SCRAP — an
+      // in-stock/fitted tyre cannot be sold directly. Every other serialised
+      // item keeps its pre-existing rule (in stock / deployed, never scrapped).
+      if (isTyreItemName(item?.name)) {
+        if (unit.status !== 'scrapped') {
+          throw new Error(`Tyre ${unit.serialNumber} cannot be sold while ${unit.status.replace('_', ' ')} — mark it scrapped first; only scrapped tyres can be sold.`);
+        }
+      } else if (unit.status === 'scrapped') {
+        throw new Error(`Unit ${unit.serialNumber} was scrapped — it cannot be sold.`);
+      }
       // Capture the last context (before mutation) so the event records it.
       const ctx = { vehicleId: unit.vehicleId, locationId: unit.locationId };
       unit.status = 'sold';
       unit.saleId = saleId;
       unit.updatedAt = new Date().toISOString();
-      const item = this.findItemRaw(unit.itemId);
       this.postUnitEvent(unit, 'sold', { notes: eventNotes, ...ctx, saleId });
       this.logAudit('UPDATE', 'INVENTORY_UNIT', unit.id, `Unit ${unit.serialNumber} (${item?.name}) sold via ${sale.saleNumber}`);
       liveSyncInventoryUnit(unit);
@@ -4941,6 +5159,10 @@ class ServerLocalDatabase {
       ...e,
       vehicleNo: this.data.vehicles.find((v) => v.id === e.vehicleId)?.vehicleNo || e.vehicleNo,
       accountName: this.getAccountById(e.accountId)?.name || e.accountName,
+      // Diesel issue location (live name — renames propagate; §2)
+      dieselLocationName: e.dieselLocationId
+        ? (this.data.locations || []).find((l) => l.id === e.dieselLocationId)?.name || e.dieselLocationName
+        : e.dieselLocationName,
     };
   }
 
@@ -4972,6 +5194,22 @@ class ServerLocalDatabase {
     this.logAudit('UPDATE', 'APP_DEFAULT', k, `Default ${k} set to ${value}`);
     this.save();
     liveSyncAppDefault(entry);
+    // DIESEL RATE PROPAGATION (2026-11-17, user directive): the global diesel
+    // rate IS the diesel item's procured cost — changing it re-prices every
+    // diesel item's purchasePrice (and its future opening facts).
+    if (k === 'diesel_rate' && Number(entry.value) > 0) {
+      const rate = Number(entry.value);
+      const dieselItems = (this.data.items || []).filter(
+        (i) => i.type !== 'asset' && i.isActive !== false && isDieselItemName(i.name),
+      );
+      for (const item of dieselItems) {
+        item.purchasePrice = rate;
+        item.updatedAt = now;
+        this.logAudit('UPDATE', 'ITEM', item.id, `Item ${item.name} procured cost re-priced to global diesel_rate ${rate}`);
+        liveSyncItem(item);
+      }
+      if (dieselItems.length > 0) this.save();
+    }
     return entry;
   }
 
@@ -4981,21 +5219,136 @@ class ServerLocalDatabase {
       .map((e) => this.hydrateVehicleExpenseEntry(e));
   }
 
+  // ---------- FLEET DIESEL FROM INVENTORY (2026-11-17 client directive) ----------
+  // A diesel fuel fill is ALWAYS issued from the diesel inventory item's
+  // per-location stock (never "direct"). The rate is STRICTLY the global
+  // diesel_rate app default (snapshotted per row) and the fill moves NO money
+  // — the cash left the account when the diesel was purchased, so a diesel
+  // row is a vehicle-cost record only (accountId '').
+
+  /** The ONE diesel stock item — an active non-asset item named with the
+   *  word "Diesel" (same word-match convention as tyres). */
+  private resolveDieselItem(): Item | undefined {
+    return this.data.items.find((i) => i.type !== 'asset' && i.isActive !== false && isDieselItemName(i.name));
+  }
+
+  /** The STRICT global ₹/litre — app_defaults 'diesel_rate'. */
+  private resolveDieselRate(): number {
+    const raw = Number(this.getAppDefault('diesel_rate'));
+    if (!(raw > 0)) throw new Error('The global diesel rate is required — set diesel_rate (₹/litre) in Settings → App Defaults first.');
+    return raw;
+  }
+
+  /** The per-location stock bucket of the diesel item, by location FK. */
+  private resolveDieselBucket(item: Item, locationId?: string): { bucket: ItemLocationStock; name: string } {
+    const master = locationId ? (this.data.locations || []).find((ml) => ml.id === locationId) : undefined;
+    const name = master?.name || (item.locations || []).find((l) => l.locationId === locationId)?.locationName || 'the chosen location';
+    const bucket = (item.locations || []).find(
+      (l) => (locationId && l.locationId === locationId) ||
+             (name && l.locationName?.trim().toLowerCase() === name.trim().toLowerCase()),
+    );
+    if (!bucket) throw new Error(`Diesel is not stocked at ${name} — receive diesel into that location first (not found).`);
+    return { bucket, name };
+  }
+
+  /** Guard: the bucket must hold at least the requested litres. */
+  private requireDieselStock(item: Item, locationId: string | undefined, litres: number): { bucket: ItemLocationStock; name: string } {
+    const { bucket, name } = this.resolveDieselBucket(item, locationId);
+    const available = Number(bucket.currentStock) || 0;
+    if (litres > available) {
+      throw new Error(`Diesel at ${name} is ${available.toLocaleString('en-IN')} L — cannot issue ${litres.toLocaleString('en-IN')} L. Receive the diesel inward first.`);
+    }
+    return { bucket, name };
+  }
+
+  /** Post the stock movement for a fill (+litres restore / −litres issue),
+   *  keyed on the expense entry (referenceId), at the entry's location. */
+  private postDieselMovement(entryId: string, itemId: string, locationId: string | undefined, litres: number, vehicleNo: string, notes?: string): void {
+    if (!(Math.abs(litres) > 0)) return;
+    const item = this.findItemRaw(itemId);
+    if (!item) throw new Error('The diesel inventory item no longer exists — the fill cannot be posted.');
+    const master = locationId ? (this.data.locations || []).find((ml) => ml.id === locationId) : undefined;
+    const locName = master?.name || (item.locations || []).find((l) => l.locationId === locationId)?.locationName;
+    const isRestore = litres > 0;
+    // Reversals re-enter stock at the ORIGINAL fill's FIFO rate (same
+    // pattern as dispatch_reversal), keyed on the original movement id.
+    let reverseRate: number | undefined;
+    let reversalKey: string | undefined;
+    if (isRestore) {
+      const original = (this.data.stockMovements || [])
+        .filter((m) => m.referenceId === entryId && m.type === 'diesel_issue')
+        .find((m) => !(this.data.stockMovements || []).some((r) => r.type === 'diesel_issue_reversal' && r.referenceNumber === m.id));
+      if (original) {
+        reverseRate = Number(original.rate) > 0 ? Number(original.rate) : undefined;
+        reversalKey = original.id;
+      }
+    }
+    // SIGN FIX (2026-11-17, user-reported "diesel add instead of deduct"):
+    // the callers already pass the SIGNED quantity — issue = NEGATIVE litres,
+    // restore = POSITIVE litres. Negating again here flipped every fill into
+    // an inward movement (+litres) — diesel stock GREW instead of dropping.
+    // adjustItemStock's delta is simply `litres` as received.
+    this.adjustItemStock(
+      itemId,
+      litres,
+      isRestore ? 'diesel_issue_reversal' : 'diesel_issue',
+      reversalKey || entryId,
+      notes?.trim() || (isRestore
+        ? `Diesel issue reversal — ${vehicleNo}${litres ? ` ${litres.toFixed(2)} L re-entered` : ''}`
+        : `Diesel issue — ${vehicleNo}${litres ? ` ${Math.abs(litres).toFixed(2)} L` : ''}`),
+      locName,
+      undefined,
+      reverseRate,
+      entryId,
+    );
+  }
+
   public addVehicleExpenseEntry(data: Omit<VehicleExpenseEntry, 'id' | 'createdAt'>): VehicleExpenseEntry {
     if (!this.data.vehicleExpenseEntries) this.data.vehicleExpenseEntries = [];
     // documentIds ride the create payload (staged uploads on the NEW-expense
     // flow) — never persisted on the row; link below.
     const createDocIds = this.extractDocumentIds(data as any);
     delete (data as any).documentIds;
+    const isDieselFill = data.entryType === 'diesel' && Boolean(data.dieselLocationId);
+    if (data.entryType === 'diesel' && !data.dieselLocationId) {
+      throw new Error('A diesel fill must pick the inventory location it is issued from — diesel is always taken from stock.');
+    }
+    const dieselLitres = isDieselFill ? Number(data.litres) || 0 : 0;
+    const dieselItem = isDieselFill ? this.resolveDieselItem() : undefined;
+    if (isDieselFill && !dieselItem) {
+      throw new Error('No diesel item exists in inventory — create a product item named e.g. "Diesel" and receive its stock first.');
+    }
+    if (isDieselFill && dieselItem) {
+      if (!(dieselLitres > 0)) throw new Error('The litres filled are required to issue diesel from stock.');
+      this.requireDieselStock(dieselItem, data.dieselLocationId, dieselLitres);
+    }
+    // Diesel rows carry NO account debit (an internal issue from stock) and
+    // the STRICT global rate; generic expenses keep the entered account.
+    const globalRate = isDieselFill ? this.resolveDieselRate() : Number(data.ratePerLitre) || undefined;
     const entry: VehicleExpenseEntry = {
       ...data,
       id: `vxe-${this.nextLedgerMs()}`,
+      accountId: isDieselFill ? '' : data.accountId,
+      ...(isDieselFill && dieselItem
+        ? {
+            dieselItemId: dieselItem.id,
+            ratePerLitre: globalRate,
+            amount: Math.round(dieselLitres * (globalRate || 0) * 100) / 100,
+          }
+        : {}),
       createdAt: new Date().toISOString(),
     };
+    if (isDieselFill && dieselItem) {
+      // Stock first (adjustItemStock saves + posts the ledger row) — a failed
+      // guard above already aborted before this point; the entry only lands
+      // once the movement exists.
+      this.postDieselMovement(entry.id, dieselItem.id, data.dieselLocationId, -dieselLitres, this.data.vehicles.find((v) => v.id === data.vehicleId)?.vehicleNo || 'vehicle');
+    }
     this.data.vehicleExpenseEntries.unshift(entry);
-    // The expense amount leaves the linked account's balance (balance stream).
-    this.recalculateAccountBalance(entry.accountId);
-    this.logAudit('CREATE', 'VEHICLE_EXPENSE', entry.id, `${entry.entryType === 'diesel' ? ' Diesel' : 'Vehicle'} expense ${this.formatRupee(Number(data.amount) || 0)} for ${this.data.vehicles.find((v) => v.id === data.vehicleId)?.vehicleNo || data.vehicleId} from ${this.getAccountById(data.accountId)?.name || data.accountId}`);
+    // The expense amount leaves the linked account's balance (balance stream);
+    // a diesel issue moves no money — guard the empty accountId.
+    if (entry.accountId) this.recalculateAccountBalance(entry.accountId);
+    this.logAudit('CREATE', 'VEHICLE_EXPENSE', entry.id, `${entry.entryType === 'diesel' ? 'Diesel fill' + (entry.dieselItemId ? ' issued from stock' : '') : 'Vehicle'} expense ${this.formatRupee(Number(entry.amount) || 0)} for ${this.data.vehicles.find((v) => v.id === data.vehicleId)?.vehicleNo || data.vehicleId}${entry.accountId ? ` from ${this.getAccountById(entry.accountId)?.name || data.accountId}` : ' (no account debit)'}`);
     this.save();
     liveSyncVehicleExpenseEntry(entry);
     if (createDocIds.length > 0) this.linkExpenseDocuments(entry.id, createDocIds);
@@ -5009,14 +5362,89 @@ class ServerLocalDatabase {
     // edit-mode uploads link immediately; documentIds never persist on the row
     const editDocIds = this.extractDocumentIds(updates as any);
     delete (updates as any).documentIds;
-    const updated: VehicleExpenseEntry = { ...prev, ...updates, createdAt: prev.createdAt };
+    const nextLitres = Number(updates.litres ?? prev.litres) || 0;
+
+    // DIESEL ↔ STOCK reconciliation (2026-11-17): stock-backed diesel rows
+    // re-issue the litres delta; a row edited OFF stock restores its litres;
+    // a legacy (pre-inventory) diesel row adopting a location converts to a
+    // stock-backed fill (full litres issue, account debit released).
+    let stockRestore: { itemId: string; locationId: string | undefined; litres: number } | undefined;
+    let stockIssue: { itemId: string; locationId: string | undefined; litres: number } | undefined;
+    const wasStockBacked = Boolean(prev.dieselItemId);
+    const becomesStockBacked =
+      updates.entryType === 'diesel' && Boolean(updates.dieselLocationId ?? prev.dieselLocationId);
+    const nextLocationId = updates.dieselLocationId ?? prev.dieselLocationId;
+
+    if (wasStockBacked && updates.entryType === 'expense') {
+      // Diesel row converted to a generic expense — the fill is returned to stock.
+      stockRestore = { itemId: prev.dieselItemId!, locationId: prev.dieselLocationId, litres: prev.litres || 0 };
+    } else if (wasStockBacked && updates.entryType !== 'expense' && (!updates.dieselLocationId && !prev.dieselLocationId)) {
+      // Stock backing removed without a new location — restore the litres.
+      stockRestore = { itemId: prev.dieselItemId!, locationId: prev.dieselLocationId, litres: prev.litres || 0 };
+    } else if (updates.entryType === 'diesel' || (!updates.entryType && prev.entryType === 'diesel')) {
+      if (wasStockBacked && nextLocationId && nextLitres > 0) {
+        if (nextLocationId !== prev.dieselLocationId) {
+          // Location move: restore at the OLD bucket, deduct the full fill at the NEW one.
+          stockRestore = { itemId: prev.dieselItemId!, locationId: prev.dieselLocationId, litres: prev.litres || 0 };
+          stockIssue = { itemId: prev.dieselItemId!, locationId: nextLocationId, litres: nextLitres };
+        } else if (nextLitres !== (prev.litres || 0)) {
+          // Same bucket: edit-by-delta (either direction, guarded above for +).
+          const delta = nextLitres - (prev.litres || 0);
+          if (delta > 0) stockIssue = { itemId: prev.dieselItemId!, locationId: nextLocationId, litres: delta };
+          else stockRestore = { itemId: prev.dieselItemId!, locationId: nextLocationId, litres: -delta };
+        }
+      } else if (!wasStockBacked && updates.entryType === 'diesel' && updates.dieselLocationId) {
+        // A legacy direct fill adopted a location — deduct the whole fill.
+        stockIssue = { itemId: updates.dieselItemId ?? prev.dieselItemId, locationId: updates.dieselLocationId, litres: nextLitres };
+      }
+    }
+
+    // Stock guards BEFORE any mutation: an issue needs the litres available
+    // at its bucket (a restore only adds back, so it needs no guard).
+    if (stockIssue) {
+      const issueItem = this.findItemRaw(stockIssue.itemId);
+      if (!issueItem) throw new Error('The diesel inventory item no longer exists — the fill cannot be edited.');
+      this.requireDieselStock(issueItem, stockIssue.locationId, stockIssue.litres);
+    }
+
+    // STRICT global rate on EVERY diesel row (entered or edited, stock-backed
+    // or legacy); the amount re-derives: amount = litres × rate (the operator
+    // never prices a fill).
+    const isDieselRow = updates.entryType === 'diesel' || (!updates.entryType && prev.entryType === 'diesel');
+    const repriceDiesel = isDieselRow;
+    const globalRate = repriceDiesel ? this.resolveDieselRate() : undefined;
+
+    const updated: VehicleExpenseEntry = {
+      ...prev,
+      ...updates,
+      createdAt: prev.createdAt,
+      ...(isDieselRow
+        ? {
+            ...(updates.entryType === 'expense'
+              ? {}
+              : { ratePerLitre: globalRate, amount: Math.round(nextLitres * (globalRate || 0) * 100) / 100 }),
+            accountId: updates.entryType === 'diesel' ? '' : (updates.entryType === 'expense' ? (updates.accountId ?? prev.accountId) : prev.accountId),
+          }
+        : {}),
+    };
     this.data.vehicleExpenseEntries[idx] = updated;
-    // Edit-by-delta (vehicle/account/amount change → balance streams)
-    if (prev.accountId !== updated.accountId) {
+
+    // Post the settled stock effects (guards already passed).
+    if (stockRestore) {
+      this.postDieselMovement(id, stockRestore.itemId, stockRestore.locationId, stockRestore.litres, this.data.vehicles.find((v) => v.id === updated.vehicleId)?.vehicleNo || 'vehicle', 'Diesel fill edited — litres returned to stock');
+    }
+    if (stockIssue) {
+      this.postDieselMovement(id, stockIssue.itemId, stockIssue.locationId, -stockIssue.litres, this.data.vehicles.find((v) => v.id === updated.vehicleId)?.vehicleNo || 'vehicle', 'Diesel fill edited — litres issued from stock');
+    }
+
+    // Edit-by-delta (vehicle/account/amount change → balance streams); a
+    // diesel issue moves no money, so an accountId that emptied releases the
+    // old debit instead of debiting ''.
+    if (prev.accountId && prev.accountId !== updated.accountId) {
       this.recalculateAccountBalance(prev.accountId);
     }
-    this.recalculateAccountBalance(updated.accountId);
-    this.logAudit('UPDATE', 'VEHICLE_EXPENSE', id, `Edited vehicle expense entry (amount ${this.formatRupee(Number(prev.amount) || 0)} → ${this.formatRupee(Number(updated.amount) || 0)})`);
+    if (updated.accountId) this.recalculateAccountBalance(updated.accountId);
+    this.logAudit('UPDATE', 'VEHICLE_EXPENSE', id, `Edited vehicle expense entry (amount ${this.formatRupee(Number(prev.amount) || 0)} → ${this.formatRupee(Number(updated.amount) || 0)})${stockRestore || stockIssue ? ' with a diesel stock effect' : ''}`);
     this.save();
     liveSyncVehicleExpenseEntry(updated);
     if (editDocIds.length > 0) this.linkExpenseDocuments(id, editDocIds);
@@ -5028,10 +5456,16 @@ class ServerLocalDatabase {
     if (idx === -1) return false;
     const removed = this.data.vehicleExpenseEntries[idx];
     this.data.vehicleExpenseEntries.splice(idx, 1);
+    // STOCK-BACKED DIESEL: removing the fill returns its litres to the
+    // location bucket it was issued from (with the ledger reversal keyed on
+    // the entry).
+    if (removed.dieselItemId && (removed.litres || 0) > 0) {
+      this.postDieselMovement(id, removed.dieselItemId, removed.dieselLocationId, removed.litres!, this.data.vehicles.find((v) => v.id === removed.vehicleId)?.vehicleNo || 'vehicle', 'Diesel fill deleted — litres returned to stock');
+    }
     // Removing the entry reverses its debit from the account balance.
-    this.recalculateAccountBalance(removed.accountId);
+    if (removed.accountId) this.recalculateAccountBalance(removed.accountId);
     this.detachExpenseDocuments(id);
-    this.logAudit('DELETE', 'VEHICLE_EXPENSE', id, `Deleted vehicle expense entry (reverses ${this.formatRupee(Number(removed.amount) || 0)} on ${this.getAccountById(removed.accountId)?.name || removed.accountId})`);
+    this.logAudit('DELETE', 'VEHICLE_EXPENSE', id, `Deleted vehicle expense entry${removed.dieselItemId ? ' (diesel litres returned to stock)' : ''}${removed.accountId ? ` (reverses ${this.formatRupee(Number(removed.amount) || 0)} on ${this.getAccountById(removed.accountId)?.name || removed.accountId})` : ''}`);
     this.save();
     liveSyncVehicleExpenseEntry(removed, true);
     return true;
@@ -5279,36 +5713,10 @@ class ServerLocalDatabase {
     return true;
   }
 
-  public getTyres(): Tyre[] {
-    return this.data.tyres;
-  }
-
-  public createTyre(data: Omit<Tyre, 'id' | 'createdAt'>): Tyre {
-    const newTyre: Tyre = { ...data, id: `ty-${Date.now()}`, createdAt: new Date().toISOString() };
-    this.data.tyres.unshift(newTyre);
-    this.save();
-    liveSyncTyre(newTyre);
-    return newTyre;
-  }
-
-  public updateTyre(id: string, updates: Partial<Tyre>): Tyre {
-    const idx = this.data.tyres.findIndex((t) => t.id === id);
-    if (idx === -1) throw new Error(`Tyre ${id} not found.`);
-    this.data.tyres[idx] = { ...this.data.tyres[idx], ...updates };
-    this.save();
-    liveSyncTyre(this.data.tyres[idx]);
-    return this.data.tyres[idx];
-  }
-
-  public deleteTyre(id: string): boolean {
-    const idx = this.data.tyres.findIndex((t) => t.id === id);
-    if (idx === -1) return false;
-    const tyr = this.data.tyres[idx];
-    this.data.tyres.splice(idx, 1);
-    this.save();
-    liveSyncTyre(tyr, true);
-    return true;
-  }
+  // --- TYRE STANDALONE TABLE RETIRED (2026-11-17) — tyre serials live in
+  // inventory_units (deployInventoryUnit enforces the 12-position rule); the
+  // old this.data.tyres mirror + CRUD is gone. The Azure `tyres` table itself
+  // stays on the server, unwritten ("legacy rows ignored" per the client).
 
   // --- EMPLOYEES & PAYROLL ---
   public getEmployees(): Employee[] {

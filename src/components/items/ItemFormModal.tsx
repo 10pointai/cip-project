@@ -10,9 +10,23 @@ import {
   Plus,
   Lock,
 } from 'lucide-react';
-import { Item, ItemCategory, ItemUnit, ItemLocation, ItemType } from '../../types';
+import { Item, ItemCategory, ItemUnit, ItemLocation, ItemType, isDieselItemName } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { EntityDocumentsSection, StagedDocument } from '../common/EntityDocumentsSection';
+
+/** GST slabs (CGST + SGST halves shown per slab) */
+const GST_RATES = [0, 5, 12, 18, 28];
+
+/** One storage-location row of the product form (buckets + opening facts) */
+interface FormLocationEntry {
+  locationId?: string;
+  locationName: string;
+  openingStock: string;
+  minStockLevel: string;
+  /** LIVE per-bucket stock (edit mode) — never edited in this form; stock
+      moves belong to the movements ledger / Stock Adjustment modal. */
+  liveStock?: number;
+}
 
 interface ItemFormModalProps {
   initialItem?: Item | null;
@@ -34,17 +48,27 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   initialItem,
   categories,
   units,
+  locations = [],
   defaultType,
   currencySymbol = '₹',
   onClose,
   onOpenCategories,
   onOpenUnits,
+  onOpenLocations,
 }) => {
   // 2026-11-16: type is NOT chosen in this form anymore — the tab selector is
   // gone. The type comes from WHERE the form was opened: 'product' from Basic
   // Inventory (default), 'asset' from Serialized Inventory; an EXISTING item
   // keeps its stored type without any way to convert it.
-  const type: ItemType = initialItem?.type || defaultType || 'product';
+  // 2026-11-17 REPAIR: rows saved during the onClick={handleOpenAdd} bug
+  // carry a CLICK-EVENT object as their stored type — only a REAL string
+  // ('product'/'service'/'asset') may flow through; anything else falls back
+  // to the intended default so every corrupted item still opens as Basic.
+  const isStoredTypeValid =
+    initialItem?.type === 'product' || initialItem?.type === 'service' || initialItem?.type === 'asset';
+  const type: ItemType = initialItem
+    ? (isStoredTypeValid ? initialItem.type : (defaultType || 'product'))
+    : (defaultType || 'product');
   const [name, setName] = useState(initialItem?.name || '');
   const [code, setCode] = useState(initialItem?.code || '');
   const [categoryId, setCategoryId] = useState(
@@ -67,6 +91,98 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   // documentIds ride the create payload); an existing item links each
   // upload IMMEDIATELY (section runs in entityId mode).
   const [stagedItemDocs, setStagedItemDocs] = useState<StagedDocument[]>([]);
+
+  // ===== BASIC (PRODUCT) ONLY — Pricing & GST + Storage Locations =====
+  // RESTORED (2026-11-17, user directive): the 2026-11-16 identification-only
+  // form hid these from every item; the user wants them on BASIC inventory
+  // items and still hidden on SERIALIZED (asset) items. Trackable items keep
+  // their pricing on the SALE LINES and register units instead.
+  const [salePrice, setSalePrice] = useState(initialItem ? String(initialItem.salePrice ?? 0) : '0');
+  const [purchasePrice, setPurchasePrice] = useState(
+    initialItem && initialItem.purchasePrice !== undefined ? String(initialItem.purchasePrice) : ''
+  );
+  const [taxRateGst, setTaxRateGst] = useState<number>(initialItem?.taxRateGst ?? 18);
+
+  const getInitialLocations = (): FormLocationEntry[] => {
+    if (initialItem?.locations && initialItem.locations.length > 0) {
+      return initialItem.locations.map((l) => ({
+        locationId: l.locationId || undefined,
+        locationName: l.locationName,
+        openingStock: l.openingStock !== undefined ? String(l.openingStock) : '0',
+        minStockLevel: l.minStockLevel !== undefined ? String(l.minStockLevel) : '0',
+        liveStock: Number(l.currentStock) || 0,
+      }));
+    }
+    return [];
+  };
+  const [formLocations, setFormLocations] = useState<FormLocationEntry[]>(getInitialLocations);
+  const [openingStockPrice, setOpeningStockPrice] = useState(
+    initialItem && initialItem.openingStockPrice !== undefined
+      ? String(initialItem.openingStockPrice)
+      : (initialItem?.purchasePrice ? String(initialItem.purchasePrice) : '')
+  );
+  const [openingStockDate, setOpeningStockDate] = useState(
+    initialItem?.openingStockDate || new Date().toISOString().split('T')[0]
+  );
+
+  const isProduct = type === 'product';
+
+  // The STRICT global diesel rate (app_defaults 'diesel_rate') — the item
+  // form reads it for the diesel pricing lock + opening valuation.
+  const dieselRateDefault = (() => {
+    try { return localDb.getAppDefault('diesel_rate'); } catch { return undefined; }
+  })();
+  const dieselRateNum = Number(dieselRateDefault) > 0 ? Number(dieselRateDefault) : 0;
+
+  // Add / remove location rows — locations must exist in the master first
+  const handleAddLocationRow = () => {
+    if (locations.length === 0) {
+      if (onOpenLocations) onOpenLocations();
+      return;
+    }
+    const usedIds = new Set(formLocations.map((l) => l.locationId).filter(Boolean));
+    const nextAvailable = locations.find((l) => !usedIds.has(l.id)) || locations[0];
+    setFormLocations([
+      ...formLocations,
+      {
+        locationId: nextAvailable.id,
+        locationName: nextAvailable.name,
+        openingStock: '0',
+        minStockLevel: '0',
+        liveStock: 0,
+      },
+    ]);
+  };
+
+  // Opening valuation preview (create path: opening stock × opening price)
+  const totalOpeningStock = formLocations.reduce((sum, l) => sum + (parseFloat(l.openingStock) || 0), 0);
+  const totalMinStock = formLocations.reduce((sum, l) => sum + (parseFloat(l.minStockLevel) || 0), 0);
+  const openingValuation = totalOpeningStock * (parseFloat(openingStockPrice) || 0);
+  // Edit path: the buckets keep their LIVE stock — the item total never
+  // changes through this form (stock movements own that).
+  const totalLiveStock = formLocations.reduce((sum, l) => sum + (Number(l.liveStock ?? 0)), 0);
+
+  // DIESEL PRICING LOCK (2026-11-17, user directive): the diesel item has NO
+  // procured cost of its own — its purchase/opening cost is FIXED at the
+  // global diesel_rate (app_defaults, Settings → Defaults). The fields lock
+  // as soon as the (new) item's name carries the word "Diesel".
+  const isDieselProduct = isProduct && isDieselItemName(name);
+  const dieselRateStr = dieselRateNum > 0 ? String(dieselRateNum) : '';
+
+  // CREATE convenience: a product row starts with the first master location
+  // (opening stock zero — receive stock via GRN / adjustments afterwards).
+  React.useEffect(() => {
+    if (isProduct && !initialItem && formLocations.length === 0 && locations.length > 0) {
+      setFormLocations([{
+        locationId: locations[0].id,
+        locationName: locations[0].name,
+        openingStock: '0',
+        minStockLevel: '0',
+        liveStock: 0,
+      }]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locations, isProduct]);
 
   // DYNAMIC ATTRIBUTE KEYS (serialized inventory, 2026-11-16): a trackable
   // item declares WHICH per-unit fields exist (brand, size, volts...). Draft
@@ -131,11 +247,45 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
     }
 
     try {
-      // 2026-11-16: identification-only payload. NO pricing, GST slab,
-      // locations, stock aggregates, technical specs or remarks are sent —
-      // an EXISTING item keeps every stored value (updateItem merges, and the
-      // server recalculates nothing it was not given); a NEW item is born
-      // unplaced with zero stock.
+      // BASIC (PRODUCT) FACTS (2026-11-17 restore — user directive): pricing,
+      // GST slab + storage buckets ride the payload for products on BOTH
+      // create and edit; serialised items keep their identification-only
+      // payload (pricing lives on sale lines, stock lives in unit registers).
+      const productFacts = isProduct ? {
+        // DIESEL PRICING LOCK: purchase/opening cost is ALWAYS the global
+        // diesel rate (snapshot per save) — never user-entered.
+        salePrice: Number(salePrice) || 0,
+        ...(isDieselProduct
+          ? (dieselRateNum > 0 ? { purchasePrice: dieselRateNum } : { purchasePrice: Number(purchasePrice) || 0 })
+          : (purchasePrice !== '' ? { purchasePrice: Number(purchasePrice) || 0 } : {})),
+        taxRateGst,
+        locations: formLocations
+          .filter((l) => l.locationName)
+          .map((l) => ({
+            locationId: l.locationId || undefined,
+            locationName: l.locationName,
+            // EDIT keeps every bucket's LIVE stock (the form never moves stock);
+            // CREATE derives the bucket from its opening allocation.
+            currentStock: initialItem ? Number(l.liveStock ?? 0) : (parseFloat(l.openingStock) || 0),
+            openingStock: parseFloat(l.openingStock) || 0,
+            minStockLevel: parseFloat(l.minStockLevel) || 0,
+          })),
+        currentStock: initialItem ? totalLiveStock : totalOpeningStock,
+        openingStock: totalOpeningStock,
+        minStockLevel: totalMinStock,
+        stockLocations: formLocations.filter((l) => l.locationName).map((l) => l.locationName),
+        stockLocation: formLocations.filter((l) => l.locationName).map((l) => l.locationName).join(', '),
+        ...(initialItem
+          ? {}
+          : {
+              openingStockPrice: isDieselProduct && dieselRateNum > 0 ? dieselRateNum : (parseFloat(openingStockPrice) || undefined),
+              openingStockDate: openingStockDate || undefined,
+              ...(isDieselProduct
+                ? (dieselRateNum > 0 ? { purchasePrice: dieselRateNum } : {})
+                : (parseFloat(openingStockPrice) > 0 ? { purchasePrice: parseFloat(openingStockPrice) } : {})),
+            }),
+      } : {};
+
       if (initialItem) {
         localDb.updateItem(initialItem.id, {
           name: name.trim(),
@@ -146,6 +296,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
           unit: unit.trim().toUpperCase(),
           hsnSacCode: hsnSacCode.trim(),
           isActive,
+          ...productFacts,
           // SERIALISED item: the (possibly edited) per-unit key list — values
           // already stored on units survive under keys that stay declared
           ...(type === 'asset' ? {
@@ -171,6 +322,7 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
           unit: unit.trim().toUpperCase(),
           hsnSacCode: hsnSacCode.trim(),
           isActive,
+          ...productFacts,
           // SERIALISED item: the per-unit attribute keys it tracks
           ...(type === 'asset' ? {
             attributes: attrKeys
@@ -371,15 +523,230 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
             </div>
           </div>
 
-          {/* PRICING & GST TAX RATES + ASSIGNED STOCK LOCATIONS + TECHNICAL
-              SPECS + REMARKS ALL REMOVED (2026-11-16): nothing per-item-specific
-              (price, slab, placement, opening stock, specs, remarks) is captured
-              on the CATALOG MASTER anymore — sale/purchase lines carry their own
-              rate and slab, and stock placement belongs to the physical
-              (serialized) stock, not the catalog row.
-              EXISTING items keep their stored values untouched through edits
-              (the update omits these fields); NEW items are born unplaced with
-              zero stock and grow location data through GRN / the register. */}
+          {/* ===== BASIC (PRODUCT) ONLY, restored 2026-11-17 (user directive):
+              pricing + GST slab, and the storage locations + opening facts.
+              Hidden on SERIALIZED items by design (pricing lives on sale
+              lines, stock lives in the unit register). ===== */}
+          {isProduct && (
+            <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3">
+              <h3 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-2">
+                <Package className="w-4 h-4 text-[var(--color-primary)]" />
+                Pricing &amp; GST Tax Rates
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Sale Price ({currencySymbol})</label>
+                  <input
+                    type="number"
+                    step="any"
+                    min="0"
+                    placeholder="e.g. 99.89"
+                    value={salePrice}
+                    onChange={(e) => setSalePrice(e.target.value)}
+                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Purchase Price ({currencySymbol})</label>
+                  {isDieselProduct ? (
+                    <>
+                      <input
+                        type="text"
+                        readOnly
+                        value={dieselRateStr ? `${currencySymbol}${dieselRateNum.toLocaleString('en-IN')} / ${unit || 'L'} (fixed)` : 'Set diesel_rate in Settings'}
+                        title={dieselRateStr ? 'Diesel procures at the global diesel rate — edit diesel_rate in Settings → Defaults' : 'No global diesel rate set — set diesel_rate in Settings → Defaults'}
+                        className={`w-full px-4 py-2 border rounded-full text-xs font-mono font-bold ${dieselRateStr ? 'bg-[var(--color-surface-container-highest)] border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)]' : 'bg-[var(--color-error-container)]/40 border-[var(--color-error)]/40 text-[var(--color-on-surface-variant)]'} cursor-not-allowed focus:outline-none`}
+                      />
+                      <p className="text-[10px] font-semibold text-[var(--color-on-surface-variant)] mt-1">
+                        Diesel has no procured cost — it prices at the global diesel rate.
+                      </p>
+                    </>
+                  ) : (
+                    <input
+                      type="number"
+                      step="any"
+                      min="0"
+                      placeholder="e.g. 85 per L (optional)"
+                      value={purchasePrice}
+                      onChange={(e) => setPurchasePrice(e.target.value)}
+                      className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                    />
+                  )}
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">GST Tax Slab (%) *</label>
+                  <select
+                    value={taxRateGst}
+                    onChange={(e) => setTaxRateGst(Number(e.target.value))}
+                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                  >
+                    {GST_RATES.map((rate) => (
+                      <option key={rate} value={rate}>
+                        {rate}% {rate === 0 ? '(Exempt / Nil VAT)' : `GST (${rate / 2}% CGST + ${rate / 2}% SGST)`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {isProduct && (
+            <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-2">
+                  <FileText className="w-4 h-4 text-[var(--color-primary)]" />
+                  Storage Locations &amp; Opening Stock Allocation
+                </h3>
+                <button
+                  type="button"
+                  onClick={handleAddLocationRow}
+                  className="text-[11px] font-bold text-[var(--color-primary)] hover:underline flex items-center gap-1"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Add Location
+                </button>
+              </div>
+              {formLocations.length === 0 ? (
+                <p className="text-[11px] text-[var(--color-on-surface-variant)]">
+                  No storage location assigned yet — add one to place this item's stock.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {formLocations.map((l, idx) => (
+                    <div key={idx} className="flex items-end gap-2">
+                      <div className="flex-1">
+                        <label className="block text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase mb-0.5">Location</label>
+                        <select
+                          value={l.locationId || ''}
+                          onChange={(e) => {
+                            const loc = locations.find((x) => x.id === e.target.value);
+                            const next = [...formLocations];
+                            next[idx] = { ...l, locationId: loc?.id, locationName: loc?.name || '' };
+                            setFormLocations(next);
+                          }}
+                          className="w-full px-3 py-1.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
+                        >
+                          <option value="">-- Choose location --</option>
+                          {locations.map((loc) => (
+                            <option
+                              key={loc.id}
+                              value={loc.id}
+                              disabled={formLocations.some((o, oi) => oi !== idx && o.locationId === loc.id)}
+                            >
+                              {loc.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="w-28">
+                        <label className="block text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase mb-0.5">
+                          {initialItem ? `Current (${(l.liveStock ?? 0)} L)` : 'Opening Stock'}
+                        </label>
+                        {initialItem ? (
+                          <input
+                            type="number"
+                            disabled
+                            value={l.liveStock ?? 0}
+                            title="Stock moves via GRN / Stock Adjustment — the item form never moves stock"
+                            className="w-full px-3 py-1.5 bg-[var(--color-surface-container-highest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-mono font-bold text-[var(--color-on-surface-variant)] opacity-70 cursor-not-allowed"
+                          />
+                        ) : (
+                          <input
+                            type="number"
+                            step="any"
+                            min="0"
+                            value={l.openingStock}
+                            onChange={(e) => {
+                              const next = [...formLocations];
+                              next[idx] = { ...l, openingStock: e.target.value };
+                              setFormLocations(next);
+                            }}
+                            className="w-full px-3 py-1.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-mono font-bold text-[var(--color-on-surface)] focus:outline-none"
+                          />
+                        )}
+                      </div>
+                      <div className="w-28">
+                        <label className="block text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase mb-0.5">Min / Safety</label>
+                        <input
+                          type="number"
+                          step="any"
+                          min="0"
+                          value={l.minStockLevel}
+                          onChange={(e) => {
+                            const next = [...formLocations];
+                            next[idx] = { ...l, minStockLevel: e.target.value };
+                            setFormLocations(next);
+                          }}
+                          className="w-full px-3 py-1.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-mono font-bold text-[var(--color-on-surface)] focus:outline-none"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setFormLocations(formLocations.filter((_, fi) => fi !== idx))}
+                        className="p-1.5 text-[var(--color-outline)] hover:text-[var(--color-error)] hover:bg-[var(--color-error-container)]/40 rounded-full transition"
+                        title="Remove this location row"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* Opening facts (create) + stock placement summary (edit) */}
+              {initialItem ? (
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-semibold text-[var(--color-on-surface-variant)]">
+                  <span>Item total: <b className="text-[var(--color-on-surface)] font-mono">{totalLiveStock.toLocaleString('en-IN')}</b></span>
+                  <span>Opening: <b className="text-[var(--color-on-surface)] font-mono">{totalOpeningStock.toLocaleString('en-IN')}</b></span>
+                  <span>Min/Safety: <b className="text-[var(--color-on-surface)] font-mono">{totalMinStock.toLocaleString('en-IN')}</b></span>
+                  <span className="text-[10px] text-[var(--color-on-surface-variant)]">Stock changes go through GRN, Stock Adjustment or dispatch — never through this form.</span>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Opening Stock Cost ({currencySymbol})</label>
+                    {isDieselProduct ? (
+                      <>
+                        <input
+                          type="text"
+                          readOnly
+                          value={dieselRateStr ? `${currencySymbol}${dieselRateNum.toLocaleString('en-IN')} / ${unit || 'L'} (fixed)` : 'Set diesel_rate in Settings'}
+                          className={`w-full px-4 py-2 border rounded-full text-xs font-mono font-bold ${dieselRateStr ? 'bg-[var(--color-surface-container-highest)] border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)]' : 'bg-[var(--color-error-container)]/40 border-[var(--color-error)]/40 text-[var(--color-on-surface-variant)]'} cursor-not-allowed focus:outline-none`}
+                        />
+                        <p className="text-[10px] font-semibold text-[var(--color-on-surface-variant)] mt-1">
+                          Opening stock values diesel at the global diesel rate.
+                        </p>
+                      </>
+                    ) : (
+                      <input
+                        type="number"
+                        step="any"
+                        min="0"
+                        placeholder="e.g. 85 per unit"
+                        value={openingStockPrice}
+                        onChange={(e) => setOpeningStockPrice(e.target.value)}
+                        className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none"
+                      />
+                    )}
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Opening Stock Date</label>
+                    <input
+                      type="date"
+                      value={openingStockDate}
+                      onChange={(e) => setOpeningStockDate(e.target.value)}
+                      className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
+                    />
+                  </div>
+                  <p className="sm:col-span-2 text-[11px] font-semibold text-[var(--color-on-surface-variant)]">
+                    {totalOpeningStock > 0
+                      ? `Opening valuation: ${totalOpeningStock.toLocaleString('en-IN')} × ${currencySymbol}${(isDieselProduct && dieselRateNum > 0 ? dieselRateNum : (parseFloat(openingStockPrice) || 0)).toLocaleString('en-IN')} = ${currencySymbol}${(totalOpeningStock * (isDieselProduct && dieselRateNum > 0 ? dieselRateNum : (parseFloat(openingStockPrice) || 0))).toLocaleString('en-IN')}`
+                      : 'Opening stock optional — receive stock later via GRN or Stock Adjustment.'}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* DYNAMIC ATTRIBUTE KEYS (trackable items; 2026-11-16): the per-unit
               fields EVERY entry of this serialized item will carry (fixed ones
               — serial, supplier, purchase date, cost — stay columns

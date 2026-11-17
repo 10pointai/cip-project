@@ -1,6 +1,6 @@
 import { executeMysqlQuery, executeMysqlOne } from './queryClient';
 import { isMysqlConfigured } from './connection';
-import { Item, ItemAttributeKey, ItemCategory, ItemUnit, ItemLocation, ProductionBatchRun, BatchMix, Vehicle, Driver, TripSlip, Tyre, VehicleExpenseEntry, ItemStockAdjustment, StockMovementLog, Sale, Purchase, SaleInvoice, InventoryUnit, InventoryUnitEvent, InventoryUnitStatus, InventoryUnitEventType } from '../../src/types';
+import { Item, ItemAttributeKey, ItemCategory, ItemUnit, ItemLocation, ProductionBatchRun, BatchMix, Vehicle, Driver, TripSlip, VehicleExpenseEntry, ItemStockAdjustment, StockMovementLog, Sale, Purchase, SaleInvoice, InventoryUnit, InventoryUnitEvent, InventoryUnitStatus, InventoryUnitEventType } from '../../src/types';
 import { serverDb } from '../db';
 import { computeItemValuation } from '../inventoryValuation';
 import { resolveUnitIdByCode, liveSyncTripSlip } from './azureSync';
@@ -281,11 +281,14 @@ export async function fetchStockAdjustmentsDirect(): Promise<ItemStockAdjustment
   const rows = await executeMysqlQuery(
     `SELECT a.*, i.name AS item_name, i.code AS item_code,
             u.code AS item_unit_display, u.name AS item_unit_name,
-            loc.name AS location_display
+            loc.name AS location_display,
+            floc.name AS from_location_display, tloc.name AS to_location_display
      FROM item_stock_adjustments a
      LEFT JOIN items i ON i.id = a.item_id
      LEFT JOIN item_units u ON u.id = i.unit_id
      LEFT JOIN item_locations loc ON loc.id = a.location_id
+     LEFT JOIN item_locations floc ON floc.id = a.from_location_id
+     LEFT JOIN item_locations tloc ON tloc.id = a.to_location_id
      ORDER BY a.created_at DESC, a.adjustment_date DESC`
   );
   return rows.map((a: any) => ({
@@ -296,7 +299,7 @@ export async function fetchStockAdjustmentsDirect(): Promise<ItemStockAdjustment
     itemCode: a.item_code || '',
     unit: a.item_unit_display || a.item_unit_name || 'MT',
     date: a.adjustment_date,
-    type: a.adjustment_type === 'decrease' ? 'decrease' : 'increase',
+    type: (['increase', 'decrease', 'transfer'] as const).includes(a.adjustment_type) ? a.adjustment_type : 'increase',
     quantity: parseNum(a.quantity),
     rate: parseNum(a.rate),
     totalValue: parseNum(a.total_value),
@@ -304,6 +307,10 @@ export async function fetchStockAdjustmentsDirect(): Promise<ItemStockAdjustment
     newStock: parseNum(a.new_stock),
     reason: a.reason || '',
     location: a.location_display || undefined,
+    fromLocationId: a.from_location_id || undefined,
+    toLocationId: a.to_location_id || undefined,
+    fromLocationName: a.from_location_display || undefined,
+    toLocationName: a.to_location_display || undefined,
     referenceNumber: a.reference_number || undefined,
     notes: a.notes || undefined,
     createdAt: a.created_at,
@@ -510,6 +517,10 @@ export async function restoreInventoryUnitDirect(id: string, data: any): Promise
 
 export async function scrapInventoryUnitDirect(id: string, data: any): Promise<InventoryUnit> {
   return serverDb.scrapInventoryUnit(id, data);
+}
+
+export async function unscrapInventoryUnitDirect(id: string, data: any): Promise<InventoryUnit> {
+  return serverDb.unscrapInventoryUnit(id, data);
 }
 
 export async function deleteInventoryUnitDirect(id: string): Promise<boolean> {
@@ -764,27 +775,6 @@ export async function fetchTripSlipsDirect(): Promise<TripSlip[]> {
   }));
 }
 
-export async function fetchTyresDirect(): Promise<Tyre[]> {
-  if (!isMysqlConfigured()) {
-    return serverDb.getTyres();
-  }
-  const rows = await executeMysqlQuery('SELECT * FROM tyres ORDER BY serial_number ASC');
-  return rows.map((tyr: any) => ({
-    id: tyr.id,
-    serialNumber: tyr.serial_number,
-    brand: tyr.brand,
-    size: tyr.size,
-    type: (tyr.type as any) || 'radial',
-    status: (tyr.status as any) || 'available',
-    vehicleId: tyr.mounted_vehicle_id || tyr.vehicleId || undefined,
-    vehicleNo: tyr.mounted_vehicle_number || tyr.vehicleNo || undefined,
-    purchaseDate: tyr.purchase_date || tyr.purchaseDate || new Date().toISOString().split('T')[0],
-    purchaseCost: parseNum(tyr.cost || tyr.purchaseCost),
-    notes: tyr.notes || undefined,
-    createdAt: tyr.created_at || new Date().toISOString(),
-  }));
-}
-
 export async function fetchVehicleExpensesDirect(vehicleId?: string): Promise<VehicleExpenseEntry[]> {
   if (!isMysqlConfigured()) {
     // Sandbox read — identical hydration contract as the MySQL path
@@ -793,10 +783,11 @@ export async function fetchVehicleExpensesDirect(vehicleId?: string): Promise<Ve
   // FK-only storage (Golden Rule §2): the vehicle number and account name JOIN
   // their masters — renames in Fleet / Cash & Bank propagate to every row.
   const rows = await executeMysqlQuery(
-    `SELECT xe.*, v.registration_number AS vehicle_display, ca.name AS account_display
+    `SELECT xe.*, v.registration_number AS vehicle_display, ca.name AS account_display, dl.name AS diesel_location_display
      FROM vehicle_expense_entries xe
      LEFT JOIN vehicles v ON v.id = xe.vehicle_id
      LEFT JOIN cash_bank_accounts ca ON ca.id = xe.account_id
+     LEFT JOIN item_locations dl ON dl.id = xe.diesel_location_id
      ${vehicleId ? 'WHERE xe.vehicle_id = ?' : ''}
      ORDER BY xe.date DESC, xe.created_at DESC`,
     vehicleId ? [vehicleId] : undefined
@@ -805,16 +796,19 @@ export async function fetchVehicleExpensesDirect(vehicleId?: string): Promise<Ve
     id: e.id,
     entryType: (e.entry_type as any) || 'expense',
     vehicleId: e.vehicle_id,
-    accountId: e.account_id,
+    accountId: e.account_id || undefined,
     date: e.date,
     expenseType: e.expense_type || undefined,
     litres: e.litres !== null && e.litres !== undefined ? parseNum(e.litres) : undefined,
     ratePerLitre: e.rate_per_litre !== null && e.rate_per_litre !== undefined ? parseNum(e.rate_per_litre) : undefined,
     amount: parseNum(e.amount),
+    dieselItemId: e.diesel_item_id || undefined,
+    dieselLocationId: e.diesel_location_id || undefined,
     notes: e.notes || undefined,
     // Hydrated display names (§2) — never stored on the row
     vehicleNo: e.vehicle_display || e.vehicleNo || undefined,
     accountName: e.account_display || e.accountName || undefined,
+    dieselLocationName: e.diesel_location_display || undefined,
     createdAt: e.created_at,
   }));
 }
@@ -1154,32 +1148,3 @@ export async function createTripSlipDirect(slipData: any): Promise<TripSlip> {
   return slip;
 }
 
-export async function createTyreDirect(tyreData: any): Promise<Tyre> {
-  const tyre = serverDb.createTyre(tyreData);
-  if (!isMysqlConfigured()) return tyre;
-
-  await executeMysqlQuery(
-    `INSERT INTO tyres (
-      id, serial_number, brand, size, type, status, mounted_vehicle_id,
-      mounted_vehicle_number, purchase_date, cost, notes, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      status=VALUES(status), mounted_vehicle_id=VALUES(mounted_vehicle_id),
-      mounted_vehicle_number=VALUES(mounted_vehicle_number), notes=VALUES(notes)`,
-    [
-      tyre.id,
-      tyre.serialNumber,
-      tyre.brand,
-      tyre.size,
-      tyre.type || 'radial',
-      tyre.status || 'available',
-      tyre.vehicleId || null,
-      tyre.vehicleNo || null,
-      tyre.purchaseDate || new Date().toISOString().split('T')[0],
-      tyre.purchaseCost || 0,
-      tyre.notes || null,
-      tyre.createdAt || new Date().toISOString(),
-    ]
-  );
-  return tyre;
-}

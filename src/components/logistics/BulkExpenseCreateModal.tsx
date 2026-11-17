@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Plus, X, Fuel, Wrench, Paperclip, Trash2, AlertTriangle, Receipt } from 'lucide-react';
-import { Vehicle, CashBankAccount, VehicleExpenseEntry } from '../../types';
+import { Vehicle, CashBankAccount, VehicleExpenseEntry, Item, isDieselItemName } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { SearchableSelect } from '../orders/SearchableSelect';
 import { EntityDocumentsSection, StagedDocument } from '../common/EntityDocumentsSection';
@@ -19,6 +19,8 @@ interface BulkExpenseRow {
   date: string;
   vehicleId: string;
   accountId: string;
+  /** Diesel: the inventory location the fill issues FROM (required). */
+  locationId: string;
   expenseType: string;
   litres: string;
   ratePerLitre: string;
@@ -38,6 +40,7 @@ const emptyRow = (dieselRateDefault?: string): BulkExpenseRow => ({
   date: new Date().toISOString().split('T')[0],
   vehicleId: '',
   accountId: '',
+  locationId: '',
   expenseType: '',
   litres: '',
   ratePerLitre: dieselRateDefault && Number(dieselRateDefault) > 0 ? dieselRateDefault : '',
@@ -91,6 +94,13 @@ export function BulkExpenseCreateModal({ isOpen, onClose }: BulkExpenseCreateMod
   const dieselRateDefault = useMemo(() => {
     try { return localDb.getAppDefault('diesel_rate'); } catch { return undefined; }
   }, [isOpen]);
+  // DIESEL FROM INVENTORY (2026-11-17): diesel rows issue from the diesel
+  // item's per-location stock — never a direct fill.
+  const dieselStockItem = useMemo<Item | undefined>(() => {
+    try {
+      return (localDb.getItems() || []).filter((i) => i.type !== 'asset' && i.isActive !== false && isDieselItemName(i.name))[0];
+    } catch { return undefined; }
+  }, [isOpen]);
 
   const blankRow = () => emptyRow(dieselRateDefault);
 
@@ -121,7 +131,24 @@ export function BulkExpenseCreateModal({ isOpen, onClose }: BulkExpenseCreateMod
       const r = docs[i];
       const num = `entry ${i + 1}`;
       if (!r.vehicleId) { setError(`${num}: select the vehicle.`); return; }
-      if (!r.accountId || !activeAccounts.some((a) => a.id === r.accountId)) {
+      if (r.entryType === 'diesel') {
+        // Diesel rows issue from the yard stock — no account debit applies.
+        if (!dieselStockItem) {
+          setError(`${num}: no diesel item exists in inventory — create a product item named e.g. "Diesel" and receive its stock first.`);
+          return;
+        }
+        if (!r.locationId) {
+          setError(`${num}: pick the DIESEL LOCATION the fill is issued from.`);
+          return;
+        }
+        const bucket = dieselStockItem.locations?.find((l) => l.locationId === r.locationId);
+        const available = Number(bucket?.currentStock) || 0;
+        if ((Number(r.litres) || 0) > available) {
+          setError(`${num}: diesel at ${bucket?.locationName || 'that location'} is only ${available.toLocaleString('en-IN')} L — the fill exceeds the stock. Receive diesel inward first.`);
+          return;
+        }
+      }
+      if (r.entryType === 'expense' && (!r.accountId || !activeAccounts.some((a) => a.id === r.accountId))) {
         setError(`${num}: select an active Cash/Bank account to debit.`);
         return;
       }
@@ -147,11 +174,24 @@ export function BulkExpenseCreateModal({ isOpen, onClose }: BulkExpenseCreateMod
         entryType: r.entryType,
         date: r.date,
         vehicleId: r.vehicleId,
-        accountId: r.accountId,
         ...(r.entryType === 'expense'
-          ? { expenseType: r.expenseType.trim(), litres: undefined, ratePerLitre: undefined }
-          : { expenseType: undefined, litres: Number(r.litres), ratePerLitre: Number(r.ratePerLitre) }),
-        amount: rowAmount(r),
+          ? {
+              expenseType: r.expenseType.trim(),
+              accountId: r.accountId,
+              litres: undefined,
+              ratePerLitre: undefined,
+              amount: Number(r.amount) || 0,
+            }
+          : {
+              // Diesel: issued from the picked stock location; the rate is the
+              // STRICT global snapshot and the fill moves no money.
+              expenseType: undefined,
+              litres: Number(r.litres),
+              ratePerLitre: Number(dieselRateDefault) || undefined,
+              dieselLocationId: r.locationId,
+              accountId: undefined,
+              amount: round2((Number(r.litres) || 0) * (Number(dieselRateDefault) || 0)),
+            }),
         notes: r.notes.trim() || undefined,
         ...(r.docs.length > 0 ? { documentIds: r.docs.map((d) => d.id) } : {}),
       };
@@ -178,8 +218,8 @@ export function BulkExpenseCreateModal({ isOpen, onClose }: BulkExpenseCreateMod
                 
               </h3>
               <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
-                One row per entry — rows default to DIESEL at the saved rate (₹{(Number(dieselRateDefault) || 0).toLocaleString('en-IN')}/lt — editable in Settings → Defaults);
-                each row debits its chosen Cash/Bank account immediately. Diesel totals are strictly litres × rate.
+                Diesel fills issue FROM the inventory item's stock locations (pick one per row; the global rate ₹{(Number(dieselRateDefault) || 0).toLocaleString('en-IN')}/lt — Settings-editable — snapshots onto each row and NO account is debited).
+                Generic expense rows debit their chosen Cash/Bank account.
               </p>
             </div>
           </div>
@@ -204,7 +244,7 @@ export function BulkExpenseCreateModal({ isOpen, onClose }: BulkExpenseCreateMod
                     <th className="py-2.5 px-2 w-32">Type</th>
                     <th className="py-2.5 px-2 w-40">Date</th>
                     <th className="py-2.5 px-2 min-w-[200px]">Vehicle</th>
-                    <th className="py-2.5 px-2 min-w-[220px]">Debit Account</th>
+                    <th className="py-2.5 px-2 min-w-[220px]">Debit Account / Diesel From</th>
                     <th className="py-2.5 px-2 min-w-[190px]">Expense Type</th>
                     <th className="py-2.5 px-2 w-24 text-right">Litres</th>
                     <th className="py-2.5 px-2 w-28 text-right">Rate/lt</th>
@@ -227,8 +267,8 @@ export function BulkExpenseCreateModal({ isOpen, onClose }: BulkExpenseCreateMod
                               const t = e.target.value as 'expense' | 'diesel';
                               // switching kind clears the other kind's inputs
                               patchRow(r.id, t === 'diesel'
-                                ? { entryType: t, expenseType: '', amount: '' }
-                                : { entryType: t, litres: '', ratePerLitre: '' });
+                                ? { entryType: t, expenseType: '', amount: '', locationId: '', ratePerLitre: dieselRateDefault && Number(dieselRateDefault) > 0 ? dieselRateDefault : '' }
+                                : { entryType: t, litres: '', ratePerLitre: '', locationId: '', accountId: r.accountId });
                             }}
                             className="w-full px-2 py-1.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-[11px] font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                           >
@@ -257,17 +297,37 @@ export function BulkExpenseCreateModal({ isOpen, onClose }: BulkExpenseCreateMod
                             }))}
                           />
                         </td>
+                        {/* DEBIT ACCOUNT (generic) / DIESEL LOCATION (diesel):
+                            a diesel fill draws from the diesel item's stock
+                            buckets — the account column becomes that picker. */}
                         <td className="py-2 px-2 align-top min-w-[220px]">
-                          <SearchableSelect
-                            value={r.accountId}
-                            onChange={(v) => patchRow(r.id, { accountId: v })}
-                            placeholder="Select account to debit..."
-                            options={activeAccounts.map((a) => ({
-                              value: a.id,
-                              label: a.name,
-                              sub: `${a.type === 'bank' ? (a.bankName || 'Bank A/c') : 'Cash'} · bal ₹${(a.currentBalance || 0).toLocaleString('en-IN')}`,
-                            }))}
-                          />
+                          {r.entryType === 'expense' ? (
+                            <SearchableSelect
+                              value={r.accountId}
+                              onChange={(v) => patchRow(r.id, { accountId: v })}
+                              placeholder="Select account to debit..."
+                              options={activeAccounts.map((a) => ({
+                                value: a.id,
+                                label: a.name,
+                                sub: `${a.type === 'bank' ? (a.bankName || 'Bank A/c') : 'Cash'} · bal ₹${(a.currentBalance || 0).toLocaleString('en-IN')}`,
+                              }))}
+                            />
+                          ) : !dieselStockItem ? (
+                            <span className="text-[10px] font-bold text-[var(--color-error)] block px-1 py-1.5">No diesel item in inventory</span>
+                          ) : (
+                            <select
+                              value={r.locationId}
+                              onChange={(e) => patchRow(r.id, { locationId: e.target.value })}
+                              className="w-full px-2 py-1.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-[11px] font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                            >
+                              <option value="">-- Diesel stock location --</option>
+                              {(dieselStockItem.locations || []).map((l) => (
+                                <option key={l.locationName} value={l.locationId || ''}>
+                                  {l.locationName} · {Number(l.currentStock) || 0} L
+                                </option>
+                              ))}
+                            </select>
+                          )}
                         </td>
                         {/* Expense type (generic) / — (diesel) */}
                         <td className="py-2 px-2 align-top min-w-[190px]">
@@ -301,15 +361,14 @@ export function BulkExpenseCreateModal({ isOpen, onClose }: BulkExpenseCreateMod
                         </td>
                         <td className="py-2 px-2 align-top text-right">
                           {r.entryType === 'diesel' ? (
-                            <input
-                              type="number"
-                              step="any"
-                              min="0"
-                              placeholder="0"
-                              value={r.ratePerLitre}
-                              onChange={(e) => patchRow(r.id, { ratePerLitre: e.target.value })}
-                              className="w-full px-2 py-1.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-lg text-[11px] font-bold text-[var(--color-on-surface)] text-right focus:outline-none"
-                            />
+                            // STRICT GLOBAL RATE — the app-default snapshot is
+                            // the row's price; never typed or edited.
+                            <span
+                              title="Every diesel row prices at the global diesel_rate (Settings → Defaults)"
+                              className="inline-block px-2 py-1.5 rounded-lg bg-[var(--color-surface-container-high)] text-[11px] font-black text-[var(--color-on-surface-variant)] whitespace-nowrap"
+                            >
+                              ₹{(Number(dieselRateDefault) || 0).toLocaleString('en-IN')}
+                            </span>
                           ) : (
                             <span className="text-[var(--color-outline)] font-bold text-center block">—</span>
                           )}

@@ -35,7 +35,7 @@ import {
   CreditCard,
   Wallet,
 } from 'lucide-react';
-import { Order, OrderItem, OrderType, SalesStage, PurchaseStage, Party, Item, CompanySettings, Sale, SaleInvoice, Purchase, PaymentMode, InventoryUnit, BatchMix, ProductionBatchRun } from '../../types';
+import { Order, OrderItem, OrderType, SalesStage, PurchaseStage, Party, Item, CompanySettings, Sale, SaleInvoice, Purchase, PaymentMode, InventoryUnit, BatchMix, ProductionBatchRun, isTyreItemName } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { AddPurchaseModal } from './AddPurchaseModal';
 import { BulkSalesCreateModal } from './BulkSalesCreateModal';
@@ -2250,7 +2250,9 @@ export function OrdersView({
                                   value: p.id,
                                   label: p.code,
                                   sub: p.type === 'asset'
-                                    ? `(${p.name}) · Register: ${inventoryUnits.filter((u) => u.itemId === p.id && (u.status === 'in_stock' || u.status === 'deployed')).length} unit(s) available`
+                                    ? (isTyreItemName(p.name)
+                                        ? `(${p.name}) · Scrap: ${inventoryUnits.filter((u) => u.itemId === p.id && u.status === 'scrapped').length} scrapped unit(s) to sell`
+                                        : `(${p.name}) · Register: ${inventoryUnits.filter((u) => u.itemId === p.id && (u.status === 'in_stock' || u.status === 'deployed')).length} unit(s) available`)
                                     : `(${p.name}) · Qty: ${p.currentStock || 0} ${p.unit}`,
                                 }))}
                               />
@@ -2922,9 +2924,17 @@ export function OrdersView({
         const othersPicked = new Set(
           formItems.flatMap((r, i2) => (i2 === unitsPickerRow ? [] : ((r.unitIds || []) as string[])))
         );
-        // Sellable units of THIS item: in stock or deployed; sold/scrapped are
-        // gone; a unit picked on ANOTHER row is greyed out (one sale each).
-        const candidates = inventoryUnits.filter((u) => u.itemId === row.itemId && (u.status === 'in_stock' || u.status === 'deployed'));
+        // Sellable units of THIS item (2026-11-17 rules): TYRE lines sell
+        // ONLY their scrapped serials (scrap → sale route); every other
+        // serialised item sells its in-stock/deployed serials. sold units are
+        // gone for everyone; a unit picked on ANOTHER row is greyed out.
+        const isTyreLineUnit = isTyreItemName(unitItem?.name);
+        const candidates = inventoryUnits.filter((u) =>
+          u.itemId === row.itemId &&
+          (isTyreLineUnit
+            ? u.status === 'scrapped'
+            : (u.status === 'in_stock' || u.status === 'deployed')),
+        );
         const visible = candidates.filter((u) => {
           if (!unitsPickerQuery.trim()) return true;
           const hay = [u.serialNumber, u.vehicleNo, u.locationName, u.supplierName].filter(Boolean).join(' ').toLowerCase();
@@ -2937,7 +2947,9 @@ export function OrdersView({
                 <div>
                   <h3 className="text-sm font-bold text-[var(--color-on-surface)]">Select Units — {unitItem?.name}</h3>
                   <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">
-                    {rowUnitIds.length} unit(s) selected for this line — each serial sells ONE physical unit
+                    {isTyreItemName(unitItem?.name)
+                      ? 'Tyres sell from SCRAP only — pick the scrapped serial(s) this sale disposes of'
+                      : `${rowUnitIds.length} unit(s) selected for this line — each serial sells ONE physical unit`}
                   </p>
                 </div>
                 <button type="button" onClick={() => { setUnitsPickerRow(null); setUnitsPickerQuery(''); }} className="p-2 text-[var(--color-outline)] rounded-full hover:bg-[var(--color-surface-container-high)]"><X className="w-4.5 h-4.5" /></button>
@@ -2955,7 +2967,9 @@ export function OrdersView({
               <div className="p-6 overflow-y-auto space-y-1.5">
                 {visible.length === 0 ? (
                   <p className="text-xs text-[var(--color-on-surface-variant)] text-center py-8">
-                    No eligible units. Register units for {unitItem?.name || 'this item'} in the Trackable inventory tab first.
+                    No eligible units. {isTyreItemName(unitItem?.name)
+                      ? 'No scrapped tyres to sell — mark tyre serial(s) as Scrap in the Tyre Management module first.'
+                      : `Register units for ${unitItem?.name || 'this item'} in the Trackable inventory tab first.`}
                   </p>
                 ) : (
                   visible.map((u) => {

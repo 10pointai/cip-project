@@ -24,6 +24,10 @@ const MOVEMENT_CHIPS: Record<string, { label: string; cls: string }> = {
   adjustment_decrease: { label: 'Stock Adjustment', cls: 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]' },
   dispatch_reversal: { label: 'Dispatch Reversal', cls: 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)] opacity-55' },
   inward_reversal: { label: 'Inward Reversal', cls: 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)] opacity-55' },
+  diesel_issue: { label: 'Diesel Issue', cls: 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)]' },
+  diesel_issue_reversal: { label: 'Diesel Return', cls: 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)] opacity-55' },
+  transfer_out: { label: 'Transfer Out', cls: 'bg-[var(--color-tertiary-container)] text-[var(--color-on-tertiary-container)]' },
+  transfer_in: { label: 'Transfer In', cls: 'bg-[var(--color-tertiary-container)] text-[var(--color-on-tertiary-container)]' },
 };
 
 interface ItemDetailPageProps {
@@ -47,6 +51,10 @@ const MOVEMENT_LABELS: Record<string, string> = {
   adjustment_decrease: 'Stock Adjustment',
   dispatch_reversal: 'Dispatch Reversal',
   inward_reversal: 'Inward Reversal',
+  diesel_issue: 'Diesel Issue (Fleet Fill)',
+  diesel_issue_reversal: 'Diesel Issue Reversal',
+  transfer_out: 'Stock Transfer Out',
+  transfer_in: 'Stock Transfer In',
 };
 
 /** The movement's DOC AND REF primary text — "whatever ref number" the ledger

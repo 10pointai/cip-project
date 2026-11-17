@@ -11,7 +11,6 @@ import {
   Vehicle,
   Driver,
   TripSlip,
-  Tyre,
   Employee,
   EmployeeAttendance,
   EmployeeLeave,
@@ -99,8 +98,6 @@ export const SEED_VEHICLES: Vehicle[] = [];
 export const SEED_DRIVERS: Driver[] = [];
 
 export const SEED_TRIP_SLIPS: TripSlip[] = [];
-
-export const SEED_TYRES: Tyre[] = [];
 
 export const SEED_EMPLOYEES: Employee[] = [];
 

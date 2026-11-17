@@ -27,6 +27,9 @@ import {
   Party,
   Vehicle,
   CompanySettings,
+  TYRE_POSITIONS,
+  TYRE_POSITION_LABELS,
+  isTyreItemName,
 } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 
@@ -45,6 +48,7 @@ const EVENT_LABELS: Record<string, { label: string; icon: any }> = {
   maintenance: { label: 'Sent for Maintenance', icon: Wrench },
   restored: { label: 'Restored', icon: Undo2 },
   scrapped: { label: 'Scrapped', icon: Archive },
+  unscrapped: { label: 'Unscrapped', icon: Undo2 },
   sold: { label: 'Sold', icon: ExternalLink },
 };
 
@@ -229,6 +233,18 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
     }
   };
 
+  // SCRAP / UN-SCRAP (2026-11-17) — the register carries the same lifecycle
+  // actions as the Tyre view, same UX rules: plain confirm to scrap (no
+  // reason prompt), immediate unscrap (no confirmation).
+  const handleScrapUnit = (u: InventoryUnit) => {
+    if (confirm(`Mark serial ${u.serialNumber} as scrapped? It returns to usable stock when unscrapped later.`)) {
+      localDb.scrapInventoryUnit(u.id, { notes: 'Scrapped from the unit register' });
+    }
+  };
+  const handleUnscrapUnit = (u: InventoryUnit) => {
+    localDb.unscrapInventoryUnit(u.id, { notes: 'Unscrapped from the unit register' });
+  };
+
   // ⋮ row-action popover (same portal pattern as the orders list, 2026-11-16):
   // edit details + assign-to-vehicle ride the menu; return/restore stay inline.
   const [unitMenuFor, setUnitMenuFor] = useState<string | null>(null);
@@ -295,7 +311,6 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
-      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[var(--color-outline-variant)] pb-4">
         <div className="flex items-center gap-3">
           <button
@@ -472,7 +487,7 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
                               vehicle / return to spare / restore from
                               maintenance / edit details) — the same portal
                               pattern as the orders row menus. */}
-                          {(u.status === 'in_stock' || u.status === 'deployed' || u.status === 'maintenance') && (
+                          {(u.status === 'in_stock' || u.status === 'deployed' || u.status === 'maintenance' || u.status === 'scrapped') && (
                             <div className="relative" ref={unitMenuBtnRef}>
                               <button
                                 type="button"
@@ -670,17 +685,37 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
                   ))}
                 </select>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Position</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. FL / RL / spare"
-                    value={deployForm.position}
-                    onChange={(e) => setDeployForm({ ...deployForm, position: e.target.value })}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
-                  />
+              {/* TYRE AWARENESS (2026-11-17): a tyre unit's deploy MUST pick one
+                  of the 12 dumper positions; any other unit carries no position. */}
+              {isTyreItemName(item.name) ? (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Wheel Position *</label>
+                    <select
+                      required
+                      value={deployForm.position}
+                      onChange={(e) => setDeployForm({ ...deployForm, position: e.target.value })}
+                      className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
+                    >
+                      <option value="">-- Wheel position --</option>
+                      {TYRE_POSITIONS.map((p) => (
+                        <option key={p} value={p}>{TYRE_POSITION_LABELS[p]}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Odometer at Fitment (km)</label>
+                    <input
+                      type="number"
+                      step="any"
+                      placeholder="e.g. 148230"
+                      value={deployForm.odometer}
+                      onChange={(e) => setDeployForm({ ...deployForm, odometer: e.target.value })}
+                      className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none"
+                    />
+                  </div>
                 </div>
+              ) : (
                 <div>
                   <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Odometer at Fitment (km)</label>
                   <input
@@ -692,7 +727,7 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
                     className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none"
                   />
                 </div>
-              </div>
+              )}
               <div>
                 <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Notes</label>
                 <input
@@ -834,6 +869,24 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
                     className="w-full px-3 py-2 flex items-center gap-2.5 text-xs font-semibold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)] transition-colors"
                   >
                     <Undo2 className="w-4 h-4 text-[var(--color-on-surface-variant)] shrink-0" /> Restore from Maintenance
+                  </button>
+                )}
+                {target.status === 'in_stock' && (
+                  <button
+                    type="button"
+                    onClick={() => { closeUnitMenu(); handleScrapUnit(target); }}
+                    className="w-full px-3 py-2 flex items-center gap-2.5 text-xs font-semibold text-[var(--color-on-surface)] hover:bg-[var(--color-error-container)]/40 transition-colors"
+                  >
+                    <Archive className="w-4 h-4 text-[var(--color-error)] shrink-0" /> Mark Scrap
+                  </button>
+                )}
+                {target.status === 'scrapped' && (
+                  <button
+                    type="button"
+                    onClick={() => { closeUnitMenu(); handleUnscrapUnit(target); }}
+                    className="w-full px-3 py-2 flex items-center gap-2.5 text-xs font-semibold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)] transition-colors"
+                  >
+                    <Undo2 className="w-4 h-4 text-[var(--color-success)] shrink-0" /> Mark Unscrap
                   </button>
                 )}
                 <button

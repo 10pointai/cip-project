@@ -118,8 +118,50 @@ export interface InventoryUnit {
   saleNumber?: string;
 }
 
+/**
+ * 12-TYRE DUMPER FITMENT LAYOUT (client directive, 2026-11-17) — tyre units
+ * fitted on a fleet vehicle always carry ONE of these wheel positions:
+ * FL/FR at the front axle, then L1–L5 / R1–R5 down the five rear axles.
+ * Only tyres are position-aware — every other trackable unit may ride a
+ * vehicle but never a position.
+ */
+export const TYRE_POSITIONS = ['FL', 'FR', 'L1', 'R1', 'L2', 'R2', 'L3', 'R3', 'L4', 'R4', 'L5', 'R5'] as const;
+export type TyrePosition = (typeof TYRE_POSITIONS)[number];
+
+/** Human labels for the 12 dumper positions (dropdowns + tooltips). */
+export const TYRE_POSITION_LABELS: Record<TyrePosition, string> = {
+  FL: 'Front-Left (FL)',
+  FR: 'Front-Right (FR)',
+  L1: 'Axle 1 — Left (L1)',
+  R1: 'Axle 1 — Right (R1)',
+  L2: 'Axle 2 — Left (L2)',
+  R2: 'Axle 2 — Right (R2)',
+  L3: 'Axle 3 — Left (L3)',
+  R3: 'Axle 3 — Right (R3)',
+  L4: 'Axle 4 — Left (L4)',
+  R4: 'Axle 4 — Right (R4)',
+  L5: 'Axle 5 — Left (L5)',
+  R5: 'Axle 5 — Right (R5)',
+};
+
+/**
+ * True when an ITEM MASTER is a tyre item — the client directive (2026-11-17):
+ * an asset item whose NAME carries the word "Tyre"/"Tyres" owns position-aware
+ * serial units. Word-boundary match so "Tyre Tube 10x20" qualifies while
+ * "Tyrecor 500" does not.
+ */
+export const isTyreItemName = (name?: string): boolean => /\btyres?\b/i.test(name || '');
+
+/**
+ * True when an ITEM MASTER is the diesel stock item — the fleet-directive
+ * (2026-11-17): diesel fuel fills are ALWAYS issued from the inventory item
+ * (its per-location stock), never entered directly. Word-boundary match, same
+ * convention as tyres.
+ */
+export const isDieselItemName = (name?: string): boolean => /\bdiesel\b/i.test(name || '');
+
 /** Append-only lifecycle log for a unit (mirrors the movements ledger). */
-export type InventoryUnitEventType = 'entered' | 'deployed' | 'returned' | 'maintenance' | 'scrapped' | 'sold' | 'restored';
+export type InventoryUnitEventType = 'entered' | 'deployed' | 'returned' | 'maintenance' | 'scrapped' | 'unscrapped' | 'sold' | 'restored';
 
 export interface InventoryUnitEvent {
   id: string;
@@ -168,7 +210,7 @@ export interface ItemLocation {
 export interface StockMovementLog {
   id: string;
   date: string;
-  type: 'purchase_inward' | 'production_output' | 'production_consumed' | 'production_consumed_reversal' | 'sale_dispatch' | 'opening' | 'reconciliation_in' | 'reconciliation_out' | 'adjustment_increase' | 'adjustment_decrease' | 'dispatch_reversal' | 'inward_reversal';
+  type: 'purchase_inward' | 'production_output' | 'production_consumed' | 'production_consumed_reversal' | 'sale_dispatch' | 'opening' | 'reconciliation_in' | 'reconciliation_out' | 'adjustment_increase' | 'adjustment_decrease' | 'dispatch_reversal' | 'inward_reversal' | /** fleet diesel fuel-fill issue from a location's stock (2026-11-17) */ 'diesel_issue' | /** the fill's stock restoration on edit/delete (2026-11-17) */ 'diesel_issue_reversal' | /** STOCK TRANSFER (2026-11-17): leaves one location … */ 'transfer_out' | /** … and lands on another (paired, one adjustment doc) */ 'transfer_in';
   quantity: number; // positive for additions, negative for deductions
   balanceAfter: number;
   // Actual-cost snapshots (facts-as-of-event; numeric snapshots per documentation §2):
@@ -245,7 +287,7 @@ export interface Item {
   updatedAt: string;
 }
 
-export type StockAdjustmentType = 'increase' | 'decrease';
+export type StockAdjustmentType = 'increase' | 'decrease' | /** Stock Transfer (2026-11-17): move stock BETWEEN two locations of the same item — one doc, From → To */ 'transfer';
 
 // ==========================================
 // DOCUMENTS (generic S3 upload records + order mapping)
@@ -353,7 +395,15 @@ export interface ItemStockAdjustment {
   itemCode: string;
   unit: string;
   date: string; // YYYY-MM-DD
-  type: StockAdjustmentType; // 'increase' (Add Stock) | 'decrease' (Reduce Stock)
+  type: StockAdjustmentType; // 'increase' (Add Stock) | 'decrease' (Reduce Stock) | 'transfer' (move between locations)
+  /** STOCK TRANSFER (2026-11-17): the location the quantity leaves (stored in
+   *  locationId/location too) and the destination it lands on. Both ledger
+   *  movements (transfer_out + transfer_in) trace to this one document. */
+  fromLocationId?: string;
+  toLocationId?: string;
+  // Hydrated read-time display names (never persisted)
+  fromLocationName?: string;
+  toLocationName?: string;
   quantity: number;
   rate: number; // Procurement / valuation cost per unit at adjustment
   totalValue: number; // quantity * rate
@@ -755,26 +805,9 @@ export interface TripSlip {
   createdAt: string;
 }
 
-export interface Tyre {
-  id: string;
-  serialNumber: string;
-  brand: string;
-  size: string;
-  type: 'radial' | 'tubeless' | 'bias';
-  status: 'mounted' | 'available' | 'retreading' | 'scrapped';
-  vehicleId?: string;
-  vehicleNo?: string;
-  position?: string;
-  purchaseDate: string;
-  purchaseCost: number;
-  installOdometer?: number;
-  currentOdometer?: number;
-  lastInspectionDate?: string;
-  lastInspectionCondition?: 'excellent' | 'good' | 'worn' | 'damaged';
-  threadDepthMm?: number;
-  notes?: string;
-  createdAt: string;
-}
+/** Legacy STANDALONE tyre record — RETIRED (2026-11-17). Tyres are now the
+ *  serials (inventory_units) of tyre-named asset items; a fitted serial
+ *  carries vehicleId + one of the 12 dumper TYRE_POSITIONS (see above). */
 
 /**
  * Vehicle EMI ledger entry — one row per monthly loan installment debited
@@ -816,21 +849,30 @@ export interface VehicleExpenseEntry {
   date: string;
   /** FK vehicles.id — compulsory (every expense is attributable to a truck) */
   vehicleId: string;
-  /** FK cash_bank_accounts.id — the account the expense debited (compulsory) */
-  accountId: string;
+  /** FK cash_bank_accounts.id — the account the expense debited. COMPELSORY
+   *  for generic expenses; DIESEL rows carry '' (2026-11-17): a diesel fill
+   *  is an internal issue from yard stock — the cash left at PURCHASE time,
+   *  so no debit fires on the fill (the row is a vehicle-cost record only). */
+  accountId?: string;
   /** Free-text expense classification (normal entries), e.g. "PUCHER + FITING" */
   expenseType?: string;
-  /** Diesel: litres filled — amount derives from litres × ratePerLitre */
+  /** Diesel: litres filled */
   litres?: number;
-  /** Diesel: ₹ per litre at fill time */
+  /** Diesel: ₹ per litre — STRICTLY the global diesel_rate (app_defaults)
+   *  snapshot saved per row; never operator-entered (2026-11-17) */
   ratePerLitre?: number;
-  /** Total debited (normal: entered; diesel: litres × rate, operator-overridable) */
+  /** Total vehicle cost (normal: entered; diesel: litres × global rate) */
   amount: number;
+  /** Diesel: FK items.id — the diesel inventory item the fill was issued from */
+  dieselItemId?: string;
+  /** Diesel: FK item_locations.id — the location bucket the litres left */
+  dieselLocationId?: string;
   notes?: string;
   createdAt: string;
   // Hydrated read-time view fields (never persisted)
   vehicleNo?: string;
   accountName?: string;
+  dieselLocationName?: string;
 }
 
 export interface Employee {

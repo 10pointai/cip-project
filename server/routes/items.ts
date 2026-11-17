@@ -299,7 +299,9 @@ stockAdjustmentsRouter.post('/', requirePermission('manage_inventory'), async (r
     // WRITE SCOPE (user rule 2026-10-30): per-location adjustments may only
     // target assigned locations.
     try {
-      assertLocationsInScope(resolveInventoryScope(req.user), [req.body?.locationId], 'Cannot record stock adjustment');
+      // STOCK TRANSFER (2026-11-17): a transfer touches BOTH its locations —
+      // scope must cover From and To.
+      assertLocationsInScope(resolveInventoryScope(req.user), [req.body?.locationId, req.body?.toLocationId], 'Cannot record stock adjustment');
     } catch (err: any) {
       if (err instanceof ScopeError) return res.status(403).json({ success: false, error: err.message });
       throw err;
@@ -309,7 +311,10 @@ stockAdjustmentsRouter.post('/', requirePermission('manage_inventory'), async (r
     const item = serverDb.getItemById(adj.itemId) || null;
     res.status(201).json({ success: true, data: adj, item });
   } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+    // Business-rule errors (transfer validation: missing/identical locations,
+    // insufficient source stock) are 400; everything else is a 500.
+    res.status(/required|not found|cannot|first\./i.test(err?.message || '') ? 400 : 500)
+      .json({ success: false, error: err.message });
   }
 });
 stockAdjustmentsRouter.delete('/:id', requirePermission('manage_inventory'), async (req: AuthenticatedRequest, res: Response) => {
@@ -318,7 +323,8 @@ stockAdjustmentsRouter.delete('/:id', requirePermission('manage_inventory'), asy
     // WRITE SCOPE (user rule 2026-10-30): no deleting adjustments that revert
     // stock in an unassigned location.
     try {
-      assertLocationsInScope(resolveInventoryScope(req.user), [adj?.locationId], 'Cannot delete stock adjustment');
+      // A transfer revert touches both its From/To locations
+      assertLocationsInScope(resolveInventoryScope(req.user), [adj?.locationId, adj?.toLocationId], 'Cannot delete stock adjustment');
     } catch (err: any) {
       if (err instanceof ScopeError) return res.status(403).json({ success: false, error: err.message });
       throw err;

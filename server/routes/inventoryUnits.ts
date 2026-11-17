@@ -11,6 +11,7 @@ import {
   maintainInventoryUnitDirect,
   restoreInventoryUnitDirect,
   scrapInventoryUnitDirect,
+  unscrapInventoryUnitDirect,
   deleteInventoryUnitDirect,
   markUnitsSoldDirect,
 } from '../mysql/operationsService';
@@ -131,6 +132,17 @@ inventoryUnitsRouter.post('/:id/scrap', requirePermission(PERM), async (req: Req
   try {
     const unit = await scrapInventoryUnitDirect(req.params.id, req.body);
     res.json({ success: true, message: 'Unit scrapped', data: unit });
+  } catch (error: any) {
+    res.status(bizStatus(error.message)).json({ success: false, error: error.message });
+  }
+});
+
+// POST /api/inventory-units/:id/unscrap — bring a scrapped unit back to
+// spare stock (2026-11-17; a SOLD unit has no way back)
+inventoryUnitsRouter.post('/:id/unscrap', requirePermission(PERM), async (req: Request, res: Response) => {
+  try {
+    const unit = await unscrapInventoryUnitDirect(req.params.id, req.body);
+    res.json({ success: true, message: 'Unit unscrapped', data: unit });
   } catch (error: any) {
     res.status(bizStatus(error.message)).json({ success: false, error: error.message });
   }

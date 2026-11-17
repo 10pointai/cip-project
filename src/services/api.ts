@@ -18,7 +18,6 @@ import {
   Vehicle,
   Driver,
   TripSlip,
-  Tyre,
   Employee,
   EmployeeAttendance,
   EmployeeLeave,
@@ -102,7 +101,6 @@ export interface SyncPayload {
   vehicles: Vehicle[];
   drivers: Driver[];
   tripSlips: TripSlip[];
-  tyres: Tyre[];
   employees: Employee[];
   attendance: EmployeeAttendance[];
   leaves: EmployeeLeave[];
@@ -744,6 +742,13 @@ class ApiClient {
     });
   }
 
+  public async unscrapInventoryUnit(id: string, payload: { notes?: string } = {}): Promise<{ success: boolean; data: InventoryUnit }> {
+    return this.request<{ success: boolean; data: InventoryUnit }>(`/inventory-units/${id}/unscrap`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
   public async deleteInventoryUnit(id: string): Promise<{ success: boolean }> {
     return this.request<{ success: boolean }>(`/inventory-units/${id}`, {
       method: 'DELETE',
@@ -826,30 +831,6 @@ class ApiClient {
 
   public async deleteTripSlip(id: string): Promise<{ success: boolean }> {
     return this.request<{ success: boolean }>(`/logistics/trip-slips/${id}`, {
-      method: 'DELETE',
-    });
-  }
-
-  public async getTyres(): Promise<{ success: boolean; data: Tyre[] }> {
-    return this.request<{ success: boolean; data: Tyre[] }>('/logistics/tyres');
-  }
-
-  public async createTyre(tyre: Partial<Tyre>): Promise<{ success: boolean; data: Tyre }> {
-    return this.request<{ success: boolean; data: Tyre }>('/logistics/tyres', {
-      method: 'POST',
-      body: JSON.stringify(tyre),
-    });
-  }
-
-  public async updateTyre(id: string, updates: Partial<Tyre>): Promise<{ success: boolean; data: Tyre }> {
-    return this.request<{ success: boolean; data: Tyre }>(`/logistics/tyres/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify(updates),
-    });
-  }
-
-  public async deleteTyre(id: string): Promise<{ success: boolean }> {
-    return this.request<{ success: boolean }>(`/logistics/tyres/${id}`, {
       method: 'DELETE',
     });
   }

@@ -14,7 +14,6 @@ import {
   Vehicle,
   Driver,
   TripSlip,
-  Tyre,
   VehicleEmiEntry,
   VehicleExpenseEntry,
   Employee,
@@ -43,7 +42,7 @@ import { api } from './api';
 export type CollectionName =
   | 'parties' | 'transactions' | 'settings' | 'items' | 'categories' | 'units'
   | 'locations' | 'productionBatches' | 'batchMixes' | 'inventoryUnits' | 'orders' | 'sales' | 'saleInvoices' | 'purchases'
-  | 'vehicles' | 'drivers' | 'tripSlips' | 'tyres' | 'employees' | 'attendance'
+  | 'vehicles' | 'drivers' | 'tripSlips' | 'employees' | 'attendance'
   | 'leaves' | 'employeePayments' | 'employeeLedgerTransactions' | 'accounts'
   | 'transfers' | 'adjustments'
   | 'stockAdjustments' | 'evidenceFolders' | 'evidenceFiles' | 'vehicleEmiEntries' | 'vehicleExpenses'
@@ -66,7 +65,7 @@ export interface SidebarCounts {
 // deliberately NOT here — it is per-feature.
 const BOOT_LOOKUPS: CollectionName[] = [
   'settings', 'parties', 'items', 'categories', 'units', 'locations', 'accounts',
-  'orders', 'vehicles', 'drivers', 'tripSlips', 'tyres', 'vehicleEmiEntries', 'vehicleExpenses',
+  'orders', 'vehicles', 'drivers', 'tripSlips', 'vehicleEmiEntries', 'vehicleExpenses',
   // defaults (diesel_rate etc.) power pre-fills in any feature's forms
   'appDefaults',
 ];
@@ -95,7 +94,7 @@ const FEATURE_COLLECTIONS: Record<string, CollectionName[]> = {
   production: ['productionBatches', 'batchMixes', 'items'],
   // drivers are employees with role 'driver' — loaded via 'employees'.
   logistics: [
-    'vehicles', 'tripSlips', 'tyres', 'employees', 'vehicleEmiEntries', 'vehicleExpenses',
+    'vehicles', 'tripSlips', 'inventoryUnits', 'items', 'locations', 'employees', 'vehicleEmiEntries', 'vehicleExpenses',
     // The Trips table's SALE ORDER column + transport figures resolve from
     // the sales master (slip.saleId) — the fleet feature must carry it
     'sales',
@@ -127,7 +126,6 @@ const COLLECTION_FETCHERS: Partial<Record<CollectionName, () => Promise<{ succes
   appDefaults: () => api.getAppDefaults(),
   drivers: () => api.getDrivers(),
   tripSlips: () => api.getTripSlips(),
-  tyres: () => api.getTyres(),
   vehicleEmiEntries: () => api.getVehicleEmiEntries(),
   vehicleExpenses: () => api.getVehicleExpenses(),
   employees: () => api.getEmployees(),
@@ -200,7 +198,6 @@ class CloudStore {
   private vehicles: Vehicle[] = [];
   private drivers: Driver[] = [];
   private tripSlips: TripSlip[] = [];
-  private tyres: Tyre[] = [];
   private vehicleEmiEntries: VehicleEmiEntry[] = [];
   private vehicleExpenses: VehicleExpenseEntry[] = [];
   private employees: Employee[] = [];
@@ -282,7 +279,6 @@ class CloudStore {
         if (d.vehicles) this.vehicles = d.vehicles;
         if (d.drivers) this.drivers = d.drivers;
         if (d.tripSlips) this.tripSlips = d.tripSlips;
-        if (d.tyres) this.tyres = d.tyres;
         if (d.employees) this.employees = d.employees;
         if (d.attendance) this.attendance = d.attendance;
         if (d.leaves) this.leaves = d.leaves;
@@ -399,7 +395,6 @@ class CloudStore {
       if (loaded.vehicles) this.vehicles = loaded.vehicles as Vehicle[];
       if (loaded.drivers) this.drivers = loaded.drivers as Driver[];
       if (loaded.tripSlips) this.tripSlips = loaded.tripSlips as TripSlip[];
-      if (loaded.tyres) this.tyres = loaded.tyres as Tyre[];
       if (loaded.vehicleEmiEntries) this.vehicleEmiEntries = loaded.vehicleEmiEntries as VehicleEmiEntry[];
       if (loaded.vehicleExpenses) this.vehicleExpenses = loaded.vehicleExpenses as VehicleExpenseEntry[];
       if (loaded.employees) this.employees = loaded.employees as Employee[];
@@ -552,7 +547,6 @@ class CloudStore {
   public getVehicles(): Vehicle[] { return [...this.vehicles]; }
   public getDrivers(): Driver[] { return [...this.drivers]; }
   public getTripSlips(): TripSlip[] { return [...this.tripSlips]; }
-  public getTyres(): Tyre[] { return [...this.tyres]; }
   public getVehicleEmiEntries(vehicleId?: string): VehicleEmiEntry[] {
     return vehicleId ? this.vehicleEmiEntries.filter((e) => e.vehicleId === vehicleId) : [...this.vehicleEmiEntries];
   }
@@ -583,7 +577,9 @@ class CloudStore {
     this.notify();
     api
       .upsertAppDefault(key, value)
-      .then(() => this.refreshAfter(['appDefaults'], false))
+      // diesel_rate re-prices the diesel item(=s) procured cost server-side —
+      // refresh items too so every catalog price display follows immediately.
+      .then(() => this.refreshAfter(key === 'diesel_rate' ? ['appDefaults', 'items'] : ['appDefaults'], false))
       .catch((err) => {
         console.error('[CloudStore] setAppDefault cloud error:', err);
         this.refreshAfter(['appDefaults'], false);
@@ -726,6 +722,48 @@ class CloudStore {
   }
 
   // Items & Products
+
+  /**
+   * Strip anything that cannot survive JSON.stringify — DOM nodes (React
+   * fibers make them circular), functions, Dates → ISO — from a mutation
+   * payload BEFORE it reaches the API. A circular-JSON throw inside the
+   * fetch would leave the optimistic row unsynced and only surface as an
+   * opaque alert; with this, the payload is always serializable and any
+   * dropped keys are logged for diagnosis.
+   */
+  private sanitizeForApi<T>(payload: T, label: string): T {
+    const nodeProto: any = typeof Node !== 'undefined' ? Node : undefined;
+    const dropped: string[] = [];
+    const seen = new WeakSet<object>();
+    const walk = (v: any, path: string): any => {
+      const t = typeof v;
+      if (v === null) return null;
+      if (t === 'string' || t === 'number' || t === 'boolean') return v;
+      if (t === 'undefined' || t === 'function' || t === 'bigint' || t === 'symbol') return undefined;
+      if (nodeProto && v instanceof nodeProto) { dropped.push(path); return undefined; }
+      if (v instanceof Date) return v.toISOString();
+      if (Array.isArray(v)) {
+        return v.map((x, i) => walk(x, `${path}[${i}]`)).filter((x) => x !== undefined);
+      }
+      if (t === 'object') {
+        if (seen.has(v)) { dropped.push(`${path} (cycle)`); return undefined; }
+        seen.add(v);
+        const out: any = {};
+        for (const k of Object.keys(v)) {
+          const nv = walk(v[k], `${path}.${k}`);
+          if (nv !== undefined) out[k] = nv;
+        }
+        return out;
+      }
+      return undefined;
+    };
+    const clean = walk(payload, label);
+    if (dropped.length > 0) {
+      console.warn(`[CloudStore] ${label}: dropped non-serializable keys from the API payload:`, dropped);
+    }
+    return clean;
+  }
+
   public addItem(itemData: Partial<Item>): Item {
     // documentIds ride the create payload (staged documents — the server links
     // them once the authoritative item id is minted) but are NEVER stored on
@@ -755,7 +793,7 @@ class CloudStore {
     // Adopt the SERVER-minted item (authoritative id) — an immediate edit
     // without a refresh must never target the optimistic placeholder id.
     api
-      .createItem(itemData)
+      .createItem(this.sanitizeForApi(itemData, 'addItem'))
       .then((res) => {
         const created = res?.data;
         if (created?.id) {
@@ -790,7 +828,7 @@ class CloudStore {
       this.notify();
       // Item hydrations (categoryName, stock valuation) resolve via JOINs —
       // refresh the collection after the edit so display fields follow.
-      api.updateItem(id, updates).then(() => this.refreshAfter(['items'], false)).catch((err) => console.error('[CloudStore] updateItem cloud error:', err));
+      api.updateItem(id, this.sanitizeForApi(updates, 'updateItem')).then(() => this.refreshAfter(['items'], false)).catch((err) => console.error('[CloudStore] updateItem cloud error:', err));
     }
     return updated;
   }
@@ -1003,9 +1041,10 @@ class CloudStore {
     };
     if (!newAdj.adjustmentNumber) delete (newAdj as any).adjustmentNumber;
     this.stockAdjustments.unshift(newAdj);
-    // Update item stock level in memory
+    // Update item stock level in memory (a TRANSFER moves stock BETWEEN the
+    // item's own locations — the total never changes)
     const itm = this.items.find((i) => i.id === adj.itemId);
-    if (itm) {
+    if (itm && adj.type !== 'transfer') {
       if (adj.type === 'increase') itm.currentStock += adj.quantity || 0;
       else itm.currentStock -= adj.quantity || 0;
     }
@@ -1842,7 +1881,7 @@ class CloudStore {
   /** One runner for every lifecycle move: optimistic status + server adopt. */
   private moveUnitLifecycle(
     id: string,
-    endpoint: 'deploy' | 'return' | 'maintain' | 'restore' | 'scrap',
+    endpoint: 'deploy' | 'return' | 'maintain' | 'restore' | 'scrap' | 'unscrap',
     payload: Record<string, unknown>,
     optimistic: Partial<InventoryUnit>
   ): InventoryUnit | undefined {
@@ -1854,6 +1893,7 @@ class CloudStore {
       : endpoint === 'return' ? api.returnInventoryUnit(id, payload as any)
       : endpoint === 'maintain' ? api.maintainInventoryUnit(id, payload as any)
       : endpoint === 'restore' ? api.restoreInventoryUnit(id, payload as any)
+      : endpoint === 'unscrap' ? api.unscrapInventoryUnit(id, payload as any)
       : api.scrapInventoryUnit(id, payload as any);
     call
       .then((res) => {
@@ -1898,7 +1938,11 @@ class CloudStore {
   }
 
   public scrapInventoryUnit(id: string, payload: { notes?: string } = {}) {
-    return this.moveUnitLifecycle(id, 'scrap', payload as Record<string, unknown>, { status: 'scrapped' });
+    return this.moveUnitLifecycle(id, 'scrap', payload as Record<string, unknown>, { status: 'scrapped', vehicleId: undefined, position: undefined });
+  }
+
+  public unscrapInventoryUnit(id: string, payload: { notes?: string } = {}) {
+    return this.moveUnitLifecycle(id, 'unscrap', payload as Record<string, unknown>, { status: 'in_stock', vehicleId: undefined, position: undefined, saleId: undefined });
   }
 
   public deleteInventoryUnit(id: string): boolean {
@@ -1973,7 +2017,7 @@ class CloudStore {
     return false;
   }
 
-  // Logistics: Vehicles, Drivers, Tyres, Trip Slips
+  // Logistics: Vehicles, Drivers, Trip Slips (+ Tyre serials via inventoryUnits)
   public addVehicle(v: Partial<Vehicle>): Vehicle {
     // documentIds ride the create payload (staged documents — the server links
     // them once the authoritative vehicle id is minted) but are NEVER stored
@@ -2156,64 +2200,9 @@ class CloudStore {
     return false;
   }
 
-  public addTyre(t: Partial<Tyre>): Tyre {
-    const newTyre: Tyre = {
-      id: `tyre-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-      serialNumber: t.serialNumber || '',
-      brand: t.brand || 'MRF',
-      size: t.size || '295/90 R20',
-      type: t.type || 'radial',
-      status: t.status || 'available',
-      purchaseDate: t.purchaseDate || new Date().toISOString().split('T')[0],
-      purchaseCost: t.purchaseCost || 0,
-      threadDepthMm: t.threadDepthMm || (t as any).treadDepthMm || 16,
-      createdAt: new Date().toISOString(),
-      ...t,
-    };
-    this.tyres.unshift(newTyre);
-    this.notify();
-    // Adopt the SERVER-minted tyre (authoritative id) — mount/dismount records
-    // referencing it must never keep the optimistic placeholder id.
-    api
-      .createTyre(t)
-      .then((res) => {
-        const created = res?.data;
-        if (created?.id) {
-          this.tyres = this.tyres.map((ty) => (ty.id === newTyre.id ? { ...created } : ty));
-          this.notify();
-        }
-      })
-      .then(() => this.refreshAfter(['tyres']))
-      .catch((err) => console.error('[CloudStore] addTyre cloud error:', err));
-    return newTyre;
-  }
-
-  public updateTyre(id: string, updates: Partial<Tyre>): Tyre | null {
-    let updated: Tyre | null = null;
-    this.tyres = this.tyres.map((t) => {
-      if (t.id === id) {
-        updated = { ...t, ...updates };
-        return updated;
-      }
-      return t;
-    });
-    if (updated) {
-      this.notify();
-      api.updateTyre(id, updates).then(() => this.refreshAfter(['tyres'])).catch((err) => console.error('[CloudStore] updateTyre cloud error:', err));
-    }
-    return updated;
-  }
-
-  public deleteTyre(id: string): boolean {
-    const exists = this.tyres.some((t) => t.id === id);
-    if (exists) {
-      this.tyres = this.tyres.filter((t) => t.id !== id);
-      this.notify();
-      api.deleteTyre(id).then(() => this.refreshAfter(['tyres'])).catch((err) => console.error('[CloudStore] deleteTyre cloud error:', err));
-      return true;
-    }
-    return false;
-  }
+  // TYRE STANDALONE STORE RETIRED (2026-11-17) — tyre serials live in
+  // inventory_units via addInventoryUnit/deploy/return; the legacy Tyre table
+  // methods (addTyre/updateTyre/deleteTyre) are removed.
 
   // Vehicle EMI ledger — auto cron rows appear via refresh; 'manual' rows are
   // recorded (and ANY row edited/removed) by the operator from the EMI tab.
@@ -2903,7 +2892,6 @@ class CloudStore {
       vehicles: this.vehicles,
       drivers: this.drivers,
       tripSlips: this.tripSlips,
-      tyres: this.tyres,
       employees: this.employees,
       attendance: this.attendance,
       leaves: this.leaves,

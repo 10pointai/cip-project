@@ -19,7 +19,6 @@ import {
   Vehicle,
   Driver,
   TripSlip,
-  Tyre,
   Employee,
   EmployeeAttendance,
   EmployeeLeave,
@@ -1048,22 +1047,8 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         createdAt: ts.created_at,
       }));
 
-      const [tyreRows]: [any[], any] = await conn.query('SELECT * FROM tyres ORDER BY serial_number ASC');
-      const tyres: Tyre[] = tyreRows.map((tyr) => ({
-        id: tyr.id,
-        serialNumber: tyr.serial_number,
-        brand: tyr.brand,
-        size: tyr.size,
-        type: (tyr.type as any) || 'radial',
-        status: (tyr.status as any) || 'mounted',
-        vehicleId: tyr.mounted_vehicle_id || undefined,
-        vehicleNo: tyr.mounted_vehicle_number || undefined,
-        position: tyr.axle_position || undefined,
-        purchaseDate: tyr.purchase_date || '2026-04-01',
-        purchaseCost: parseNum(tyr.cost),
-        notes: tyr.notes || undefined,
-        createdAt: tyr.created_at || new Date().toISOString(),
-      }));
+      // TYRES RETIRED (2026-11-17) — the legacy `tyres` table is no longer
+      // fetched into the sync payload; tyre serials live in inventory_units.
 
       // 11. Employees, Attendance, Leaves, Payments
       const [empRows]: [any[], any] = await conn.query('SELECT * FROM employees ORDER BY name ASC');
@@ -1274,7 +1259,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
           itemCode: a.item_code || '',
           unit: a.item_unit_display || a.item_unit_name || 'MT',
           date: a.adjustment_date,
-          type: a.adjustment_type === 'decrease' ? 'decrease' : 'increase',
+          type: (['increase', 'decrease', 'transfer'] as const).includes(a.adjustment_type) ? a.adjustment_type : 'increase',
           quantity: parseNum(a.quantity),
           rate: parseNum(a.rate),
           totalValue: parseNum(a.total_value),
@@ -1282,6 +1267,8 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
           newStock: parseNum(a.new_stock),
           reason: a.reason || '',
           location: a.location_display || undefined,
+          fromLocationId: a.from_location_id || undefined,
+          toLocationId: a.to_location_id || undefined,
           referenceNumber: a.reference_number || undefined,
           notes: a.notes || undefined,
           createdAt: a.created_at,
@@ -1399,12 +1386,14 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         id: e.id,
         entryType: (e.entry_type as any) || 'expense',
         vehicleId: e.vehicle_id,
-        accountId: e.account_id,
+        accountId: e.account_id || undefined,
         date: e.date,
         expenseType: e.expense_type || undefined,
         litres: e.litres !== null && e.litres !== undefined ? parseNum(e.litres) : undefined,
         ratePerLitre: e.rate_per_litre !== null && e.rate_per_litre !== undefined ? parseNum(e.rate_per_litre) : undefined,
         amount: parseNum(e.amount),
+        dieselItemId: e.diesel_item_id || undefined,
+        dieselLocationId: e.diesel_location_id || undefined,
         notes: e.notes || undefined,
         createdAt: e.created_at || new Date().toISOString(),
       }));
@@ -1459,7 +1448,6 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         vehicles,
         drivers,
         tripSlips,
-        tyres,
         employees,
         attendance,
         leaves,
@@ -2362,17 +2350,19 @@ export async function liveSyncVehicleExpenseEntry(e: VehicleExpenseEntry, isDele
       await pool.query('DELETE FROM vehicle_expense_entries WHERE id = ?', [e.id]);
     } else {
       await pool.query(
-        `REPLACE INTO vehicle_expense_entries (id, entry_type, vehicle_id, account_id, date, expense_type, litres, rate_per_litre, amount, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `REPLACE INTO vehicle_expense_entries (id, entry_type, vehicle_id, account_id, date, expense_type, litres, rate_per_litre, amount, diesel_item_id, diesel_location_id, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           e.id,
           e.entryType || 'expense',
           e.vehicleId,
-          e.accountId,
+          e.accountId || '',
           e.date,
           e.expenseType || null,
           e.litres ?? null,
           e.ratePerLitre ?? null,
           e.amount || 0,
+          e.dieselItemId || null,
+          e.dieselLocationId || null,
           e.notes || null,
           e.createdAt || new Date().toISOString(),
         ]
@@ -2493,41 +2483,8 @@ export async function liveSyncTripSlip(ts: TripSlip, isDelete = false) {
   }
 }
 
-export async function liveSyncTyre(tyr: Tyre, isDelete = false) {
-  const pool = getMysqlPool();
-  if (!pool) return;
-  try {
-    if (isDelete) {
-      await pool.query('DELETE FROM tyres WHERE id = ?', [tyr.id]);
-    } else {
-      await pool.query(
-        `REPLACE INTO tyres (id, serial_number, brand, model, size, status, mounted_vehicle_id, mounted_vehicle_number, axle_position, current_tread_depth_mm, initial_tread_depth_mm, total_km_run, purchase_date, cost, notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          tyr.id,
-          tyr.serialNumber,
-          tyr.brand,
-          tyr.type || 'radial',
-          tyr.size,
-          tyr.status,
-          tyr.vehicleId || null,
-          tyr.vehicleNo || null,
-          tyr.position || null,
-          tyr.threadDepthMm || 12,
-          15,
-          tyr.currentOdometer || 0,
-          tyr.purchaseDate || null,
-          tyr.purchaseCost || 0,
-          tyr.notes || null,
-          tyr.createdAt || new Date().toISOString(),
-          new Date().toISOString(),
-        ]
-      );
-    }
-  } catch (e: any) {
-    console.error('[Azure MySQL LiveSync] Failed to sync tyre:', e.message);
-  }
-}
+// TYRE STANDALONE SYNC RETIRED (2026-11-17) — liveSyncTyre removed with the
+// standalone tyre table; inventory_units carry their own live sync.
 
 export async function liveSyncEmployee(emp: Employee, isDelete = false) {
   const pool = getMysqlPool();
@@ -3073,13 +3030,15 @@ export async function liveSyncStockAdjustment(adj: ItemStockAdjustment, isDelete
       // Stores FKs only (item_id, location_id); item name/code/unit and location
       // display name are resolved with JOINs at read time so renames propagate.
       await pool.query(
-        `REPLACE INTO item_stock_adjustments (id, adjustment_number, item_id, location_id, adjustment_date, adjustment_type, quantity, rate, total_value, previous_stock, new_stock, reason, reference_number, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `REPLACE INTO item_stock_adjustments (id, adjustment_number, item_id, location_id, from_location_id, to_location_id, adjustment_date, adjustment_type, quantity, rate, total_value, previous_stock, new_stock, reason, reference_number, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           adj.id,
           adj.adjustmentNumber,
           adj.itemId,
           locationId || null,
+          adj.fromLocationId || null,
+          adj.toLocationId || null,
           adj.date,
           adj.type,
           adj.quantity || 0,

@@ -12,6 +12,7 @@ import {
   Package,
   Scale,
   CheckCircle2,
+  ArrowRightLeft,
 } from 'lucide-react';
 import { Item, ItemLocation, ItemStockAdjustment } from '../../types';
 
@@ -51,9 +52,13 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
   const [selectedItemId, setSelectedItemId] = useState<string>(
     initialItemId || (productItems.length > 0 ? productItems[0].id : '')
   );
-  const [type, setType] = useState<'increase' | 'decrease'>('increase');
+  const [type, setType] = useState<'increase' | 'decrease' | 'transfer'>('increase');
   const [quantity, setQuantity] = useState<string>('');
   const [rate, setRate] = useState<string>('');
+  // STOCK TRANSFER (2026-11-17): FROM = the item-configured bucket the quantity
+  // leaves; TO = any inventory location (stock can land somewhere new).
+  const [transferFrom, setTransferFrom] = useState<string>('');
+  const [transferTo, setTransferTo] = useState<string>('');
   const [date, setDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [reason, setReason] = useState<string>(COMMON_REASONS[0]);
   const [customReason, setCustomReason] = useState<string>('');
@@ -100,20 +105,69 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
   const calculatedTotalValue = numQty * numRate;
   const currentStock = selectedItem?.currentStock || 0;
   const resultingStock =
-    type === 'increase' ? currentStock + numQty : Math.max(0, currentStock - numQty);
+    type === 'increase' ? currentStock + numQty : type === 'decrease' ? Math.max(0, currentStock - numQty) : currentStock;
 
   const selectedLocStockObj = itemConfiguredLocations.find(
     (l) => l.locationName.toLowerCase().trim() === location.toLowerCase().trim()
   );
   const locationStock = selectedLocStockObj ? Number(selectedLocStockObj.currentStock || 0) : undefined;
   const resultingLocationStock = locationStock !== undefined
-    ? (type === 'increase' ? locationStock + numQty : Math.max(0, locationStock - numQty))
+    ? (type === 'increase' ? locationStock + numQty : type === 'decrease' ? Math.max(0, locationStock - numQty) : locationStock)
     : undefined;
+
+  // TRANSFER stock figures: the FROM bucket (item-configured) + the TO
+  // location's projected stock. A transfer never changes the item total.
+  const configuredLocByIdOrName = (locRef: string) =>
+    itemConfiguredLocations.find((l) => (l as any).locationId === locRef || l.locationName.toLowerCase().trim() === locRef.toLowerCase().trim());
+  const fromBucket = configuredLocByIdOrName(transferFrom);
+  const fromLocStock = fromBucket ? Number(fromBucket.currentStock || 0) : undefined;
+  const fromNameResolved = fromBucket?.locationName || (locations.find((l) => l.id === transferFrom)?.name || '');
+  const toLoc = locations.find((l) => l.id === transferTo);
+  const toNameResolved = toLoc?.name || '';
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedItem) {
       setError('Please select an item to adjust.');
+      return;
+    }
+    if (numQty <= 0) {
+      setError('Please enter a valid positive quantity to adjust.');
+      return;
+    }
+    if (type === 'transfer') {
+      // CLIENT DIRECTIVE (2026-11-17): a transfer is BLOCKED on insufficient
+      // source stock — the server enforces it too.
+      if (!transferFrom || !transferTo) {
+        setError('Pick both the FROM location (source stock) and the TO location (destination).');
+        return;
+      }
+      if (transferFrom === transferTo) {
+        setError('A transfer cannot move stock between the same location — pick a different destination.');
+        return;
+      }
+      if (fromLocStock !== undefined && numQty > fromLocStock) {
+        setError(`Stock at "${fromNameResolved}" is ${fromLocStock.toLocaleString('en-IN')} ${selectedItem.unit} — cannot transfer ${numQty.toLocaleString('en-IN')} ${selectedItem.unit}.`);
+        return;
+      }
+      const finalReasonT = reason === 'Other' ? customReason.trim() || 'Manual Location Transfer' : reason;
+      onSubmit({
+        itemId: selectedItem.id,
+        itemName: selectedItem.name,
+        itemCode: selectedItem.code,
+        unit: selectedItem.unit,
+        date,
+        type: 'transfer',
+        quantity: numQty,
+        rate: 0, // value-neutral: both legs price at the item's blended valuation rate
+        reason: finalReasonT,
+        location: fromNameResolved,
+        ...(fromBucket && (fromBucket as any).locationId ? { locationId: (fromBucket as any).locationId } : {}),
+        fromLocationId: ((fromBucket as any)?.locationId) || transferFrom,
+        toLocationId: transferTo,
+        referenceNumber: referenceNumber.trim(),
+        notes: notes.trim(),
+      } as any);
       return;
     }
     if (!location.trim()) {
@@ -172,17 +226,21 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
               className={`w-10 h-10 rounded-2xl flex items-center justify-center font-bold ${
                 type === 'increase'
                   ? 'bg-[var(--color-success-container)] text-[var(--color-success)]'
-                  : 'bg-[var(--color-error-container)] text-[var(--color-error)]'
+                  : type === 'transfer'
+                    ? 'bg-[var(--color-tertiary-container)] text-[var(--color-on-tertiary-container)]'
+                    : 'bg-[var(--color-error-container)] text-[var(--color-error)]'
               }`}
             >
-              {type === 'increase' ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
+              {type === 'increase' ? <TrendingUp className="w-5 h-5" /> : type === 'transfer' ? <ArrowRightLeft className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
             </div>
             <div>
               <h2 className="text-base sm:text-lg font-extrabold text-[var(--color-on-surface)]">
-                Stock Adjustment Voucher
+                {type === 'transfer' ? 'Stock Transfer Voucher' : 'Stock Adjustment Voucher'}
               </h2>
               <p className="text-xs text-[var(--color-on-surface-variant)]">
-                Record physical count reconciliation, wastage, sampling, or stock corrections
+                {type === 'transfer'
+                  ? 'Move stock from one storage location to another of the same item'
+                  : 'Record physical count reconciliation, wastage, sampling, or stock corrections'}
               </p>
             </div>
           </div>
@@ -275,37 +333,53 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
             <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] uppercase tracking-wider mb-1.5">
               Adjustment Type *
             </label>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-3 gap-2.5">
               <button
                 type="button"
                 onClick={() => setType('increase')}
-                className={`flex items-center justify-center gap-2 py-3 px-4 rounded-2xl border text-xs font-bold transition-all ${
+                className={`flex items-center justify-center gap-2 py-3 px-3 rounded-2xl border text-xs font-bold transition-all ${
                   type === 'increase'
                     ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)] border-[var(--color-success)] shadow-xs ring-1 ring-[var(--color-success)]'
                     : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border-[var(--color-outline-variant)] hover:bg-[var(--color-surface-container-high)]'
                 }`}
+                title="Surplus, inward receipt, audit addition"
               >
-                <TrendingUp className="w-4 h-4 text-[var(--color-success)]" />
-                <div className="text-left">
-                  <p className="text-xs font-bold text-[var(--color-on-surface)]">+ Increase Stock</p>
-                  <p className="text-[10px] text-[var(--color-on-surface-variant)]">Surplus, inward receipt, audit addition</p>
-                </div>
+                <TrendingUp className="w-4 h-4 text-[var(--color-success)] shrink-0" />
+                <span className="text-[11px] font-bold text-[var(--color-on-surface)]">+ Increase</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setType('decrease')}
-                className={`flex items-center justify-center gap-2 py-3 px-4 rounded-2xl border text-xs font-bold transition-all ${
+                className={`flex items-center justify-center gap-2 py-3 px-3 rounded-2xl border text-xs font-bold transition-all ${
                   type === 'decrease'
                     ? 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)] border-[var(--color-error)] shadow-xs ring-1 ring-[var(--color-error)]'
                     : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border-[var(--color-outline-variant)] hover:bg-[var(--color-surface-container-high)]'
                 }`}
+                title="Wastage, sampling loss, shrinkage"
               >
-                <TrendingDown className="w-4 h-4 text-[var(--color-error)]" />
-                <div className="text-left">
-                  <p className="text-xs font-bold text-[var(--color-on-surface)]">- Reduce Stock</p>
-                  <p className="text-[10px] text-[var(--color-on-surface-variant)]">Wastage, sampling loss, shrinkage</p>
-                </div>
+                <TrendingDown className="w-4 h-4 text-[var(--color-error)] shrink-0" />
+                <span className="text-[11px] font-bold text-[var(--color-on-surface)]">− Reduce</span>
+              </button>
+
+              {/* STOCK TRANSFER (2026-11-17): move stock BETWEEN locations of
+                  the same item — total unchanged, value-neutral */}
+              <button
+                type="button"
+                onClick={() => {
+                  setType('transfer');
+                  setTransferFrom(itemConfiguredLocations[0]?.locationId || itemConfiguredLocations[0]?.locationName || (locations[0]?.id ?? ''));
+                  setTransferTo('');
+                }}
+                className={`flex items-center justify-center gap-2 py-3 px-3 rounded-2xl border text-xs font-bold transition-all ${
+                  type === 'transfer'
+                    ? 'bg-[var(--color-tertiary-container)] text-[var(--color-on-tertiary-container)] border-[var(--color-tertiary)] shadow-xs ring-1 ring-[var(--color-tertiary)]'
+                    : 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border-[var(--color-outline-variant)] hover:bg-[var(--color-surface-container-high)]'
+                }`}
+                title="Move stock from one storage location to another"
+              >
+                <ArrowRightLeft className="w-4 h-4 text-[var(--color-tertiary)] shrink-0" />
+                <span className="text-[11px] font-bold text-[var(--color-on-surface)]">⇉ Transfer</span>
               </button>
             </div>
           </div>
@@ -330,28 +404,37 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
               />
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] uppercase tracking-wider mb-1">
-                Cost Rate ({currencySymbol} / {selectedItem?.unit || 'Unit'})
-              </label>
-              <div className="relative">
-                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[var(--color-outline)] font-bold text-xs">
-                  {currencySymbol}
-                </span>
-                <input
-                  type="number"
-                  step="any"
-                  placeholder="0.00"
-                  value={rate}
-                  onChange={(e) => setRate(e.target.value)}
-                  className="w-full pl-8 pr-4 py-2.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:ring-2 focus:ring-[var(--color-primary)]"
-                />
+            {type !== 'transfer' && (
+              <div>
+                <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] uppercase tracking-wider mb-1">
+                  Cost Rate ({currencySymbol} / {selectedItem?.unit || 'Unit'})
+                </label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[var(--color-outline)] font-bold text-xs">
+                    {currencySymbol}
+                  </span>
+                  <input
+                    type="number"
+                    step="any"
+                    placeholder="0.00"
+                    value={rate}
+                    onChange={(e) => setRate(e.target.value)}
+                    className="w-full pl-8 pr-4 py-2.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:ring-2 focus:ring-[var(--color-primary)]"
+                  />
+                </div>
               </div>
-            </div>
+            )}
           </div>
 
+          {/* TRANSFER note — value-neutral by design */}
+          {type === 'transfer' && (
+            <div className="p-3 bg-[var(--color-tertiary-container)]/30 border border-[var(--color-tertiary)]/30 rounded-2xl text-[11px] font-semibold text-[var(--color-on-surface-variant)]">
+              A transfer moves stock BETWEEN locations — the item's total and valuation do not change. Both ledger legs are recorded against this one voucher.
+            </div>
+          )}
+
           {/* Valuation Summary Badge */}
-          {numQty > 0 && (
+          {numQty > 0 && type !== 'transfer' && (
             <div className="p-3 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] flex items-center justify-between text-xs">
               <span className="text-[var(--color-on-surface-variant)] font-medium">
                 Total Adjustment Valuation:
@@ -377,6 +460,53 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
               />
             </div>
 
+            {type === 'transfer' ? (
+              <div className="space-y-2">
+                <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] uppercase tracking-wider mb-1">
+                  FROM Location (source stock) *
+                </label>
+                <select
+                  required
+                  value={transferFrom}
+                  onChange={(e) => { setTransferFrom(e.target.value); setError(''); }}
+                  className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:ring-2 focus:ring-[var(--color-primary)]"
+                >
+                  <option value="">-- Choose source location --</option>
+                  {itemConfiguredLocations.map((loc, idx) => (
+                    <option key={`from-${idx}`} value={(loc as any).locationId || loc.locationName}>
+                      {loc.locationName} (Available: {Number(loc.currentStock || 0).toLocaleString('en-IN')} {selectedItem?.unit})
+                    </option>
+                  ))}
+                </select>
+                {fromLocStock !== undefined && (
+                  <div className="mt-1 px-3 py-1 bg-[var(--color-surface-container-high)] rounded-xl border border-[var(--color-outline-variant)] flex items-center justify-between text-[11px]">
+                    <span className="text-[var(--color-on-surface-variant)]">Result at {fromNameResolved}:</span>
+                    <span className={`font-bold ${fromLocStock - numQty < 0 ? 'text-[var(--color-error)]' : 'text-[var(--color-on-surface)]'}`}>
+                      {Math.max(0, fromLocStock - numQty).toLocaleString('en-IN')} {selectedItem?.unit}
+                    </span>
+                  </div>
+                )}
+                <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] uppercase tracking-wider mb-1 pt-1">
+                  TO Location (destination) *
+                </label>
+                <select
+                  required
+                  value={transferTo}
+                  onChange={(e) => { setTransferTo(e.target.value); setError(''); }}
+                  className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:ring-2 focus:ring-[var(--color-primary)]"
+                >
+                  <option value="">-- Choose destination location --</option>
+                  {locations.filter((l) => l.id !== transferFrom).map((l) => (
+                    <option key={l.id} value={l.id}>{l.name}</option>
+                  ))}
+                </select>
+                {itemConfiguredLocations.length === 0 && (
+                  <p className="text-[10px] text-[var(--color-error)] mt-1 font-medium">
+                    This item has no assigned storage locations — a transfer needs a stocked source. Assign locations first.
+                  </p>
+                )}
+              </div>
+            ) : (
             <div>
               <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] uppercase tracking-wider mb-1 flex items-center justify-between">
                 <span>Storage Location / Silo *</span>
@@ -414,6 +544,7 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
                 </div>
               )}
             </div>
+            )}
           </div>
 
           {/* Reason */}

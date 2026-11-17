@@ -1,9 +1,12 @@
 import React, { useState } from 'react';
 import {
   ArrowLeft, Pencil, Truck, Fuel, Route, IndianRupee, Wrench,
-  Landmark, CalendarClock, Layers, Paperclip, LayoutDashboard, User,
+  Landmark, CalendarClock, Layers, Paperclip, LayoutDashboard, User, Disc, Plus, Undo2, X,
 } from 'lucide-react';
-import { Vehicle, Sale, TripSlip } from '../../types';
+import {
+  Vehicle, Sale, TripSlip,
+  TYRE_POSITIONS, TYRE_POSITION_LABELS, TyrePosition, InventoryUnit, isTyreItemName,
+} from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { EntityDocumentsSection } from '../common/EntityDocumentsSection';
 
@@ -29,7 +32,15 @@ interface VehicleDetailPageProps {
  * All reads funnel through cloudStore — live with syncs.
  */
 export function VehicleDetailPage({ vehicle, sales, onBack, onEdit, onOpenRst }: VehicleDetailPageProps) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'expenses' | 'trips' | 'documents'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'tyres' | 'expenses' | 'trips' | 'documents'>('overview');
+  // TYRE DIAGRAM state — 'fit' selects a spare serial for one empty slot;
+  // 'unload' shows a fitted serial with its unload action.
+  const [tyreModal, setTyreModal] = useState<
+    { mode: 'fit'; position: TyrePosition } | { mode: 'unload'; unitId: string } | null
+  >(null);
+  const [fitUnitId, setFitUnitId] = useState('');
+  const [fitOdometer, setFitOdometer] = useState('');
+  const [fitNotes, setFitNotes] = useState('');
 
   // LIVE reads — recomputed on every render (the parent LogisticsView
   // re-renders on each cloudStore tick). Memoizing on vehicle.id would go
@@ -47,6 +58,43 @@ export function VehicleDetailPage({ vehicle, sales, onBack, onEdit, onOpenRst }:
   const accounts = localDb.getAccounts();
   const parties = localDb.getParties();
   const settings = localDb.getSettings();
+
+  // --- TYRE FITMENT data (2026-11-17) — the vehicle's 12-position dumper ---
+  const items = localDb.getItems();
+  const unitAll = localDb.getInventoryUnits();
+  const locations = localDb.getLocations();
+  const itemById = new Map(items.map((i) => [i.id, i]));
+  // Tyre units = serials of tyre-named asset items ("tyre"/"tyres" word match)
+  const isTyreUnit = (u: InventoryUnit) => isTyreItemName(itemById.get(u.itemId)?.name);
+  const fittedTyres = unitAll.filter(
+    (u) => u.vehicleId === vehicle.id && u.status === 'deployed' && isTyreUnit(u),
+  );
+  // Position → unit map for the diagram (server guarantees one per position)
+  const tyreByPos = new Map<string, InventoryUnit>();
+  fittedTyres.forEach((u) => {
+    if (u.position) tyreByPos.set(String(u.position).toUpperCase(), u);
+  });
+  const fittedTyreCount = fittedTyres.length;
+  // OTHER trackable units riding this vehicle — no position (client directive)
+  const otherFitted = unitAll.filter(
+    (u) => u.vehicleId === vehicle.id && u.status === 'deployed' && !isTyreUnit(u),
+  );
+  // Spare yard stock — every in-stock tyre serial (any tyre item)
+  const spareTyres = unitAll
+    .filter((u) => u.status === 'in_stock' && isTyreUnit(u))
+    .sort((a, b) => a.serialNumber.localeCompare(b.serialNumber));
+  const tyreConditionRing: Record<string, string> = {
+    excellent: 'border-[var(--color-success)]',
+    good: 'border-[var(--color-primary)]',
+    worn: 'border-[var(--color-warning)]',
+    damaged: 'border-[var(--color-error)]',
+  };
+  const tyreConditionTone: Record<string, string> = {
+    excellent: 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]',
+    good: 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]',
+    worn: 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]',
+    damaged: 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]',
+  };
 
   const formatCurrency = (amount: number) =>
     new Intl.NumberFormat('en-IN', {
@@ -71,6 +119,70 @@ export function VehicleDetailPage({ vehicle, sales, onBack, onEdit, onOpenRst }:
   const tenure = Number(emi?.totalTenureMonths) || 0;
   const progress = tenure > 0 ? Math.min(100, Math.round((paidEmis / tenure) * 100)) : 0;
 
+  /** ONE wheel slot of the diagram: a fitted serial (ring coloured by
+   *  condition, click → unload card) or an empty dashed slot (click → fit). */
+  const renderTyreSlot = (pos: TyrePosition) => {
+    const unit = tyreByPos.get(pos);
+    if (unit) {
+      const cond = unit.condition || 'good';
+      const itemName = itemById.get(unit.itemId)?.name || '';
+      return (
+        <button
+          key={`slot-${pos}`}
+          type="button"
+          onClick={() => setTyreModal({ mode: 'unload', unitId: unit.id })}
+          className="group flex flex-col items-center gap-1"
+          title={`${unit.serialNumber} · ${itemName} · ${cond}${unit.fitOdometer ? ` · fitted @ ${unit.fitOdometer.toLocaleString('en-IN')} km` : ''}`}
+        >
+          <span className={`w-16 h-16 rounded-full bg-[var(--color-surface-container-lowest)] border-[3px] ${tyreConditionRing[cond]} flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform`}>
+            <span className="font-mono text-[9px] font-black text-[var(--color-on-surface)] text-center leading-tight px-1 truncate max-w-[56px]">{unit.serialNumber}</span>
+          </span>
+          <span className="text-[9px] font-black uppercase tracking-wider text-[var(--color-primary)]">{pos}</span>
+        </button>
+      );
+    }
+    return (
+      <button
+        key={`slot-${pos}`}
+        type="button"
+        onClick={() => {
+          setFitUnitId('');
+          setFitOdometer('');
+          setFitNotes('');
+          setTyreModal({ mode: 'fit', position: pos });
+        }}
+        className="group flex flex-col items-center gap-1"
+        title={`Fit a spare tyre at ${TYRE_POSITION_LABELS[pos]}`}
+      >
+        <span className="w-16 h-16 rounded-full border-2 border-dashed border-[var(--color-outline)] bg-transparent flex items-center justify-center text-[var(--color-outline)] group-hover:border-[var(--color-primary)] group-hover:text-[var(--color-primary)] group-hover:scale-105 transition-all">
+          <Plus className="w-4.5 h-4.5" />
+        </span>
+        <span className="text-[9px] font-black uppercase tracking-wider text-[var(--color-on-surface-variant)] group-hover:text-[var(--color-primary)]">{pos}</span>
+      </button>
+    );
+  };
+
+  // --- TYRE DIAGRAM actions (fit from spare stock / unload to stock) ---
+  const handleFitSerial = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!tyreModal || tyreModal.mode !== 'fit' || !fitUnitId) return;
+    localDb.deployInventoryUnit(fitUnitId, {
+      vehicleId: vehicle.id,
+      position: tyreModal.position,
+      odometer: fitOdometer === '' ? undefined : Number(fitOdometer),
+      notes: fitNotes.trim() || undefined,
+    });
+    setTyreModal(null);
+    setFitUnitId('');
+    setFitOdometer('');
+    setFitNotes('');
+  };
+
+  const handleUnloadSerial = (unitId: string) => {
+    localDb.returnInventoryUnit(unitId, {});
+    setTyreModal(null);
+  };
+
   const insuranceDaysLeft = vehicle.insuranceExpiry
     ? Math.round((Date.parse(`${vehicle.insuranceExpiry}T00:00:00Z`) - Date.now()) / 86_400_000)
     : undefined;
@@ -82,8 +194,9 @@ export function VehicleDetailPage({ vehicle, sales, onBack, onEdit, onOpenRst }:
     out_of_service: 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]',
   };
 
-  const TABS: Array<{ id: 'overview' | 'expenses' | 'trips' | 'documents'; label: string; icon: any; count?: string }> = [
+  const TABS: Array<{ id: 'overview' | 'tyres' | 'expenses' | 'trips' | 'documents'; label: string; icon: any; count?: string }> = [
     { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+    { id: 'tyres', label: 'Tyres', icon: Disc, count: String(fittedTyreCount) },
     { id: 'expenses', label: 'Expenses', icon: Wrench, count: String(expenses.length) },
     { id: 'trips', label: 'Trips', icon: Route, count: String(slips.length) },
     { id: 'documents', label: 'Documents', icon: Paperclip },
@@ -339,7 +452,129 @@ export function VehicleDetailPage({ vehicle, sales, onBack, onEdit, onOpenRst }:
         </div>
       )}
 
-      {/* 4b. EXPENSES — the vehicle's full money-spent log */}
+      {/* 4b. TYRES — the top-down 12-tyre dumper diagram (2026-11-17).
+          Every slot shows exactly which serial sits on that wheel; empty
+          slots fit from spare yard stock, fitted slots unload to stock. */}
+      {activeTab === 'tyres' && (
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-[var(--color-outline-variant)] bg-[var(--color-surface-container-lowest)] p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+              <p className="text-[10px] font-black uppercase tracking-wider text-[var(--color-on-surface-variant)] flex items-center gap-1.5">
+                <Disc className="w-3.5 h-3.5" /> Tyre Fitment Diagram — 12-Tyre Dumper Layout
+              </p>
+              <div className="flex items-center gap-2 text-[10px] font-bold text-[var(--color-on-surface-variant)]">
+                <span className="px-2 py-0.5 rounded-full bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]">{fittedTyreCount} / 12 fitted</span>
+                <span className="px-2 py-0.5 rounded-full bg-[var(--color-success-container)] text-[var(--color-on-success-container)]">{spareTyres.length} in spare stock</span>
+              </div>
+            </div>
+
+            <div className="max-w-xl mx-auto flex flex-col items-center gap-4 py-2">
+              {/* FRONT AXLE — steer pair around the cab (view from above) */}
+              <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3 w-full">
+                {renderTyreSlot('FL')}
+                <div className="h-10 rounded-xl bg-[var(--color-surface-container-highest)] flex items-center justify-center gap-2 text-[var(--color-on-surface)]">
+                  <Truck className="w-4 h-4" />
+                  <span className="text-[10px] font-black uppercase tracking-wider">Cab · Front Axle</span>
+                </div>
+                {renderTyreSlot('FR')}
+              </div>
+
+              <div className="w-1.5 h-5 bg-[var(--color-surface-container-highest)] rounded-full" />
+
+              {/* REAR BODY — five axle pairs (L1..L5 on the left, R1..R5 right) */}
+              <div className="w-full rounded-2xl border border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] p-4 space-y-4">
+                <p className="text-center text-[9px] font-black uppercase tracking-widest text-[var(--color-on-surface-variant)]">Dumper Body · Rear Axles 1–5</p>
+                {[1, 2, 3, 4, 5].map((axle) => (
+                  <div key={axle} className="grid grid-cols-[auto_1fr_auto] items-center gap-3">
+                    {renderTyreSlot(`L${axle}` as TyrePosition)}
+                    <div className="h-1.5 rounded-full bg-[var(--color-surface-container-highest)] relative">
+                      <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 text-[8px] font-black uppercase tracking-widest text-[var(--color-outline)] px-1.5">Axle {axle}</span>
+                    </div>
+                    {renderTyreSlot(`R${axle}` as TyrePosition)}
+                  </div>
+                ))}
+              </div>
+
+              <p className="text-[10px] text-[var(--color-on-surface-variant)] text-center max-w-sm">
+                View from above · front (FL/FR) at the top. Ring colour = last know condition; click a fitted serial to unload it, or an empty slot to fit a spare.
+              </p>
+            </div>
+
+            {/* Spare serials quick list — direct fit targets */}
+            {spareTyres.length === 0 ? (
+              <p className="text-center text-[11px] text-[var(--color-on-surface-variant)] mt-2">
+                No tyre serials in spare stock — register tyre serials on a tyre item in the Items module.
+              </p>
+            ) : (
+              <div className="flex flex-wrap items-center justify-center gap-1.5 mt-2 pt-3 border-t border-[var(--color-outline-variant)]/60">
+                <span className="text-[9px] font-black uppercase tracking-wider text-[var(--color-on-surface-variant)] mr-1">Spares:</span>
+                {spareTyres.slice(0, 12).map((u) => {
+                  const cond = u.condition || 'good';
+                  return (
+                    <span key={u.id} className={`font-mono text-[9px] font-bold px-2 py-0.5 rounded-full border border-[var(--color-outline-variant)] ${tyreConditionTone[cond]}`}>
+                      {u.serialNumber}
+                    </span>
+                  );
+                })}
+                {spareTyres.length > 12 && (
+                  <span className="text-[9px] font-bold text-[var(--color-on-surface-variant)]">+{spareTyres.length - 12} more</span>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* OTHER trackable units on this vehicle — no position (client rule) */}
+          <div className="rounded-2xl border border-[var(--color-outline-variant)] bg-[var(--color-surface-container-lowest)] overflow-clip">
+            <div className="px-4 py-3 bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] flex items-center justify-between">
+              <p className="text-[10px] font-black uppercase tracking-wider text-[var(--color-on-surface-variant)] flex items-center gap-1.5">
+                <Layers className="w-3.5 h-3.5" /> Other Equipment on Board
+              </p>
+              <span className="text-[10px] font-bold text-[var(--color-on-surface-variant)]">{otherFitted.length} unit{otherFitted.length === 1 ? '' : 's'} · no wheel position</span>
+            </div>
+            {otherFitted.length === 0 ? (
+              <p className="px-4 py-5 text-center text-[11px] text-[var(--color-on-surface-variant)]">No other trackable units are assigned to this vehicle.</p>
+            ) : (
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="text-[9px] uppercase tracking-wider text-[var(--color-on-surface-variant)] border-b border-[var(--color-outline-variant)]/50">
+                    <th className="py-2 px-4">Serial</th>
+                    <th className="py-2 px-3">Item</th>
+                    <th className="py-2 px-3">Condition</th>
+                    <th className="py-2 px-3">Storage Location</th>
+                    <th className="py-2 px-4 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--color-outline-variant)]/40">
+                  {otherFitted.map((u) => (
+                    <tr key={u.id} className="text-[11px]">
+                      <td className="py-2.5 px-4 font-mono font-black text-[var(--color-on-surface)]">{u.serialNumber}</td>
+                      <td className="py-2.5 px-3 font-semibold text-[var(--color-on-surface)]">{itemById.get(u.itemId)?.name || '—'}</td>
+                      <td className="py-2.5 px-3">
+                        <span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded-full ${tyreConditionTone[u.condition || 'good']}`}>{u.condition || 'good'}</span>
+                      </td>
+                      <td className="py-2.5 px-3 text-[var(--color-on-surface-variant)]">
+                        {u.locationId ? (locations.find((l) => l.id === u.locationId)?.name || '—') : '—'}
+                      </td>
+                      <td className="py-2.5 px-4 text-right">
+                        <button
+                          type="button"
+                          onClick={() => handleUnloadSerial(u.id)}
+                          className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)] hover:opacity-90 transition"
+                          title="Remove this unit from the vehicle back to stock"
+                        >
+                          <span className="inline-flex items-center gap-1"><Undo2 className="w-3 h-3" /> Unload</span>
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 4c. EXPENSES — the vehicle's full money-spent log */}
       {activeTab === 'expenses' && (
         <div className="rounded-2xl border border-[var(--color-outline-variant)] bg-[var(--color-surface-container-lowest)] overflow-clip">
           <div className="px-4 py-3 bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] flex items-center justify-between">
@@ -390,7 +625,7 @@ export function VehicleDetailPage({ vehicle, sales, onBack, onEdit, onOpenRst }:
         </div>
       )}
 
-      {/* 4c. TRIP SLIPS — full log; RST numbers open the linked sales order */}
+      {/* 4d. TRIP SLIPS — full log; RST numbers open the linked sales order */}
       {activeTab === 'trips' && (
         <div className="rounded-2xl border border-[var(--color-outline-variant)] bg-[var(--color-surface-container-lowest)] overflow-clip">
           <div className="px-4 py-3 bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] flex items-center justify-between">
@@ -499,12 +734,119 @@ export function VehicleDetailPage({ vehicle, sales, onBack, onEdit, onOpenRst }:
         </div>
       )}
 
-      {/* 4d. DOCUMENTS — RC / insurance / any vehicle files (same section as the edit form) */}
+      {/* 4e. DOCUMENTS — RC / insurance / any vehicle files (same section as the edit form) */}
       {activeTab === 'documents' && (
         <div className="rounded-2xl border border-[var(--color-outline-variant)] bg-[var(--color-surface-container-lowest)] p-4">
           <EntityDocumentsSection feature="vehicle" entityId={vehicle.id} />
         </div>
       )}
+
+      {/* ===== TYRE MODALS — fit a spare into an empty slot / unload a fitted serial ===== */}
+      {tyreModal && tyreModal.mode === 'fit' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs">
+          <form onSubmit={handleFitSerial} className="bg-[var(--color-surface-container-lowest)] w-full max-w-lg rounded-3xl shadow-2xl border border-[var(--color-outline-variant)]">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
+              <h3 className="text-sm font-bold text-[var(--color-on-surface)] flex items-center gap-2">
+                <Disc className="w-4 h-4 text-[var(--color-primary)]" />
+                Fit Tyre — {TYRE_POSITION_LABELS[tyreModal.position]}
+              </h3>
+              <button type="button" onClick={() => setTyreModal(null)} className="p-2 text-[var(--color-outline)] rounded-full hover:bg-[var(--color-surface-container-high)]"><X className="w-4.5 h-4.5" /></button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="flex items-center gap-2 text-[11px] font-bold text-[var(--color-on-surface-variant)] bg-[var(--color-surface-container)] rounded-xl px-3 py-2">
+                <Truck className="w-3.5 h-3.5 shrink-0" />
+                <span className="font-mono text-[var(--color-on-surface)]">{vehicle.vehicleNo}</span>
+                <span className="text-[var(--color-outline)]">·</span>
+                <span>{fittedTyreCount} of 12 positions filled</span>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Tyre Serial (from spare stock) *</label>
+                <select
+                  required
+                  value={fitUnitId}
+                  onChange={(e) => setFitUnitId(e.target.value)}
+                  className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
+                >
+                  <option value="">-- Choose a spare serial --</option>
+                  {spareTyres.length === 0 && <option disabled>-- No spare tyre serials in stock — register them in the Items module --</option>}
+                  {spareTyres.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.serialNumber}{itemById.get(u.itemId)?.name ? ` · ${itemById.get(u.itemId)?.name}` : ''}{u.locationId ? ` · ${locations.find((l) => l.id === u.locationId)?.name || ''}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Odometer at Fitment (km)</label>
+                  <input
+                    type="number"
+                    step="any"
+                    placeholder="e.g. 148230"
+                    value={fitOdometer}
+                    onChange={(e) => setFitOdometer(e.target.value)}
+                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Notes</label>
+                  <input
+                    type="text"
+                    value={fitNotes}
+                    onChange={(e) => setFitNotes(e.target.value)}
+                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] flex justify-end gap-3">
+              <button type="button" onClick={() => setTyreModal(null)} className="px-5 py-2 border border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] rounded-full text-xs font-semibold hover:bg-[var(--color-surface-container)]">Cancel</button>
+              <button type="submit" className="px-6 py-2.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold hover:opacity-95">Fit Tyre</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {tyreModal && tyreModal.mode === 'unload' && (() => {
+        const unit = unitAll.find((u) => u.id === tyreModal.unitId);
+        if (!unit) return null;
+        const cond = unit.condition || 'good';
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs">
+            <div className="bg-[var(--color-surface-container-lowest)] w-full max-w-md rounded-3xl shadow-2xl border border-[var(--color-outline-variant)]">
+              <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
+                <h3 className="text-sm font-bold text-[var(--color-on-surface)] flex items-center gap-2">
+                  <Disc className="w-4 h-4 text-[var(--color-warning)]" />
+                  Fitted tyre{unit.position ? ` — ${TYRE_POSITION_LABELS[String(unit.position).toUpperCase() as TyrePosition] || unit.position}` : ''}
+                </h3>
+                <button type="button" onClick={() => setTyreModal(null)} className="p-2 text-[var(--color-outline)] rounded-full hover:bg-[var(--color-surface-container-high)]"><X className="w-4.5 h-4.5" /></button>
+              </div>
+              <div className="p-6 space-y-3">
+                <div className="flex items-center gap-3">
+                  <span className="font-mono text-sm font-black text-[var(--color-on-surface)] bg-[var(--color-surface-container-high)] px-3 py-1.5 rounded-xl">{unit.serialNumber}</span>
+                  <span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded-full ${tyreConditionTone[cond]}`}>{cond}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-3 text-[11px]">
+                  <div><p className="text-[9px] font-black uppercase tracking-wider text-[var(--color-on-surface-variant)]">Item</p><p className="font-bold text-[var(--color-on-surface)] mt-0.5">{itemById.get(unit.itemId)?.name || '—'}</p></div>
+                  <div><p className="text-[9px] font-black uppercase tracking-wider text-[var(--color-on-surface-variant)]">Wheel Position</p><p className="font-mono font-black text-[var(--color-primary)] mt-0.5">{unit.position}</p></div>
+                  <div><p className="text-[9px] font-black uppercase tracking-wider text-[var(--color-on-surface-variant)]">Fitted At (km)</p><p className="font-bold text-[var(--color-on-surface)] mt-0.5">{unit.fitOdometer ? unit.fitOdometer.toLocaleString('en-IN') : '—'}</p></div>
+                </div>
+              </div>
+              <div className="px-6 py-4 border-t border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] flex justify-end gap-3">
+                <button type="button" onClick={() => setTyreModal(null)} className="px-5 py-2 border border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] rounded-full text-xs font-semibold hover:bg-[var(--color-surface-container)]">Close</button>
+                <button
+                  type="button"
+                  onClick={() => handleUnloadSerial(unit.id)}
+                  className="px-6 py-2.5 bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)] rounded-full text-xs font-bold hover:opacity-95 inline-flex items-center gap-1.5"
+                  title="Remove this tyre from the vehicle — it returns to spare stock"
+                >
+                  <Undo2 className="w-3.5 h-3.5" /> Unload to Stock
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

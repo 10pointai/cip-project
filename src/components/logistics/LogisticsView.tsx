@@ -16,7 +16,6 @@ import {
   ChevronDown,
   MoreVertical,
   Building,
-  Disc,
   Landmark,
   Edit3,
   DollarSign,
@@ -25,7 +24,7 @@ import {
   Paperclip,
   Layers,
 } from 'lucide-react';
-import { Vehicle, Employee, TripSlip, Order, CompanySettings, Tyre, VehicleEmiDetails, VehicleEmiEntry, VehicleExpenseEntry, CashBankAccount, Sale, Item, Party } from '../../types';
+import { Vehicle, Employee, TripSlip, Order, CompanySettings, VehicleEmiDetails, VehicleEmiEntry, VehicleExpenseEntry, CashBankAccount, Sale, Item, Party, isDieselItemName } from '../../types';
 import { EntityDocumentsSection, StagedDocument } from '../common/EntityDocumentsSection';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { SearchableSelect } from '../orders/SearchableSelect';
@@ -68,7 +67,6 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
   const [parties, setParties] = useState<Party[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [settings, setSettings] = useState<CompanySettings | null>(null);
-  const [tyres, setTyres] = useState<Tyre[]>([]);
 
   // App Navigation & Filter state
   const [activeSubTab, setActiveSubTab] = useState<'trips' | 'fleet' | 'expenses' | 'emi-entries' | 'drivers'>('trips');
@@ -195,13 +193,9 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
   // Vehicle documents (S3 upload feature) — staged while registering
   const [stagedVehicleDocs, setStagedVehicleDocs] = useState<StagedDocument[]>([]);
 
-  // Vehicle Tyre Inspection state — the axle-position inspector stays mounted
-  // for the tyres feature; the plate click opens the vehicle PROFILE PAGE
+  // Vehicle detail state — the plate click opens the vehicle PROFILE PAGE
+  // (the Tyre diagram lives there, on the units register)
   const [detailVehicle, setDetailVehicle] = useState<Vehicle | null>(null);
-  // the Vehicles tab and STAYS in Fleet; tyre CRUD moved to the Tyre
-  // Management feature
-  const [selectedVehicleForTyres, setSelectedVehicleForTyres] = useState<Vehicle | null>(null);
-  const [mountingPosName, setMountingPosName] = useState<string>('');
 
   // EMI Entry ledger modal (record manual / edit automated entries)
   const [isEmiEntryModalOpen, setIsEmiEntryModalOpen] = useState(false);
@@ -225,6 +219,8 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
   const [formExpenseTypeFree, setFormExpenseTypeFree] = useState('');
   const [formExpenseLitres, setFormExpenseLitres] = useState('');
   const [formExpenseRate, setFormExpenseRate] = useState('');
+  /** Diesel: the inventory location the fill is issued from (required). */
+  const [formExpenseLocationId, setFormExpenseLocationId] = useState('');
   const [formExpenseAmount, setFormExpenseAmount] = useState('');
   const [formExpenseNotes, setFormExpenseNotes] = useState('');
   const [stagedExpenseDocs, setStagedExpenseDocs] = useState<StagedDocument[]>([]);
@@ -249,7 +245,6 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
     setSlips(localDb.getTripSlips());
     setOrders(localDb.getOrders());
     setSettings(localDb.getSettings());
-    setTyres(localDb.getTyres());
     setSales(localDb.getSales());
     setParties(localDb.getParties());
     setItems(localDb.getItems());
@@ -619,6 +614,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
       setEditingExpense(existing);
       setFormExpenseVehicleId(existing.vehicleId || '');
       setFormExpenseAccountId(existing.accountId || '');
+      setFormExpenseLocationId(existing.dieselLocationId || '');
       setFormExpenseDate(existing.date || new Date().toISOString().split('T')[0]);
       setFormExpenseTypeFree(existing.expenseType || '');
       setFormExpenseLitres(existing.litres !== undefined ? String(existing.litres) : '');
@@ -629,31 +625,16 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
       setEditingExpense(null);
       setFormExpenseVehicleId('');
       setFormExpenseAccountId('');
+      setFormExpenseLocationId('');
       setFormExpenseDate(new Date().toISOString().split('T')[0]);
       setFormExpenseTypeFree('');
       setFormExpenseLitres('');
-      setFormExpenseRate('');
+      // The STRICT global diesel rate prefills every new fill (no operator rate).
+      setFormExpenseRate(dieselRateNum > 0 ? String(dieselRateNum) : '');
       setFormExpenseAmount('');
       setFormExpenseNotes('');
     }
     setIsExpenseModalOpen(true);
-  };
-
-  // Vehicle change on a diesel fill: prefill the litre rate from that
-  // vehicle's latest recorded fill (rate stays editable) — mirrors the daily
-  // sheet where one day's rate repeats across trucks.
-  const handleExpenseVehicleChange = (vehId: string) => {
-    setFormExpenseVehicleId(vehId);
-    if (vehId && expenseFormType === 'diesel' && !editingExpense) {
-      const lastRate = localDb
-        .getVehicleExpenses(vehId)
-        .filter((e) => e.entryType === 'diesel' && (e.ratePerLitre || 0) > 0)
-        .sort((a, b) => String(b.date).localeCompare(String(a.date)))[0]?.ratePerLitre;
-      if (lastRate) {
-        setFormExpenseRate(String(lastRate));
-        recalcDieselCost(formExpenseLitres, String(lastRate));
-      }
-    }
   };
 
   // Diesel cost auto-fill: amount = litres × rate on every litres/rate change
@@ -663,29 +644,70 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
     if (cost > 0) setFormExpenseAmount(String(Math.round(cost * 100) / 100));
   };
 
+  // DIESEL FROM INVENTORY (2026-11-17): a fill is issued from the diesel
+  // item's per-location stock; the rate is STRICTLY the global diesel_rate.
+  const dieselStockItem = items.filter((i) => i.type !== 'asset' && i.isActive !== false && isDieselItemName(i.name))[0];
+  const globalDieselRate = (() => {
+    try { return localDb.getAppDefault('diesel_rate'); } catch { return undefined; }
+  })();
+  const dieselRateNum = Number(globalDieselRate) > 0 ? Number(globalDieselRate) : 0;
+
   const handleSaveExpense = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formExpenseVehicleId || !formExpenseAccountId || !formExpenseDate || !(Number(formExpenseAmount) > 0)) {
-      alert('Select the vehicle, account, date and a positive amount.');
+    if (!formExpenseVehicleId || !formExpenseDate || !(Number(formExpenseAmount) > 0)) {
+      alert('Select the vehicle, date and a positive amount.');
       return;
     }
-    if (expenseFormType === 'expense' && !formExpenseTypeFree.trim()) {
-      alert('Enter the expense type (e.g. Puncture + Fitting, Tyre Change).');
-      return;
+    // Generic expenses still debit an account; a diesel fill moves no money
+    // (it is issued from the yard stock) — it MUST pick its stock location.
+    if (expenseFormType === 'expense') {
+      if (!formExpenseAccountId) {
+        alert('Select the account the expense debits.');
+        return;
+      }
+      if (!formExpenseTypeFree.trim()) {
+        alert('Enter the expense type (e.g. Puncture + Fitting, Tyre Change).');
+        return;
+      }
     }
-    if (expenseFormType === 'diesel' && !((Number(formExpenseLitres) || 0) > 0) && !editingExpense) {
-      alert('Enter the diesel litres filled.');
-      return;
+    if (expenseFormType === 'diesel') {
+      if (!dieselStockItem) {
+        alert('No diesel item exists in inventory — create a product item named e.g. "Diesel" and receive its stock first.');
+        return;
+      }
+      if (!formExpenseLocationId) {
+        alert('Pick the DIESEL LOCATION the fill is issued from — diesel is always taken from inventory stock.');
+        return;
+      }
+      if (!((Number(formExpenseLitres) || 0) > 0) && !editingExpense) {
+        alert('Enter the diesel litres filled.');
+        return;
+      }
+      const bucket = dieselStockItem.locations?.find((l) => l.locationId === formExpenseLocationId);
+      const available = Number(bucket?.currentStock) || 0;
+      if ((Number(formExpenseLitres) || 0) > available) {
+        alert(`Diesel at ${bucket?.locationName || 'that location'} is only ${available.toLocaleString('en-IN')} L — the fill of ${Number(formExpenseLitres).toLocaleString('en-IN')} L exceeds the stock. Receive diesel inward first.`);
+        return;
+      }
     }
+    const dieselRateForSave = dieselRateNum > 0 ? dieselRateNum : undefined;
     const payload: Partial<VehicleExpenseEntry> = {
       entryType: expenseFormType,
       date: formExpenseDate,
       vehicleId: formExpenseVehicleId,
-      accountId: formExpenseAccountId,
       ...(expenseFormType === 'expense'
-        ? { expenseType: formExpenseTypeFree.trim() }
-        : { expenseType: undefined, litres: Number(formExpenseLitres) || 0, ratePerLitre: Number(formExpenseRate) || 0 }),
-      amount: Number(formExpenseAmount),
+        ? {
+            expenseType: formExpenseTypeFree.trim(),
+            accountId: formExpenseAccountId,
+          }
+        : {
+            expenseType: undefined,
+            litres: Number(formExpenseLitres) || 0,
+            ratePerLitre: dieselRateForSave,
+            dieselLocationId: formExpenseLocationId || undefined,
+            accountId: undefined,
+            amount: Math.round((Number(formExpenseLitres) || 0) * (dieselRateForSave || 0) * 100) / 100,
+          }),
       notes: formExpenseNotes.trim() || undefined,
     };
     if (editingExpense) {
@@ -778,7 +800,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
       ) : (
       <>
       {/* Action Panel — buttons now live INSIDE the per-tab search bar
-          (Add Vehicle on the Vehicles tab, Add Tyre on Tyre
+          (Add Vehicle on the Vehicles tab
           Fleet Management), placed LEFT of the search container */}
 
       {/* Sub Tabs Panel */}
@@ -1386,18 +1408,8 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                                     Edit Vehicle
                                     {hasActiveEmi && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-[var(--color-primary)]"></span>}
                                   </button>
-                                  <button
-                                    onClick={() => {
-                                      setVehicleMoreMenu(null);
-                                      setSelectedVehicleForTyres(vehicle);
-                                    }}
-                                    className="w-full flex items-center gap-2 px-3 py-2 text-[11px] font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)] rounded-xl text-left transition-colors"
-                                  >
-                                    <Disc className="h-3.5 w-3.5 text-[var(--color-outline)] shrink-0" />
-                                    Tyres ({tyres.filter(t => t.vehicleId === vehicle.id && t.status === 'mounted').length})
-                                  </button>
                                   <p className="px-3 pt-1.5 pb-1 text-[9px] text-[var(--color-on-surface-variant)] border-t border-[var(--color-outline-variant)] mt-1 truncate">
-                                    Loan, tyres & axle details for {vehicle.vehicleNo}
+                                    Loan details · Tyre diagram on the profile page (Tyres tab)
                                   </p>
                                 </div>
                               )}
@@ -1468,7 +1480,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                       <th className="py-3.5 px-3 text-right">Litres</th>
                       <th className="py-3.5 px-3 text-right">Rate (₹/L)</th>
                       <th className="py-3.5 px-3 text-right">Amount (₹)</th>
-                      <th className="py-3.5 px-3">From Account</th>
+                      <th className="py-3.5 px-3">Account / Diesel From</th>
                       <th className="py-3.5 px-3">Remarks</th>
                       <th className="py-3.5 px-4 text-right">Actions</th>
                     </tr>
@@ -1514,9 +1526,18 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                               {formatCurrency(entry.amount)}
                             </td>
                             <td className="py-3.5 px-3">
-                              <span className="font-semibold text-[var(--color-on-surface)] truncate block max-w-[150px]" title={entry.accountName}>
-                                {entry.accountName || accounts.find((a) => a.id === entry.accountId)?.name || '—'}
-                              </span>
+                              {entry.entryType === 'diesel' ? (
+                                // Diesel rows move no money — the location the
+                                // fill was issued FROM is the fact that matters.
+                                <span className="font-semibold text-[var(--color-on-surface)] flex items-center gap-1 truncate max-w-[150px]" title={`Issued from ${entry.dieselLocationName || 'the yard'} — no account debit`}>
+                                  <MapPin className="h-3 w-3 text-[var(--color-outline)] shrink-0" />
+                                  {entry.dieselLocationName || dieselStockItem?.locations?.find((l) => l.locationId === entry.dieselLocationId)?.locationName || '—'}
+                                </span>
+                              ) : (
+                                <span className="font-semibold text-[var(--color-on-surface)] truncate block max-w-[150px]" title={entry.accountName}>
+                                  {entry.accountName || accounts.find((a) => a.id === entry.accountId)?.name || '—'}
+                                </span>
+                              )}
                             </td>
                             <td className="py-3.5 px-3">
                               <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)] truncate block max-w-[200px]" title={entry.notes}>
@@ -2440,213 +2461,8 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
         </div>
       )}
 
-      {/* 6. VEHICLE MOUNTED TYRES DETAILED INSPECTOR */}
-      {selectedVehicleForTyres && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-scrim)]/40 backdrop-blur-xs p-4 overflow-y-auto">
-          {/* my-auto (not my-8): centres when short, collapses to 0 on overflow
-              so the card never clips its top on a short window */}
-          <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-xl border border-[var(--color-outline-variant)] max-w-2xl w-full overflow-hidden my-auto">
-            <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
-              <div className="text-left">
-                <h3 className="font-extrabold text-[var(--color-on-surface)] text-sm uppercase tracking-tight flex items-center gap-1.5">
-                  <Disc className="h-4.5 w-4.5 text-[var(--color-primary)] animate-spin-slow" />
-                  Active Axle Configuration: {selectedVehicleForTyres.vehicleNo}
-                </h3>
-                <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                  View, mount, or swap tyres across different axle positions for this {selectedVehicleForTyres.type}.
-                </p>
-              </div>
-              <button
-                onClick={() => {
-                  setSelectedVehicleForTyres(null);
-                  setMountingPosName('');
-                }}
-                className="p-1.5 hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] rounded-full transition-colors"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <div className="p-5 space-y-6 max-h-[500px] overflow-y-auto">
-              {/* Chassis Schematic Info banner */}
-              <div className="bg-[var(--color-surface-container)] p-4 rounded-2xl border border-[var(--color-outline-variant)] flex items-center justify-between">
-                <div className="text-left space-y-0.5">
-                  <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase">Selected Vehicle</p>
-                  <p className="font-black text-[var(--color-on-surface)] text-xs">{selectedVehicleForTyres.vehicleNo} ({selectedVehicleForTyres.ownership.toUpperCase()})</p>
-                  <p className="text-[10px] text-[var(--color-on-surface-variant)]">{selectedVehicleForTyres.capacityTonnes > 0 ? `Capacity: ${selectedVehicleForTyres.capacityTonnes} MT • ` : ''}Assigned Driver: {selectedVehicleForTyres.currentDriverName || 'None'}</p>
-                </div>
-                <div className="px-3 py-1.5 bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)] rounded-full text-xs font-bold text-right">
-                  {tyres.filter(t => t.vehicleId === selectedVehicleForTyres.id && t.status === 'mounted').length} / 6 Tyres Mounted
-                </div>
-              </div>
-
-              {/* Positions List */}
-              <div className="space-y-3.5 text-left">
-                <h4 className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Axle Positions Overview</h4>
-                
-                {[
-                  'Front-Left (FL)',
-                  'Front-Right (FR)',
-                  'Rear-Left-Outer (RLO)',
-                  'Rear-Left-Inner (RLI)',
-                  'Rear-Right-Outer (RRO)',
-                  'Rear-Right-Inner (RRI)',
-                  'Spare (Cab Mounted)'
-                ].map((pos) => {
-                  // Find tyre mounted on this position
-                  const mountedTyre = tyres.find(
-                    t => t.vehicleId === selectedVehicleForTyres.id && t.position === pos && t.status === 'mounted'
-                  );
-
-                  return (
-                    <div 
-                      key={pos} 
-                      className={`p-3.5 rounded-2xl border transition-all flex flex-col md:flex-row md:items-center justify-between gap-4 ${
-                        mountedTyre 
-                          ? 'bg-[var(--color-surface-container-lowest)] border-[var(--color-outline-variant)] shadow-2xs' 
-                          : 'bg-[var(--color-surface-container)]/40 border-dashed border-[var(--color-outline-variant)]'
-                      }`}
-                    >
-                      {/* Left: Position Indicator & Tyre details */}
-                      <div className="flex items-start gap-3">
-                        <div className={`p-2 rounded-xl text-xs font-black text-center w-12 shrink-0 ${
-                          mountedTyre ? 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]' : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
-                        }`}>
-                          {pos.split(' ').pop()?.replace('(', '').replace(')', '') || 'AX'}
-                        </div>
-                        <div className="space-y-0.5">
-                          <p className="text-xs font-bold text-[var(--color-on-surface)]">{pos}</p>
-                          {mountedTyre ? (
-                            <div className="space-y-1">
-                              <div className="flex items-center gap-1.5 flex-wrap">
-                                <span className="font-mono text-[10px] font-black bg-[var(--color-surface-container-highest)] text-[var(--color-on-surface)] px-1.5 py-0.2 rounded-full uppercase border border-[var(--color-outline-variant)]">
-                                  {mountedTyre.serialNumber}
-                                </span>
-                                <span className="text-[10px] text-[var(--color-on-surface-variant)] font-semibold">
-                                  {mountedTyre.brand} • {mountedTyre.size}
-                                </span>
-                                <span className={`text-[8px] font-black uppercase px-1.5 py-0.2 rounded-full ${
-                                  mountedTyre.lastInspectionCondition === 'excellent'
-                                    ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-                                    : mountedTyre.lastInspectionCondition === 'good'
-                                      ? 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)]'
-                                      : mountedTyre.lastInspectionCondition === 'worn'
-                                        ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
-                                        : 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
-                                }`}>
-                                  {mountedTyre.lastInspectionCondition}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-3 text-[10px] text-[var(--color-on-surface-variant)]">
-                                <span>Mileage: <b className="text-[var(--color-on-surface)]">{(mountedTyre.currentOdometer || 0).toLocaleString()} KM</b></span>
-                                {mountedTyre.threadDepthMm !== undefined && (
-                                  <span className="flex items-center gap-1">
-                                    Tread: <b className={`font-black ${mountedTyre.threadDepthMm <= 4.5 ? 'text-[var(--color-error)]' : 'text-[var(--color-success)]'}`}>{mountedTyre.threadDepthMm} mm</b>
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          ) : (
-                            <p className="text-[11px] text-[var(--color-on-surface-variant)] font-medium">No tyre mounted on this position</p>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Right: Quick mount/unmount trigger */}
-                      <div className="flex items-center gap-2 md:self-center">
-                        {mountedTyre ? (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (confirm(`Unmount tyre ${mountedTyre.serialNumber} from ${pos}?`)) {
-                                localDb.updateTyre(mountedTyre.id, {
-                                  status: 'available',
-                                  vehicleId: undefined,
-                                  vehicleNo: undefined,
-                                  position: undefined
-                                });
-                              }
-                            }}
-                            className="px-3 py-1 bg-[var(--color-warning-container)] hover:opacity-90 text-[var(--color-on-warning-container)] rounded-full text-[10px] font-bold transition"
-                          >
-                            Unmount Tyre
-                          </button>
-                        ) : (
-                          <div className="relative">
-                            {mountingPosName === pos ? (
-                              <div className="flex items-center gap-1.5 bg-[var(--color-surface-container-lowest)] p-1 border border-[var(--color-outline-variant)] rounded-xl shadow-2xs">
-                                <select
-                                  onChange={(e) => {
-                                    const val = e.target.value;
-                                    if (val) {
-                                      localDb.updateTyre(val, {
-                                        status: 'mounted',
-                                        vehicleId: selectedVehicleForTyres.id,
-                                        vehicleNo: selectedVehicleForTyres.vehicleNo,
-                                        position: pos,
-                                        installOdometer: selectedVehicleForTyres.currentOdometer || 0
-                                      });
-                                      setMountingPosName('');
-                                    }
-                                  }}
-                                  className="text-[10px] p-1 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-lg font-bold text-[var(--color-on-surface)] focus:outline-none"
-                                >
-                                  <option value="">-- Choose Spare --</option>
-                                  {tyres.filter(t => t.status === 'available').map(t => (
-                                    <option key={t.id} value={t.id}>
-                                      {t.serialNumber} ({t.brand} {t.threadDepthMm}mm)
-                                    </option>
-                                  ))}
-                                </select>
-                                <button
-                                  type="button"
-                                  onClick={() => setMountingPosName('')}
-                                  className="p-1 hover:bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] rounded-full"
-                                >
-                                  <X className="h-3 w-3" />
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  // Verify we have stock first
-                                  const spares = tyres.filter(t => t.status === 'available');
-                                  if (spares.length === 0) {
-                                    alert('No spare tyres currently available in the yard stock. Please register a tyre as available first.');
-                                    return;
-                                  }
-                                  setMountingPosName(pos);
-                                }}
-                                className="px-3 py-1 bg-[var(--color-success-container)] hover:opacity-90 text-[var(--color-on-success-container)] rounded-full text-[10px] font-bold transition"
-                              >
-                                + Mount Spare
-                              </button>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="p-4 bg-[var(--color-surface-container)] border-t border-[var(--color-outline-variant)] flex justify-end">
-              <button
-                type="button"
-                onClick={() => {
-                  setSelectedVehicleForTyres(null);
-                  setMountingPosName('');
-                }}
-                className="px-5 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-bold transition shadow-xs"
-              >
-                Close Inspector
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* 6. LEGACY AXLE INSPECTOR RETIRED (2026-11-17) — the vehicle profile
+          page's TYRES tab (12-tyre dumper diagram on inventory_units) replaced it. */}
 
       {/* 7. VEHICLE EMI ENTRY MODAL — record manual / edit automated entries */}
       {isEmiEntryModalOpen && (
@@ -2801,7 +2617,9 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                     {editingExpense ? 'Edit Vehicle Expense' : expenseFormType === 'diesel' ? 'Diesel Entry' : 'Expense Entry'}
                   </h3>
                   <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                    {expenseFormType === 'diesel' ? 'Fuel fill — the cost debits the selected account.' : 'Log a vehicle expense — the amount debits the selected account.'}
+                    {expenseFormType === 'diesel'
+                      ? `Diesel is issued from the inventory item's stock${dieselRateNum > 0 ? ` at the global rate ₹${dieselRateNum}/L` : ''} — no account debit.`
+                      : 'Log a vehicle expense — the amount debits the selected account.'}
                   </p>
                 </div>
               </div>
@@ -2823,7 +2641,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                   <div className="p-2 border border-[var(--color-outline-variant)] rounded-xl bg-[var(--color-surface-container-lowest)]">
                     <SearchableSelect
                       value={formExpenseVehicleId}
-                      onChange={handleExpenseVehicleChange}
+                      onChange={(v) => setFormExpenseVehicleId(v)}
                       placeholder="Type vehicle number to search..."
                       closedDisplay={(() => {
                         const veh = vehicles.find((v) => v.id === formExpenseVehicleId);
@@ -2839,27 +2657,65 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">From Account *</label>
-                    <div className="p-2 border border-[var(--color-outline-variant)] rounded-xl bg-[var(--color-surface-container-lowest)]">
-                      <SearchableSelect
-                        value={formExpenseAccountId}
-                        onChange={(v) => setFormExpenseAccountId(v)}
-                        placeholder="Type account name to search..."
-                        closedDisplay={(() => {
-                          const acc = accounts.find((a) => a.id === formExpenseAccountId);
-                          return acc
-                            ? `${acc.name} (${acc.type === 'bank' ? acc.bankName || 'Bank' : 'Cash'})`
-                            : '';
-                        })()}
-                        options={accounts.map((a) => ({
-                          value: a.id,
-                          label: a.name,
-                          sub: a.type === 'bank' ? `Bank${a.bankName ? ` · ${a.bankName}` : ''}` : 'Cash',
-                        }))}
-                      />
+                  {/* FROM ACCOUNT — generic expenses only. A diesel fill is an
+                      internal issue from yard stock: it moves NO money. */}
+                  {expenseFormType === 'expense' && (
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">From Account *</label>
+                      <div className="p-2 border border-[var(--color-outline-variant)] rounded-xl bg-[var(--color-surface-container-lowest)]">
+                        <SearchableSelect
+                          value={formExpenseAccountId}
+                          onChange={(v) => setFormExpenseAccountId(v)}
+                          placeholder="Type account name to search..."
+                          closedDisplay={(() => {
+                            const acc = accounts.find((a) => a.id === formExpenseAccountId);
+                            return acc
+                              ? `${acc.name} (${acc.type === 'bank' ? acc.bankName || 'Bank' : 'Cash'})`
+                              : '';
+                          })()}
+                          options={accounts.map((a) => ({
+                            value: a.id,
+                            label: a.name,
+                            sub: a.type === 'bank' ? `Bank${a.bankName ? ` · ${a.bankName}` : ''}` : 'Cash',
+                          }))}
+                        />
+                      </div>
                     </div>
-                  </div>
+                  )}
+
+                  {/* DIESEL LOCATION (2026-11-17) — the fill always draws from
+                      the diesel item's per-location stock; availability shows
+                      beside each bucket and a short fill is refused. */}
+                  {expenseFormType === 'diesel' && (
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Diesel Location (from inventory) *</label>
+                      {!dieselStockItem ? (
+                        <div className="w-full p-2.5 border border-[var(--color-error)]/50 bg-[var(--color-error-container)]/30 rounded-xl text-[11px] font-bold text-[var(--color-on-surface-variant)]">
+                          No diesel item in inventory — create a product item named e.g. "Diesel" and receive its stock first.
+                        </div>
+                      ) : (
+                        <select
+                          value={formExpenseLocationId}
+                          onChange={(e) => {
+                            setFormExpenseLocationId(e.target.value);
+                            recalcDieselCost(formExpenseLitres, String(dieselRateNum || formExpenseRate || 0));
+                          }}
+                          className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                          required
+                        >
+                          <option value="">-- Choose diesel stock location --</option>
+                          {(dieselStockItem.locations || []).map((l) => (
+                            <option key={l.locationName} value={l.locationId || ''}>
+                              {l.locationName} · {Number(l.currentStock) || 0} L available
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      <p className="text-[10px] text-[var(--color-on-surface-variant)] font-medium">
+                        The litres deduct from this location's diesel stock when the entry is saved.
+                      </p>
+                    </div>
+                  )}
 
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Expense Date *</label>
@@ -2899,23 +2755,21 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                         value={formExpenseLitres}
                         onChange={(e) => {
                           setFormExpenseLitres(e.target.value);
-                          recalcDieselCost(e.target.value, formExpenseRate);
+                          recalcDieselCost(e.target.value, String(dieselRateNum || Number(formExpenseRate) || 0));
                         }}
                         className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-bold focus:outline-none"
                         required
                       />
                     </div>
+                    {/* STRICT GLOBAL RATE (2026-11-17): every diesel row prices
+                        at the app_defaults diesel_rate snapshot — never typed. */}
                     <div className="space-y-1.5">
-                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Diesel Rate (₹/L)</label>
+                      <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Global Diesel Rate (₹/L)</label>
                       <input
-                        type="number" step="0.01" min="0"
-                        placeholder="e.g. 99.89"
-                        value={formExpenseRate}
-                        onChange={(e) => {
-                          setFormExpenseRate(e.target.value);
-                          recalcDieselCost(formExpenseLitres, e.target.value);
-                        }}
-                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-bold focus:outline-none"
+                        type="text"
+                        readOnly
+                        value={dieselRateNum > 0 ? `₹${dieselRateNum.toLocaleString('en-IN')} / L (global)` : 'Set diesel_rate in Settings'}
+                        className={`w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm font-mono font-bold ${dieselRateNum > 0 ? 'bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)]' : 'bg-[var(--color-error-container)]/40 text-[var(--color-on-surface-variant)]'} focus:outline-none`}
                       />
                     </div>
                   </div>
@@ -2923,19 +2777,20 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
 
                 <div className="space-y-1.5">
                   <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">
-                    {expenseFormType === 'diesel' ? 'Diesel Cost (₹) *' : 'Amount (₹) *'}
+                    {expenseFormType === 'diesel' ? 'Diesel Cost (₹) — locked' : 'Amount (₹) *'}
                   </label>
                   <input
                     type="number" step="0.01" min="0"
                     placeholder="e.g. 48500"
                     value={formExpenseAmount}
                     onChange={(e) => setFormExpenseAmount(e.target.value)}
-                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-black focus:outline-none"
+                    readOnly={expenseFormType === 'diesel'}
+                    className={`w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] font-mono font-black focus:outline-none ${expenseFormType === 'diesel' ? 'opacity-80' : ''}`}
                     required
                   />
-                  {expenseFormType === 'diesel' && (Number(formExpenseLitres) || 0) > 0 && (Number(formExpenseRate) || 0) > 0 && (
+                  {expenseFormType === 'diesel' && (
                     <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)] block">
-                      Auto-calculated: {Number(formExpenseLitres).toLocaleString('en-IN')} L × ₹{Number(formExpenseRate).toLocaleString('en-IN')}
+                      Locked: litres × global rate — snapshot onto this row on save.
                     </span>
                   )}
                 </div>
@@ -2968,7 +2823,9 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                 </div>
 
                 <div className="p-3 bg-[var(--color-info-container)]/30 border border-[var(--color-info)]/30 rounded-2xl text-[10px] text-[var(--color-on-surface-variant)]">
-                  Saving debits the selected account's balance immediately and records the entry in the vehicle's expense log.
+                  {expenseFormType === 'diesel'
+                    ? 'Saving issues the litres from the chosen diesel location’s stock (the shortage is refused) and snapshots the global rate on this row — no account balance changes.'
+                    : 'Saving debits the selected account’s balance immediately and records the entry in the vehicle’s expense log.'}
                 </div>
               </div>
 

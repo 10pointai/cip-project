@@ -8,8 +8,6 @@ import {
   createDriverDirect,
   fetchTripSlipsDirect,
   createTripSlipDirect,
-  fetchTyresDirect,
-  createTyreDirect,
   fetchVehicleExpensesDirect,
   createVehicleExpenseDirect,
 } from '../mysql/operationsService';
@@ -78,25 +76,10 @@ logisticsRouter.post('/trip-slips', requireEitherPermission('dispatch_trips', 'm
 logisticsRouter.put('/trip-slips/:id', requireEitherPermission('dispatch_trips', 'manage_fleet'), (req, res) => res.json({ success: true, data: serverDb.updateTripSlip(req.params.id, req.body) }));
 logisticsRouter.delete('/trip-slips/:id', requireEitherPermission('dispatch_trips', 'manage_fleet'), (req, res) => res.json({ success: serverDb.deleteTripSlip(req.params.id) }));
 
-// --- TYRES (Tyre Management is its own feature — manage_tyres) ---
-logisticsRouter.get('/tyres', async (req, res) => {
-  try {
-    const data = await fetchTyresDirect();
-    res.json({ success: true, data });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-logisticsRouter.post('/tyres', requirePermission('manage_tyres'), async (req, res) => {
-  try {
-    const data = await createTyreDirect(req.body);
-    res.status(201).json({ success: true, data });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-logisticsRouter.put('/tyres/:id', requirePermission('manage_tyres'), (req, res) => res.json({ success: true, data: serverDb.updateTyre(req.params.id, req.body) }));
-logisticsRouter.delete('/tyres/:id', requirePermission('manage_tyres'), (req, res) => res.json({ success: serverDb.deleteTyre(req.params.id) }));
+// --- TYRES — RETIRED (2026-11-17) — Tyre Management reads the serial
+// register (GET /api/inventory-units) + the vehicle profile Tyre diagram;
+// the standalone `/logistics/tyres` CRUD and its MySQL `tyres` table are
+// no longer exposed (legacy rows stay in the DB, unwritten).
 
 // --- VEHICLE EXPENSE LOG (generic expense + diesel entries) ---
 // Balance stream: every create/edit/delete rebalances the linked cash/bank
@@ -115,7 +98,10 @@ logisticsRouter.post('/expenses', requirePermission('manage_fleet'), async (req,
     const data = await createVehicleExpenseDirect(req.body);
     res.status(201).json({ success: true, data });
   } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+    // Business-rule errors (missing diesel item/location, insufficient diesel
+    // stock, missing global diesel rate) are 400; everything else is a 500.
+    res.status(/required|not found|cannot|no diesel item|first\./i.test(err?.message || '') ? 400 : 500)
+      .json({ success: false, error: err.message });
   }
 });
 logisticsRouter.put('/expenses/:id', requirePermission('manage_fleet'), async (req, res) => {
@@ -123,7 +109,8 @@ logisticsRouter.put('/expenses/:id', requirePermission('manage_fleet'), async (r
     const data = serverDb.updateVehicleExpenseEntry(req.params.id, req.body);
     res.json({ success: true, data });
   } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(/required|not found|cannot|no diesel item|first\./i.test(err?.message || '') ? 400 : 500)
+      .json({ success: false, error: err.message });
   }
 });
 logisticsRouter.delete('/expenses/:id', requirePermission('manage_fleet'), async (req, res) => {

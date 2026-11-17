@@ -22,6 +22,7 @@ import {
   ArrowUpRight,
   TrendingUp,
   TrendingDown,
+  ArrowRightLeft,
   SlidersHorizontal,
   Calendar,
   Filter,
@@ -100,7 +101,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
 
   // Filters for Stock Adjustments Tab
   const [adjSearchQuery, setAdjSearchQuery] = useState('');
-  const [adjTypeFilter, setAdjTypeFilter] = useState<'all' | 'increase' | 'decrease'>('all');
+  const [adjTypeFilter, setAdjTypeFilter] = useState<'all' | 'increase' | 'decrease' | 'transfer'>('all');
   const [adjItemFilter, setAdjItemFilter] = useState<string>('all');
   const [adjSortBy, setAdjSortBy] = useState<'recent' | 'oldest' | 'qty_desc' | 'val_desc'>('recent');
 
@@ -175,9 +176,11 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
   const adjustmentStats = useMemo(() => {
     const increases = stockAdjustments.filter((a) => a.type === 'increase');
     const decreases = stockAdjustments.filter((a) => a.type === 'decrease');
+    const transfers = stockAdjustments.filter((a) => a.type === 'transfer');
 
     const totalAddedQty = increases.reduce((sum, a) => sum + (a.quantity || 0), 0);
     const totalReducedQty = decreases.reduce((sum, a) => sum + (a.quantity || 0), 0);
+    const totalTransferredQty = transfers.reduce((sum, a) => sum + (a.quantity || 0), 0);
     const totalAddedValue = increases.reduce((sum, a) => sum + (a.totalValue || (a.quantity * (a.rate || 0))), 0);
     const totalReducedValue = decreases.reduce((sum, a) => sum + (a.totalValue || (a.quantity * (a.rate || 0))), 0);
     const netValueImpact = totalAddedValue - totalReducedValue;
@@ -186,6 +189,8 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
       totalCount: stockAdjustments.length,
       increaseCount: increases.length,
       decreaseCount: decreases.length,
+      transferCount: transfers.length,
+      totalTransferredQty,
       totalAddedQty,
       totalReducedQty,
       totalAddedValue,
@@ -601,7 +606,12 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
           {activeSubTab === 'catalog' && (
             <button
               type="button"
-              onClick={handleOpenAdd}
+              // WRAPPED (2026-11-17 fix): a bare onClick={handleOpenAdd} handed
+              // the CLICK EVENT to the (type?: ItemType) parameter — the form's
+              // item type became the event object (hiding the Pricing/Location
+              // containers) and the event reached the create payload (the
+              // "Converting circular structure to JSON" save failure).
+              onClick={() => handleOpenAdd(undefined)}
               className="flex items-center gap-1.5 px-5 py-2.5 bg-[var(--color-primary)] hover:opacity-95 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-md transition-all hover:scale-[1.02] active:scale-[0.98]"
             >
               <Plus className="w-4 h-4" />
@@ -781,7 +791,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
               </div>
               <button
                 type="button"
-                onClick={handleOpenAdd}
+                onClick={() => handleOpenAdd(undefined)}
                 className="inline-flex items-center gap-1.5 px-5 py-2.5 bg-[var(--color-primary)] hover:opacity-95 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-xs transition-all"
               >
                 <Plus className="w-4 h-4" />
@@ -1357,6 +1367,31 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
               </p>
             </div>
 
+            {/* Stock Transfers (2026-11-17) */}
+            <div
+              onClick={() => setAdjTypeFilter(adjTypeFilter === 'transfer' ? 'all' : 'transfer')}
+              className={`p-4 rounded-2xl border cursor-pointer transition-all ${
+                adjTypeFilter === 'transfer'
+                  ? 'bg-[var(--color-tertiary-container)]/40 border-[var(--color-tertiary)]'
+                  : 'bg-[var(--color-surface-container-lowest)] border-[var(--color-outline-variant)]'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-[var(--color-tertiary)] uppercase tracking-wider">
+                  Location Transfers (⇄)
+                </span>
+                <div className="w-8 h-8 rounded-xl bg-[var(--color-tertiary-container)] text-[var(--color-tertiary)] flex items-center justify-center font-bold">
+                  <ArrowRightLeft className="w-4 h-4" />
+                </div>
+              </div>
+              <p className="text-2xl font-black text-[var(--color-tertiary)] mt-2">
+                {adjustmentStats.transferCount}
+              </p>
+              <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
+                Transfer vouchers · {adjustmentStats.totalTransferredQty.toLocaleString('en-IN', { maximumFractionDigits: 2 })} qty moved
+              </p>
+            </div>
+
             {/* Net Valuation Impact */}
             <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs">
               <div className="flex items-center justify-between">
@@ -1510,7 +1545,8 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                       const totalVal = adj.totalValue || (adj.quantity * (adj.rate || 0));
 
                       return (
-                        <tr key={adj.id} className="hover:bg-[var(--color-surface-container)]/60 transition-colors">
+                        <React.Fragment key={adj.id}>
+                        <tr className="hover:bg-[var(--color-surface-container)]/60 transition-colors">
                           {/* Voucher & Date */}
                           <td className="py-3 px-4">
                             <span className="font-mono text-xs font-bold text-[var(--color-primary)] block">
@@ -1529,11 +1565,21 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                               <span className="font-mono text-[10px] bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] px-1.5 py-0.2 rounded-full font-bold">
                                 {adj.itemCode}
                               </span>
-                              {adj.location && (
-                                <span className="text-[10px] text-[var(--color-outline)] flex items-center gap-0.5">
-                                  <Warehouse className="w-3 h-3" />
-                                  {adj.location}
+                              {/* STOCK TRANSFER (2026-11-17): From → To */}
+                              {adj.type === 'transfer' ? (
+                                <span className="text-[10px] text-[var(--color-on-surface-variant)] flex items-center gap-0.5 font-semibold">
+                                  <Warehouse className="w-3 h-3 text-[var(--color-tertiary)]" />
+                                  {adj.fromLocationName || adj.location || '—'}
+                                  <ArrowRightLeft className="w-3 h-3 text-[var(--color-tertiary)]" />
+                                  {adj.toLocationName || '—'}
                                 </span>
+                              ) : (
+                                adj.location && (
+                                  <span className="text-[10px] text-[var(--color-outline)] flex items-center gap-0.5">
+                                    <Warehouse className="w-3 h-3" />
+                                    {adj.location}
+                                  </span>
+                                )
                               )}
                             </div>
                           </td>
@@ -1544,13 +1590,20 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                               className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold ${
                                 adj.type === 'increase'
                                   ? 'bg-[var(--color-success-container)] text-[var(--color-success)] border border-[var(--color-success)]/30'
-                                  : 'bg-[var(--color-error-container)] text-[var(--color-error)] border border-[var(--color-error)]/30'
+                                  : adj.type === 'transfer'
+                                    ? 'bg-[var(--color-tertiary-container)] text-[var(--color-tertiary)] border border-[var(--color-tertiary)]/30'
+                                    : 'bg-[var(--color-error-container)] text-[var(--color-error)] border border-[var(--color-error)]/30'
                               }`}
                             >
                               {adj.type === 'increase' ? (
                                 <>
                                   <TrendingUp className="w-3 h-3" />
                                   + Inward Add
+                                </>
+                              ) : adj.type === 'transfer' ? (
+                                <>
+                                  <ArrowRightLeft className="w-3 h-3" />
+                                  ⇄ Transfer Out
                                 </>
                               ) : (
                                 <>
@@ -1565,23 +1618,33 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                           <td className="py-3 px-3 text-right">
                             <span
                               className={`text-sm font-black ${
-                                adj.type === 'increase' ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]'
+                                adj.type === 'increase'
+                                  ? 'text-[var(--color-success)]'
+                                  : adj.type === 'transfer'
+                                    ? 'text-[var(--color-error)]'
+                                    : 'text-[var(--color-error)]'
                               }`}
                             >
-                              {adj.type === 'increase' ? '+' : '-'} {adj.quantity.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                              {adj.type === 'transfer' ? '- ' : adj.type === 'increase' ? '+' : '-'} {adj.quantity.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
                             </span>
                             <span className="text-[10px] text-[var(--color-outline)] block">{adj.unit}</span>
                           </td>
 
                           {/* Rate & Valuation */}
                           <td className="py-3 px-3 text-right">
-                            <div className="font-bold text-[var(--color-on-surface)]">
-                              {currencySymbol} {totalVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                            </div>
-                            {adj.rate !== undefined && adj.rate > 0 && (
-                              <div className="text-[10px] text-[var(--color-outline)]">
-                                @ {currencySymbol} {adj.rate.toLocaleString('en-IN')}/{adj.unit}
-                              </div>
+                            {adj.type === 'transfer' ? (
+                              <div className="text-[11px] font-bold text-[var(--color-on-surface-variant)]">Value-neutral</div>
+                            ) : (
+                              <>
+                                <div className="font-bold text-[var(--color-on-surface)]">
+                                  {currencySymbol} {totalVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </div>
+                                {adj.rate !== undefined && adj.rate > 0 && (
+                                  <div className="text-[10px] text-[var(--color-outline)]">
+                                    @ {currencySymbol} {adj.rate.toLocaleString('en-IN')}/{adj.unit}
+                                  </div>
+                                )}
+                              </>
                             )}
                           </td>
 
@@ -1615,6 +1678,69 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                           </td>
 
                         </tr>
+
+                        {/* STOCK TRANSFER — the paired DESTINATION leg rendered
+                            UNDER the voucher: where the transferred stock LANDED
+                            it reads as a positive (inward) entry. One voucher,
+                            two register lines (user directive 2026-11-17). */}
+                        {adj.type === 'transfer' && (
+                          <tr className="bg-[var(--color-tertiary-container)]/25 hover:bg-[var(--color-tertiary-container)]/40 transition-colors">
+                            <td className="py-2.5 px-4">
+                              <span className="font-mono text-[10px] font-bold text-[var(--color-on-surface-variant)] flex items-center gap-1">
+                                <span className="text-[var(--color-tertiary)]">↳</span> {adj.adjustmentNumber || 'STK-ADJ'}
+                              </span>
+                              <span className="text-[10px] text-[var(--color-on-surface-variant)] flex items-center gap-1 mt-0.5">
+                                <Calendar className="w-3 h-3 text-[var(--color-outline)]" />
+                                {new Date(adj.date).toLocaleDateString('en-IN')}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <div className="flex items-center gap-1.5 mt-0.5">
+                                <span className="font-mono text-[10px] bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] px-1.5 py-0.2 rounded-full font-bold">
+                                  {adj.itemCode}
+                                </span>
+                                <span className="text-[10px] text-[var(--color-on-surface-variant)] flex items-center gap-0.5 font-semibold">
+                                  <Warehouse className="w-3 h-3 text-[var(--color-tertiary)]" />
+                                  {adj.toLocationName || '—'}
+                                  <span className="text-[9px] text-[var(--color-outline)] uppercase">(destination)</span>
+                                </span>
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-3 text-center">
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-[var(--color-success-container)] text-[var(--color-success)] border border-[var(--color-success)]/30">
+                                <TrendingUp className="w-3 h-3" />
+                                ⇄ Transfer In
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 text-right">
+                              <span className="text-sm font-black text-[var(--color-success)]">
+                                + {adj.quantity.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                              </span>
+                              <span className="text-[10px] text-[var(--color-outline)] block">{adj.unit}</span>
+                            </td>
+                            <td className="py-2.5 px-3 text-right">
+                              <div className="text-[11px] font-bold text-[var(--color-on-surface-variant)]">Value-neutral</div>
+                            </td>
+                            <td className="py-2.5 px-3 text-center">
+                              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-[var(--color-surface-container)] rounded-xl border border-[var(--color-outline-variant)] text-[11px] font-mono">
+                                <span className="text-[var(--color-on-surface-variant)] font-semibold">
+                                  {adj.previousStock?.toLocaleString('en-IN') ?? '—'}
+                                </span>
+                                <span className="text-[var(--color-outline)]">➔</span>
+                                <span className="font-bold text-[var(--color-primary)]">
+                                  {adj.newStock?.toLocaleString('en-IN') ?? '—'}
+                                </span>
+                                <span className="text-[9px] text-[var(--color-outline)]">{adj.unit}</span>
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <div className="font-semibold text-[var(--color-on-surface-variant)] max-w-xs truncate text-[11px]">
+                                Stock landed here from {adj.fromLocationName || adj.location || 'the source'}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                        </React.Fragment>
                       );
                     })}
                   </tbody>

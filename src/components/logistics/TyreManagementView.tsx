@@ -11,22 +11,31 @@ import {
   Compass,
   Navigation2,
   Building,
-  FileText,
+  Archive,
+  Undo2,
+  Warehouse,
+  Layers,
+  MoreVertical,
+  ArchiveRestore,
 } from 'lucide-react';
-import { Vehicle, TripSlip, CompanySettings, Tyre } from '../../types';
+import { Vehicle, TripSlip, CompanySettings, Item, ItemLocation, InventoryUnit, TYRE_POSITIONS, TYRE_POSITION_LABELS, isTyreItemName } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 
 /**
- * TYRE MANAGEMENT (own sidebar feature, split from Fleet 2026-10-23) — the
- * Tyre Fleet tab (tyre assets, inspection & mounting) and the View Transit
- * tab (transit telemetry) both live under the manage_tyres gate. Vehicles
- * are read here only for the mounting pickers; tyre CRUD is guarded by
- * manage_tyres on the API.
+ * TYRE MANAGEMENT (own sidebar feature) — REBUILT ON THE SERIAL REGISTER
+ * (2026-11-17): the old standalone Tyre table is retired. Tyres are the
+ * serials of asset items whose NAME carries "Tyre/Tyres"; each serial lives
+ * in inventory_units (lifecycle: in_stock → deployed on a fleet vehicle at
+ * ONE of the 12 dumper positions → maintenance/retread → scrap/sold) and the
+ * vehicle profile's Tyre diagram is the other half of this feature.
+ * The View Transit tab (transit telemetry) keeps living under this gate.
  */
 export const TyreManagementView: React.FC = () => {
-  // Database States
-  const [tyres, setTyres] = useState<Tyre[]>([]);
+  // Database States — read through the serial register + item master
+  const [items, setItems] = useState<Item[]>([]);
+  const [tyreUnits, setTyreUnits] = useState<InventoryUnit[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [locations, setLocations] = useState<ItemLocation[]>([]);
   const [slips, setSlips] = useState<TripSlip[]>([]);
   const [settings, setSettings] = useState<CompanySettings | null>(null);
 
@@ -35,31 +44,26 @@ export const TyreManagementView: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
 
-  // Creation / Editing Modals for Tyres
-  const [isTyreModalOpen, setIsTyreModalOpen] = useState(false);
-  const [editingTyre, setEditingTyre] = useState<Tyre | null>(null);
-
-  // Form States - Tyre
-  const [formTyreSerial, setFormTyreSerial] = useState('');
-  const [formTyreBrand, setFormTyreBrand] = useState('MRF');
-  const [formTyreSize, setFormTyreSize] = useState('10.00R20');
-  const [formTyreType, setFormTyreType] = useState<'radial' | 'tubeless' | 'bias'>('radial');
-  const [formTyreStatus, setFormTyreStatus] = useState<'mounted' | 'available' | 'retreading' | 'scrapped'>('available');
-  const [formTyreVehicleId, setFormTyreVehicleId] = useState('');
-  const [formTyrePosition, setFormTyrePosition] = useState('');
-  const [formTyrePurchaseDate, setFormTyrePurchaseDate] = useState('');
-  const [formTyrePurchaseCost, setFormTyrePurchaseCost] = useState('');
-  const [formTyreOdometer, setFormTyreOdometer] = useState('');
-  const [formTyreThreadDepth, setFormTyreThreadDepth] = useState('');
-  const [formTyreCondition, setFormTyreCondition] = useState<'excellent' | 'good' | 'worn' | 'damaged'>('excellent');
-  const [formTyreNotes, setFormTyreNotes] = useState('');
+  // Fit / modals
+  const [fitForm, setFitForm] = useState<{ unitId: string; vehicleId: string; position: string; odometer: string; notes: string } | null>(null);
+  const [addSerialOpen, setAddSerialOpen] = useState(false);
+  const [addSerialItem, setAddSerialItem] = useState('');
+  const [addSerialText, setAddSerialText] = useState('');
+  const [addSerialLocation, setAddSerialLocation] = useState('');
 
   // Load and subscribe to database changes
   const loadData = () => {
-    setTyres(localDb.getTyres());
+    const allItems = localDb.getItems();
+    setItems(allItems);
     setVehicles(localDb.getVehicles());
+    setLocations(localDb.getLocations());
     setSlips(localDb.getTripSlips());
     setSettings(localDb.getSettings());
+    // TYRE UNITS — serials of asset items whose name is Tyre/Tyres
+    const tyreItemIdSet = new Set(allItems.filter((i) => i.type === 'asset' && isTyreItemName(i.name)).map((i) => i.id));
+    const units = localDb.getInventoryUnits().filter((u) => tyreItemIdSet.has(u.itemId));
+    units.sort((a, b) => a.serialNumber.localeCompare(b.serialNumber));
+    setTyreUnits(units);
   };
 
   useEffect(() => {
@@ -73,105 +77,123 @@ export const TyreManagementView: React.FC = () => {
     loadData();
   }, [activeSubTab]);
 
+  const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
+  const locationName = (id?: string) => (id ? locations.find((l) => l.id === id)?.name : undefined);
+  const vehicleNo = (id?: string) => (id ? vehicles.find((v) => v.id === id)?.vehicleNo : undefined);
+
   // Format Helper
   const formatCurrency = (val: number) => {
     const symbol = settings?.currency?.symbol || '₹';
     return `${symbol}${val.toLocaleString('en-IN')}`;
   };
 
-  // Tyre Handlers
-  const handleOpenTyreModal = (tyre?: Tyre | null) => {
-    if (tyre) {
-      setEditingTyre(tyre);
-      setFormTyreSerial(tyre.serialNumber);
-      setFormTyreBrand(tyre.brand);
-      setFormTyreSize(tyre.size);
-      setFormTyreType(tyre.type);
-      setFormTyreStatus(tyre.status);
-      setFormTyreVehicleId(tyre.vehicleId || '');
-      setFormTyrePosition(tyre.position || '');
-      setFormTyrePurchaseDate(tyre.purchaseDate);
-      setFormTyrePurchaseCost(String(tyre.purchaseCost));
-      setFormTyreOdometer(tyre.currentOdometer ? String(tyre.currentOdometer) : '');
-      setFormTyreThreadDepth(tyre.threadDepthMm ? String(tyre.threadDepthMm) : '');
-      setFormTyreCondition(tyre.lastInspectionCondition || 'excellent');
-      setFormTyreNotes(tyre.notes || '');
-    } else {
-      setEditingTyre(null);
-      setFormTyreSerial('');
-      setFormTyreBrand('MRF');
-      setFormTyreSize('10.00R20');
-      setFormTyreType('radial');
-      setFormTyreStatus('available');
-      setFormTyreVehicleId('');
-      setFormTyrePosition('');
-      setFormTyrePurchaseDate(new Date().toISOString().split('T')[0]);
-      setFormTyrePurchaseCost('');
-      setFormTyreOdometer('');
-      setFormTyreThreadDepth('');
-      setFormTyreCondition('excellent');
-      setFormTyreNotes('');
-    }
-    setIsTyreModalOpen(true);
-  };
-
-  const handleSaveTyre = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formTyreSerial || !formTyreBrand || !formTyreSize) {
-      alert('Please fill in serial number, brand, and size.');
-      return;
-    }
-
-    const linkedVehicle = vehicles.find(v => v.id === formTyreVehicleId);
-
-    const tyreData: Omit<Tyre, 'id' | 'createdAt'> = {
-      serialNumber: formTyreSerial.toUpperCase().trim(),
-      brand: formTyreBrand.trim(),
-      size: formTyreSize.trim(),
-      type: formTyreType,
-      status: formTyreStatus,
-      vehicleId: formTyreStatus === 'mounted' ? (formTyreVehicleId || undefined) : undefined,
-      vehicleNo: formTyreStatus === 'mounted' ? (linkedVehicle?.vehicleNo || undefined) : undefined,
-      position: formTyreStatus === 'mounted' ? (formTyrePosition || undefined) : undefined,
-      purchaseDate: formTyrePurchaseDate || new Date().toISOString().split('T')[0],
-      purchaseCost: Number(formTyrePurchaseCost) || 0,
-      currentOdometer: Number(formTyreOdometer) || 0,
-      installOdometer: editingTyre?.installOdometer || (formTyreStatus === 'mounted' ? Number(formTyreOdometer) || 0 : undefined),
-      lastInspectionDate: new Date().toISOString().split('T')[0],
-      lastInspectionCondition: formTyreCondition,
-      threadDepthMm: Number(formTyreThreadDepth) || undefined,
-      notes: formTyreNotes.trim() || undefined,
+  // ⋮ row-action popover (viewport-fixed so the table's overflow-x-auto
+  // can't clip it — same pattern as the fleet/orders lists). Menu contents
+  // follow the STATUS: fit/retread/scrap for spares, unload for fitted,
+  // restore for workshop, unscrap for scrapped; DONE for sold.
+  const [unitMenu, setUnitMenu] = useState<{ unitId: string; top: number; left: number } | null>(null);
+  const unitMenuRef = React.useRef<HTMLDivElement | null>(null);
+  const closeUnitMenu = () => setUnitMenu(null);
+  React.useEffect(() => {
+    if (!unitMenu) return;
+    const onClickOut = (e: MouseEvent) => {
+      if (unitMenuRef.current && !unitMenuRef.current.contains(e.target as Node)) closeUnitMenu();
     };
+    const onMove = () => closeUnitMenu();
+    document.addEventListener('mousedown', onClickOut);
+    window.addEventListener('scroll', onMove, true);
+    window.addEventListener('resize', onMove);
+    return () => {
+      document.removeEventListener('mousedown', onClickOut);
+      window.removeEventListener('scroll', onMove, true);
+      window.removeEventListener('resize', onMove);
+    };
+  }, [unitMenu]);
 
-    if (editingTyre) {
-      localDb.updateTyre(editingTyre.id, tyreData);
-    } else {
-      localDb.addTyre(tyreData);
-    }
-
-    setIsTyreModalOpen(false);
+  const openUnitMenu = (unitId: string, el: HTMLElement) => {
+    const r = el.getBoundingClientRect();
+    setUnitMenu({
+      unitId,
+      top: Math.min(r.bottom + 6, window.innerHeight - 190),
+      left: Math.max(8, Math.min(r.left - 170, window.innerWidth - 220)),
+    });
   };
 
-  const handleDeleteTyre = (id: string) => {
-    if (confirm('Are you sure you want to permanently delete this tyre record?')) {
-      localDb.deleteTyre(id);
+  // --- ACTIONS — all through the unit lifecycle (server-validated) ---
+  const handleSaveFit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!fitForm) return;
+    localDb.deployInventoryUnit(fitForm.unitId, {
+      vehicleId: fitForm.vehicleId,
+      position: fitForm.position,
+      odometer: fitForm.odometer === '' ? undefined : Number(fitForm.odometer),
+      notes: fitForm.notes || undefined,
+    });
+    setFitForm(null);
+  };
+
+  const handleUnload = (u: InventoryUnit) => {
+    if (confirm(`Unload tyre ${u.serialNumber} from ${vehicleNo(u.vehicleId) || 'the vehicle'} back to spare stock?`)) {
+      localDb.returnInventoryUnit(u.id, {});
     }
+  };
+
+  const handleRetread = (u: InventoryUnit) => {
+    if (confirm(`Send tyre serial ${u.serialNumber} to the retreading workshop?`)) {
+      localDb.maintainInventoryUnit(u.id, { notes: 'Sent for retreading' });
+    }
+  };
+
+  const handleRestore = (u: InventoryUnit) => {
+    if (confirm(`Bring serial ${u.serialNumber} back from the workshop into spare stock?`)) {
+      localDb.restoreInventoryUnit(u.id, { notes: 'Restored from retreading' });
+    }
+  };
+
+  // SCRAP — a fitted tyre can never be scrapped (server refuses too). No
+  // reason prompt; the action just retires the serial.
+  const handleScrap = (u: InventoryUnit) => {
+    if (confirm(`Mark serial ${u.serialNumber} as scrapped? It returns to usable stock when unscrapped later.`)) {
+      localDb.scrapInventoryUnit(u.id, { notes: 'Scrapped from Tyre Management' });
+    }
+  };
+
+  // UN-SCRAP — immediate, no confirmation (a scrapped tyre simply returns to
+  // the spare yard; a SOLD tyre can never come back — its menu is disabled).
+  const handleUnscrap = (u: InventoryUnit) => {
+    localDb.unscrapInventoryUnit(u.id, { notes: 'Unscrapped from Tyre Management' });
+  };
+
+  const handleAddSerial = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!addSerialItem || !addSerialText.trim()) return;
+    localDb.addInventoryUnit({
+      itemId: addSerialItem,
+      serialNumber: addSerialText.toUpperCase().trim(),
+      locationId: addSerialLocation || undefined,
+    });
+    setAddSerialOpen(false);
+    setAddSerialItem('');
+    setAddSerialText('');
+    setAddSerialLocation('');
   };
 
   // Filters Calculation
-  const filteredTyres = useMemo(() => {
-    return tyres.filter(t => {
+  const filteredUnits = useMemo(() => {
+    const q = searchQuery.toLowerCase();
+    return tyreUnits.filter((u) => {
       const matchesSearch =
-        t.serialNumber.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        t.brand.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        t.size.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (t.vehicleNo && t.vehicleNo.toLowerCase().includes(searchQuery.toLowerCase())) ||
-        (t.notes && t.notes.toLowerCase().includes(searchQuery.toLowerCase()));
-
-      const matchesStatus = statusFilter === 'all' || t.status === statusFilter;
+        u.serialNumber.toLowerCase().includes(q) ||
+        (itemById.get(u.itemId)?.name || '').toLowerCase().includes(q) ||
+        (u.vehicleId ? (vehicleNo(u.vehicleId) || '').toLowerCase().includes(q) : false) ||
+        (u.condition && u.condition.toLowerCase().includes(q));
+      const matchesStatus = statusFilter === 'all' || u.status === statusFilter;
       return matchesSearch && matchesStatus;
     });
-  }, [tyres, searchQuery, statusFilter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tyreUnits, searchQuery, statusFilter, items, vehicles]);
+
+  const tyreItemCount = tyreUnits.length;
 
   return (
     <div className="space-y-6">
@@ -189,7 +211,7 @@ export const TyreManagementView: React.FC = () => {
             <Disc className="h-4 w-4" />
             Tyre Management
             <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)]">
-              {tyres.length}
+              {tyreItemCount}
             </span>
           </button>
           <button
@@ -206,14 +228,14 @@ export const TyreManagementView: React.FC = () => {
         </nav>
       </div>
 
-      {/* SEARCH AND FILTER BAR — Add Tyre sits RIGHT of the status filter */}
+      {/* SEARCH AND FILTER BAR — Register Serial sits RIGHT of the status filter */}
       {activeSubTab === 'tyres' && (
         <div className="flex flex-col sm:flex-row gap-3 bg-[var(--color-surface-container-lowest)] p-3 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs">
           <div className="relative flex-1">
             <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[var(--color-outline)]" />
             <input
               type="text"
-              placeholder="Search tyre serial, brand, size..."
+              placeholder="Search tyre serial, item, vehicle, condition..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-10 pr-4 py-2 w-full bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] placeholder:text-[var(--color-on-surface-variant)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
@@ -227,17 +249,28 @@ export const TyreManagementView: React.FC = () => {
               className="py-2 pl-3.5 pr-8 border border-[var(--color-outline-variant)] rounded-full text-xs font-medium bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
             >
               <option value="all">All Statuses</option>
-              <option value="mounted">Mounted</option>
-              <option value="available">Available (Yard)</option>
-              <option value="retreading">Retreading</option>
+              <option value="deployed">Fitted on Vehicle</option>
+              <option value="in_stock">Available (Yard)</option>
+              <option value="maintenance">Retreading</option>
               <option value="scrapped">Scrapped</option>
+              <option value="sold">Sold</option>
             </select>
             <button
-              onClick={() => handleOpenTyreModal(null)}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-bold shadow-xs transition whitespace-nowrap"
+              onClick={() => setAddSerialOpen(true)}
+              disabled={(() => {
+                const tyreItemOptions = items.filter((i) => i.type === 'asset' && isTyreItemName(i.name) && i.isActive !== false);
+                return tyreItemOptions.length === 0;
+              })()}
+              title={(() => {
+                const tyreItemOptions = items.filter((i) => i.type === 'asset' && isTyreItemName(i.name) && i.isActive !== false);
+                return tyreItemOptions.length === 0
+                  ? 'Create an asset item named e.g. "Tyre 10.00R20" in the Items module first'
+                  : 'Register a new tyre serial';
+              })()}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-bold shadow-xs transition whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              <Disc className="h-4 w-4" />
-              Add Tyre
+              <Plus className="h-4 w-4" />
+              Register Serial
             </button>
           </div>
         </div>
@@ -245,16 +278,16 @@ export const TyreManagementView: React.FC = () => {
 
       {/* TAB CONTENTS */}
 
-      {/* 1. TYRE FLEET MANAGEMENT */}
+      {/* 1. TYRE SERIAL REGISTER */}
       {activeSubTab === 'tyres' && (
         <div className="space-y-6">
-          {/* Tyre Stats cards */}
+          {/* Serial stats cards */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-center justify-between">
               <div>
-                <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Total Tyre Assets</p>
-                <h4 className="text-xl font-black text-[var(--color-on-surface)] mt-1">{tyres.length} units</h4>
-                <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-1.5 font-medium">Active & backup inventory</p>
+                <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Total Tyre Serials</p>
+                <h4 className="text-xl font-black text-[var(--color-on-surface)] mt-1">{tyreItemCount} units</h4>
+                <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-1.5 font-medium">Across all tyre items</p>
               </div>
               <div className="p-2.5 bg-[var(--color-surface-container)] rounded-2xl">
                 <Disc className="h-5 w-5 text-[var(--color-primary)]" />
@@ -263,14 +296,14 @@ export const TyreManagementView: React.FC = () => {
 
             <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-center justify-between">
               <div>
-                <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Currently Mounted</p>
-                <h4 className="text-xl font-black text-[var(--color-warning)] mt-1">
-                  {tyres.filter(t => t.status === 'mounted').length} units
+                <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Fitted on Vehicles</p>
+                <h4 className="text-xl font-black text-[var(--color-primary)] mt-1">
+                  {tyreUnits.filter((u) => u.status === 'deployed').length} units
                 </h4>
-                <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-1.5 font-medium">Mounted on active haulers</p>
+                <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-1.5 font-medium">One per wheel position</p>
               </div>
-              <div className="p-2.5 bg-[var(--color-warning-container)] rounded-2xl">
-                <Truck className="h-5 w-5 text-[var(--color-on-warning-container)]" />
+              <div className="p-2.5 bg-[var(--color-primary-container)] rounded-2xl">
+                <Truck className="h-5 w-5 text-[var(--color-on-primary-container)]" />
               </div>
             </div>
 
@@ -278,25 +311,27 @@ export const TyreManagementView: React.FC = () => {
               <div>
                 <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Spare Yard Stock</p>
                 <h4 className="text-xl font-black text-[var(--color-success)] mt-1">
-                  {tyres.filter(t => t.status === 'available').length} spares
+                  {tyreUnits.filter((u) => u.status === 'in_stock').length} serials
                 </h4>
-                <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-1.5 font-medium">Ready for dispatch / swap</p>
+                <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-1.5 font-medium">Ready for fitment / swap</p>
               </div>
               <div className="p-2.5 bg-[var(--color-success-container)] rounded-2xl">
-                <Building className="h-5 w-5 text-[var(--color-on-success-container)]" />
+                <Warehouse className="h-5 w-5 text-[var(--color-on-success-container)]" />
               </div>
             </div>
 
             <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-center justify-between">
               <div>
-                <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Wear & Alert Status</p>
-                <h4 className="text-xl font-black text-[var(--color-error)] mt-1">
-                  {tyres.filter(t => t.lastInspectionCondition === 'worn' || t.lastInspectionCondition === 'damaged' || (t.threadDepthMm && t.threadDepthMm <= 4.5)).length} units
+                <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Workshop &amp; Exits</p>
+                <h4 className="text-xl font-black text-[var(--color-warning)] mt-1">
+                  {tyreUnits.filter((u) => u.status === 'maintenance').length} at retread
                 </h4>
-                <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-1.5 font-medium">Tread ≤ 4.5mm or damaged</p>
+                <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-1.5 font-medium">
+                  {tyreUnits.filter((u) => u.status === 'scrapped' || u.status === 'sold').length} scrapped/sold lifetime
+                </p>
               </div>
-              <div className="p-2.5 bg-[var(--color-error-container)] rounded-2xl">
-                <AlertCircle className="h-5 w-5 text-[var(--color-on-error-container)]" />
+              <div className="p-2.5 bg-[var(--color-warning-container)] rounded-2xl">
+                <TrendingUp className="h-5 w-5 text-[var(--color-on-warning-container)]" />
               </div>
             </div>
           </div>
@@ -305,24 +340,30 @@ export const TyreManagementView: React.FC = () => {
           <div className="bg-[var(--color-warning-container)] border border-[var(--color-warning)]/30 rounded-[24px] p-4 flex gap-3 text-left">
             <AlertCircle className="h-5 w-5 text-[var(--color-on-warning-container)] shrink-0 mt-0.5" />
             <div className="space-y-1">
-              <h5 className="text-xs font-bold text-[var(--color-on-warning-container)] uppercase tracking-wider">Tire Inspection Maintenance Mandate</h5>
+              <h5 className="text-xs font-bold text-[var(--color-on-warning-container)] uppercase tracking-wider">Tyre Fitment Protocol</h5>
               <p className="text-[11px] text-[var(--color-on-warning-container)]/90 leading-normal">
-                Tread depths for commercial heavy tippers must be inspected bi-weekly. Active tires with tread depths below 4.0mm are legally non-compliant and must be immediately scheduled for cold retreading or scrap replacement to prevent blowouts during asphalt transit.
+                Every fitted tyre carries its 12-tyre dumper position (FL · FR · L1–L5 · R1–R5) — one serial per wheel, enforced by the server. The vehicle profile's Tyre diagram shows exactly which serial sits on which wheel; a swapped or damaged tyre must be unloaded to spare stock (or sent to retreading) before a fresh serial is fitted.
               </p>
             </div>
           </div>
 
-          {/* Tyres List Table */}
-          {filteredTyres.length === 0 ? (
+          {/* Serials List Table */}
+          {filteredUnits.length === 0 ? (
             <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-[28px] p-12 text-center shadow-2xs">
               <Disc className="h-10 w-10 text-[var(--color-outline)] mx-auto mb-3 animate-spin-slow" />
-              <p className="text-[var(--color-on-surface-variant)] font-medium text-xs">No tyres found matching search/filter terms.</p>
-              <button
-                onClick={() => handleOpenTyreModal(null)}
-                className="mt-4 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-semibold shadow-xs"
-              >
-                Register Your First Tyre
-              </button>
+              <p className="text-[var(--color-on-surface-variant)] font-medium text-xs">No tyre serials match the search/filter terms.</p>
+              {items.filter((i) => i.type === 'asset' && isTyreItemName(i.name)).length === 0 ? (
+                <p className="text-[11px] text-[var(--color-on-surface-variant)] font-semibold max-w-md mx-auto mt-2">
+                  A serialised (asset) item named with the word "Tyre" — e.g. "Tyre 10.00R20" — is required first. Create it in the Items module, then register its serials here.
+                </p>
+              ) : (
+                <button
+                  onClick={() => setAddSerialOpen(true)}
+                  className="mt-4 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-semibold shadow-xs"
+                >
+                  Register Your First Tyre Serial
+                </button>
+              )}
             </div>
           ) : (
             <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-[28px] overflow-hidden shadow-2xs">
@@ -330,211 +371,135 @@ export const TyreManagementView: React.FC = () => {
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-                      <th className="py-3.5 px-4">Serial / Brand / Type</th>
-                      <th className="py-3.5 px-3">Size Dimensions</th>
-                      <th className="py-3.5 px-3">Current Assignment / Status</th>
-                      <th className="py-3.5 px-3">Tread Level & Condition</th>
-                      <th className="py-3.5 px-3 text-right">Running KM</th>
-                      <th className="py-3.5 px-3 text-right">Purchase Cost</th>
+                      <th className="py-3.5 px-4">Serial / Item</th>
+                      <th className="py-3.5 px-3">Status</th>
+                      <th className="py-3.5 px-3">Assignment / Location</th>
+                      <th className="py-3.5 px-3">Condition</th>
+                      <th className="py-3.5 px-3">Procurement</th>
                       <th className="py-3.5 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--color-outline-variant)]">
-                    {filteredTyres.map((tyre) => {
-                      const isTreadLow = tyre.threadDepthMm !== undefined && tyre.threadDepthMm <= 4.5;
-                      const isDamaged = tyre.lastInspectionCondition === 'damaged' || tyre.lastInspectionCondition === 'worn';
-
+                    {filteredUnits.map((u) => {
+                      const item = itemById.get(u.itemId);
+                      const attrs = u.attributes ? Object.entries(u.attributes).filter(([, v]) => v !== undefined && v !== '') : [];
                       return (
-                        <tr
-                          key={tyre.id}
-                          className={`hover:bg-[var(--color-surface-container)]/40 transition-colors text-xs text-[var(--color-on-surface)] ${
-                            isTreadLow || isDamaged ? 'bg-[var(--color-error-container)]/20' : ''
-                          }`}
-                        >
-                          {/* Serial & Brand */}
+                        <tr key={u.id} className="hover:bg-[var(--color-surface-container)]/40 transition-colors text-xs text-[var(--color-on-surface)]">
+                          {/* Serial & Item */}
                           <td className="py-3.5 px-4">
                             <div className="space-y-1">
                               <div className="flex items-center gap-1.5">
                                 <span className="font-mono text-xs font-black bg-[var(--color-surface-container-highest)] text-[var(--color-on-surface)] px-2 py-0.5 rounded-full uppercase border border-[var(--color-outline-variant)]">
-                                  {tyre.serialNumber}
+                                  {u.serialNumber}
                                 </span>
                                 <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
-                                  tyre.status === 'mounted'
+                                  u.status === 'deployed'
                                     ? 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
-                                    : tyre.status === 'available'
+                                    : u.status === 'in_stock'
                                       ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-                                      : tyre.status === 'retreading'
+                                      : u.status === 'maintenance'
                                         ? 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)]'
-                                        : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
+                                        : u.status === 'scrapped'
+                                          ? 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
+                                          : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
                                 }`}>
-                                  {tyre.status}
+                                  {u.status === 'deployed' ? 'fitted' : u.status === 'sold' ? 'sold out' : u.status}
                                 </span>
                               </div>
                               <div className="text-[11px] font-bold text-[var(--color-on-surface)]">
-                                {tyre.brand} <span className="text-[var(--color-on-surface-variant)] font-semibold">• {tyre.type.toUpperCase()}</span>
+                                {item?.name || '—'}
                               </div>
-                            </div>
-                          </td>
-
-                          {/* Dimensions */}
-                          <td className="py-3.5 px-3 font-semibold text-[var(--color-on-surface)]">
-                            {tyre.size}
-                          </td>
-
-                          {/* Current Assignment / Status details */}
-                          <td className="py-3.5 px-3">
-                            {tyre.status === 'mounted' ? (
-                              <div className="space-y-0.5 text-left">
-                                <span className="font-bold text-[var(--color-on-primary-container)] bg-[var(--color-primary-container)] px-2 py-0.5 rounded-full inline-flex items-center gap-1">
-                                  <Truck className="h-3 w-3" /> {tyre.vehicleNo}
-                                </span>
-                                <p className="text-[10px] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider">{tyre.position}</p>
-                              </div>
-                            ) : (
-                              <div className="text-[11px] text-[var(--color-on-surface-variant)] font-semibold flex items-center gap-1">
-                                <Building className="h-3.5 w-3.5 text-[var(--color-outline)]" />
-                                {tyre.status === 'available' && 'Yard Idle Spare'}
-                                {tyre.status === 'retreading' && 'Retread Workshop'}
-                                {tyre.status === 'scrapped' && 'Retired / Scrapped'}
-                              </div>
-                            )}
-                          </td>
-
-                          {/* Tread Depth / Wear visual gauge */}
-                          <td className="py-3.5 px-3">
-                            <div className="space-y-1.5 max-w-[150px]">
-                              <div className="flex justify-between items-center text-[10px] font-bold">
-                                <span className={`text-[9px] font-black uppercase px-2 py-0.2 rounded-full ${
-                                  tyre.lastInspectionCondition === 'excellent'
-                                    ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-                                    : tyre.lastInspectionCondition === 'good'
-                                      ? 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)]'
-                                      : tyre.lastInspectionCondition === 'worn'
-                                        ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
-                                        : 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
-                                }`}>
-                                  {tyre.lastInspectionCondition}
-                                </span>
-                                {tyre.threadDepthMm !== undefined && (
-                                  <span className={isTreadLow ? 'text-[var(--color-error)] font-bold' : 'text-[var(--color-on-surface-variant)]'}>
-                                    {tyre.threadDepthMm} mm
-                                  </span>
-                                )}
-                              </div>
-                              {tyre.threadDepthMm !== undefined && (
-                                <div className="h-1.5 bg-[var(--color-surface-container)] rounded-full overflow-hidden">
-                                  <div
-                                    className={`h-full rounded-full transition-all ${
-                                      tyre.threadDepthMm > 8
-                                        ? 'bg-[var(--color-success)]'
-                                        : tyre.threadDepthMm > 4.5
-                                          ? 'bg-[var(--color-warning)]'
-                                          : 'bg-[var(--color-error)]'
-                                    }`}
-                                    style={{ width: `${Math.min(100, (tyre.threadDepthMm / 14) * 100)}%` }}
-                                  ></div>
+                              {attrs.length > 0 && (
+                                <div className="flex flex-wrap gap-1">
+                                  {attrs.slice(0, 3).map(([k, v]) => (
+                                    <span key={k} className="text-[9px] font-semibold text-[var(--color-on-surface-variant)] bg-[var(--color-surface-container)] px-1.5 py-0.2 rounded-full">{k}: {String(v)}</span>
+                                  ))}
                                 </div>
                               )}
                             </div>
                           </td>
 
-                          {/* Running KM */}
-                          <td className="py-3.5 px-3 text-right font-bold text-[var(--color-on-surface)]">
-                            {(tyre.currentOdometer || 0).toLocaleString()} KM
+                          {/* Status */}
+                          <td className="py-3.5 px-3">
+                            <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase">
+                              {u.status === 'deployed' && <Truck className="h-3 w-3 text-[var(--color-primary)]" />}
+                              {u.status === 'in_stock' && <Warehouse className="h-3 w-3 text-[var(--color-success)]" />}
+                              {u.status === 'maintenance' && <TrendingUp className="h-3 w-3 text-[var(--color-info)]" />}
+                              {u.status === 'scrapped' && <Archive className="h-3 w-3 text-[var(--color-error)]" />}
+                              {u.status === 'sold' && <Layers className="h-3 w-3 text-[var(--color-on-surface-variant)]" />}
+                            </div>
                           </td>
 
-                          {/* Purchase Cost */}
-                          <td className="py-3.5 px-3 text-right font-bold text-[var(--color-on-surface)]">
-                            {formatCurrency(tyre.purchaseCost)}
+                          {/* Assignment / Location */}
+                          <td className="py-3.5 px-3">
+                            {u.status === 'deployed' && u.vehicleId ? (
+                              <div className="space-y-0.5">
+                                <span className="font-bold text-[var(--color-on-primary-container)] bg-[var(--color-primary-container)] px-2 py-0.5 rounded-full inline-flex items-center gap-1">
+                                  <Truck className="h-3 w-3" /> {vehicleNo(u.vehicleId) || u.vehicleNo || 'Vehicle'}
+                                </span>
+                                <p className="text-[10px] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider">
+                                  @ {u.position ? TYRE_POSITION_LABELS[u.position as keyof typeof TYRE_POSITION_LABELS] || u.position : 'no position'}
+                                </p>
+                              </div>
+                            ) : u.status === 'maintenance' ? (
+                              <div className="text-[11px] text-[var(--color-on-surface-variant)] font-semibold flex items-center gap-1">
+                                <TrendingUp className="h-3.5 w-3.5 text-[var(--color-info)]" /> Retread Workshop
+                              </div>
+                            ) : u.status === 'scrapped' ? (
+                              <div className="text-[11px] text-[var(--color-on-surface-variant)] font-semibold flex items-center gap-1">
+                                <Archive className="h-3.5 w-3.5 text-[var(--color-error)]" /> Retired / Scrapped
+                              </div>
+                            ) : u.status === 'sold' ? (
+                              <div className="text-[11px] text-[var(--color-on-surface-variant)] font-semibold">Sold out · sale {u.saleNumber || '—'}</div>
+                            ) : (
+                              <div className="text-[11px] text-[var(--color-on-surface-variant)] font-semibold flex items-center gap-1">
+                                <Building className="h-3.5 w-3.5 text-[var(--color-outline)]" />
+                                {locationName(u.locationId) || u.locationName || 'Yard'}
+                              </div>
+                            )}
                           </td>
 
-                          {/* Actions */}
+                          {/* Condition + purchase facts */}
+                          <td className="py-3.5 px-3">
+                            <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
+                              u.condition === 'excellent'
+                                ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
+                                : u.condition === 'good'
+                                  ? 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)]'
+                                  : u.condition === 'worn'
+                                    ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
+                                    : u.condition === 'damaged'
+                                      ? 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
+                                      : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
+                            }`}>
+                              {u.condition || 'unknown'}
+                            </span>
+                          </td>
+
+                          {/* Procurement */}
+                          <td className="py-3.5 px-3 text-[11px] font-semibold text-[var(--color-on-surface-variant)]">
+                            {u.purchaseDate ? <div>{u.purchaseDate.split('T')[0]}</div> : null}
+                            {u.purchaseCost ? <div className="font-bold text-[var(--color-on-surface)]">{formatCurrency(u.purchaseCost)}</div> : null}
+                            {!u.purchaseDate && !u.purchaseCost && '—'}
+                          </td>
+
+                          {/* Actions — ONE ⋮ menu per serial; the menu is
+                              DISABLED once sold (a sold tyre is final). */}
                           <td className="py-3.5 px-4 text-right">
-                            <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                            <div className="flex items-center justify-end">
                               <button
-                                onClick={() => handleOpenTyreModal(tyre)}
-                                className="px-2.5 py-1 bg-[var(--color-surface-container-lowest)] hover:bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] text-[var(--color-on-surface)] font-bold rounded-full text-[10px] transition shadow-2xs"
+                                onClick={(e) => openUnitMenu(u.id, e.currentTarget)}
+                                disabled={u.status === 'sold'}
+                                className={`p-1.5 rounded-full text-[var(--color-on-surface-variant)] text-left transition-colors ${
+                                  u.status === 'sold'
+                                    ? 'opacity-30 cursor-not-allowed'
+                                    : 'hover:bg-[var(--color-surface-container)] hover:text-[var(--color-on-surface)]'
+                                }`}
+                                title={u.status === 'sold'
+                                  ? 'Sold Out — this serial has left the register and can no longer be changed'
+                                  : 'Serial actions (fit / unload / retread / scrap / unscrap)'}
                               >
-                                Edit
-                              </button>
-
-                              {tyre.status === 'mounted' ? (
-                                <button
-                                  onClick={() => {
-                                    if (confirm('Unmount this tyre and return it to spare yard stock?')) {
-                                      localDb.updateTyre(tyre.id, {
-                                        status: 'available',
-                                        vehicleId: undefined,
-                                        vehicleNo: undefined,
-                                        position: undefined
-                                      });
-                                    }
-                                  }}
-                                  className="px-2.5 py-1 bg-[var(--color-warning-container)] hover:opacity-90 text-[var(--color-on-warning-container)] font-bold rounded-full text-[10px] transition"
-                                >
-                                  Unmount
-                                </button>
-                              ) : tyre.status === 'available' ? (
-                                <button
-                                  onClick={() => {
-                                    handleOpenTyreModal({
-                                      ...tyre,
-                                      status: 'mounted',
-                                    });
-                                  }}
-                                  className="px-2.5 py-1 bg-[var(--color-success-container)] hover:opacity-90 text-[var(--color-on-success-container)] font-bold rounded-full text-[10px] transition"
-                                >
-                                  Mount
-                                </button>
-                              ) : null}
-
-                              {tyre.status !== 'retreading' && tyre.status !== 'scrapped' && (
-                                <button
-                                  onClick={() => {
-                                    if (confirm('Send this tyre casing to the external workshop for retreading?')) {
-                                      localDb.updateTyre(tyre.id, {
-                                        status: 'retreading',
-                                        vehicleId: undefined,
-                                        vehicleNo: undefined,
-                                        position: undefined,
-                                        lastInspectionCondition: 'excellent'
-                                      });
-                                    }
-                                  }}
-                                  className="p-1 text-[var(--color-on-surface-variant)] hover:text-[var(--color-info)] hover:bg-[var(--color-surface-container)] rounded-full transition"
-                                  title="Send to Retread"
-                                >
-                                  <TrendingUp className="h-3.5 w-3.5" />
-                                </button>
-                              )}
-
-                              {tyre.status !== 'scrapped' && (
-                                <button
-                                  onClick={() => {
-                                    if (confirm('Are you sure you want to Scrap and retire this tyre from active fleet usage?')) {
-                                      localDb.updateTyre(tyre.id, {
-                                        status: 'scrapped',
-                                        vehicleId: undefined,
-                                        vehicleNo: undefined,
-                                        position: undefined,
-                                        lastInspectionCondition: 'damaged',
-                                        threadDepthMm: 1.0
-                                      });
-                                    }
-                                  }}
-                                  className="p-1 text-[var(--color-on-surface-variant)] hover:text-[var(--color-error)] hover:bg-[var(--color-surface-container)] rounded-full transition"
-                                  title="Scrap Tyre"
-                                >
-                                  <X className="h-3.5 w-3.5 text-[var(--color-error)]" />
-                                </button>
-                              )}
-
-                              <button
-                                onClick={() => handleDeleteTyre(tyre.id)}
-                                className="p-1 text-[var(--color-error)] hover:bg-[var(--color-error-container)] rounded-full transition-all"
-                                title="Delete Record"
-                              >
-                                <X className="h-3.5 w-3.5" />
+                                <MoreVertical className="h-4 w-4" />
                               </button>
                             </div>
                           </td>
@@ -579,7 +544,7 @@ export const TyreManagementView: React.FC = () => {
 
             {/* Simulated Live Vehicles on Route Map */}
             <div className="space-y-6 my-10 relative">
-              {slips.filter(s => s.status === 'transit' || s.status === 'loading').length === 0 ? (
+              {slips.filter((s) => s.status === 'transit' || s.status === 'loading').length === 0 ? (
                 <div className="text-center p-8 text-slate-400 space-y-2">
                   <Navigation2 className="h-8 w-8 text-slate-600 mx-auto animate-bounce" />
                   <p className="text-xs font-bold uppercase text-slate-300">No Vehicles in Transit</p>
@@ -588,8 +553,8 @@ export const TyreManagementView: React.FC = () => {
                   </p>
                 </div>
               ) : (
-                slips.filter(s => s.status === 'transit' || s.status === 'loading').map((slip, i) => {
-                  const percent = slip.status === 'loading' ? 0 : 45 + (i * 20) % 40;
+                slips.filter((s) => s.status === 'transit' || s.status === 'loading').map((slip, i) => {
+                  const percent = slip.status === 'loading' ? 0 : 45 + ((i * 20) % 40);
                   return (
                     <div key={slip.id} className="space-y-2 relative">
                       <div className="flex justify-between text-[11px] text-slate-400">
@@ -599,13 +564,11 @@ export const TyreManagementView: React.FC = () => {
 
                       {/* Map track line */}
                       <div className="h-1.5 bg-slate-800 rounded-full w-full relative">
-                        {/* Progress line */}
                         <div
                           className="h-1.5 bg-gradient-to-r from-amber-500 to-emerald-500 rounded-full transition-all duration-1000"
                           style={{ width: `${percent}%` }}
                         ></div>
 
-                        {/* Active Moving Truck Pin */}
                         <div
                           className="absolute -top-3.5 transition-all duration-1000 -ml-3 cursor-pointer group"
                           style={{ left: `${percent}%` }}
@@ -615,7 +578,6 @@ export const TyreManagementView: React.FC = () => {
                             <span className="font-mono text-[9px] font-black">{slip.vehicleNo}</span>
                           </div>
 
-                          {/* Hover Telemetry Card */}
                           <div className="absolute left-1/2 -translate-x-1/2 bottom-8 bg-slate-900 border border-slate-700 p-2.5 rounded-xl shadow-lg text-left text-[10px] w-48 hidden group-hover:block z-20 space-y-1 leading-normal font-sans text-slate-100">
                             <p className="font-black text-amber-400 text-[11px]">{slip.vehicleNo}</p>
                             <p>Driver: <span className="font-bold text-white">{slip.driverName || '—'}</span></p>
@@ -637,7 +599,6 @@ export const TyreManagementView: React.FC = () => {
               )}
             </div>
 
-            {/* Sim Info Banner */}
             <div className="text-center text-[10px] text-slate-500 leading-normal border-t border-slate-800 pt-3 flex flex-wrap justify-between">
               <p>🛈 Hover over any truck on the map to inspect vehicle speed, driver credentials, and payload telemetry.</p>
               <p className="font-mono text-slate-400">AUTO-UPDATE INTERVAL: 5S</p>
@@ -646,257 +607,241 @@ export const TyreManagementView: React.FC = () => {
         </div>
       )}
 
-      {/* 3. TYRE REGISTRATION / INSPECTION MODAL */}
-      {isTyreModalOpen && (
+      {/* 3. ⋮ SERIAL-ACTIONS POPOVER — menu options follow the status */}
+      {unitMenu && (() => {
+        const menuUnit = tyreUnits.find((x) => x.id === unitMenu.unitId);
+        if (!menuUnit) return null;
+        const st = menuUnit.status;
+        const itemCls = 'w-full flex items-center gap-2 px-3 py-2 text-[11px] font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)] rounded-xl text-left transition-colors';
+        return (
+          <div
+            ref={unitMenuRef}
+            className="fixed z-[70] w-56 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xl p-1.5"
+            style={{ top: unitMenu.top, left: unitMenu.left }}
+          >
+            <p className="px-3 py-1.5 text-[9px] font-black uppercase tracking-wider text-[var(--color-on-surface-variant)] border-b border-[var(--color-outline-variant)]/60 mb-1 truncate font-mono">
+              {menuUnit.serialNumber} · {st === 'sold' ? 'sold out' : st === 'deployed' ? 'fitted' : st}
+            </p>
+            {st === 'in_stock' && (
+              <>
+                <button
+                  className={itemCls}
+                  onClick={() => { closeUnitMenu(); setFitForm({ unitId: menuUnit.id, vehicleId: '', position: '', odometer: '', notes: '' }); }}
+                  disabled={vehicles.length === 0}
+                  title={vehicles.length === 0 ? 'Add a vehicle in Fleet first' : 'Fit on a fleet vehicle at one of the 12 positions'}
+                >
+                  <Truck className="h-3.5 w-3.5 text-[var(--color-success)] shrink-0" /> Fit to Vehicle
+                </button>
+                <button
+                  className={itemCls}
+                  onClick={() => { closeUnitMenu(); handleRetread(menuUnit); }}
+                >
+                  <TrendingUp className="h-3.5 w-3.5 text-[var(--color-info)] shrink-0" /> Send for Retreading
+                </button>
+                <button
+                  className={itemCls}
+                  onClick={() => { closeUnitMenu(); handleScrap(menuUnit); }}
+                  title="Retire this serial — an optional reason is recorded"
+                >
+                  <Archive className="h-3.5 w-3.5 text-[var(--color-error)] shrink-0" /> Mark Scrap
+                </button>
+              </>
+            )}
+            {st === 'deployed' && (
+              <button className={itemCls} onClick={() => { closeUnitMenu(); handleUnload(menuUnit); }}>
+                <Undo2 className="h-3.5 w-3.5 text-[var(--color-warning)] shrink-0" /> Unload to Stock
+              </button>
+            )}
+            {st === 'maintenance' && (
+              <button className={itemCls} onClick={() => { closeUnitMenu(); handleRestore(menuUnit); }}>
+                <ArchiveRestore className="h-3.5 w-3.5 text-[var(--color-info)] shrink-0" /> Mark Restored
+              </button>
+            )}
+            {st === 'scrapped' && (
+              <button className={itemCls} onClick={() => { closeUnitMenu(); handleUnscrap(menuUnit); }}>
+                <Warehouse className="h-3.5 w-3.5 text-[var(--color-success)] shrink-0" /> Mark Unscrap
+              </button>
+            )}
+            {st === 'sold' && (
+              <p className="px-3 py-2 text-[10px] font-semibold text-[var(--color-on-surface-variant)]">
+                This tyre is sold out — the sale is final and nothing can be undone.
+              </p>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* 4. FIT TYRE MODAL — serial → vehicle + one of the 12 wheel positions */}
+      {fitForm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-scrim)]/40 backdrop-blur-xs p-4 overflow-y-auto">
-          {/* my-auto (not my-8): centres when short, collapses to 0 on overflow
-              so the card never clips its top on a short window */}
-          <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-xl border border-[var(--color-outline-variant)] max-w-lg w-full overflow-hidden my-auto">
+          <form onSubmit={handleSaveFit} className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-xl border border-[var(--color-outline-variant)] max-w-lg w-full overflow-hidden my-auto">
             <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
               <div>
                 <h3 className="font-extrabold text-[var(--color-on-surface)] text-sm uppercase tracking-tight flex items-center gap-1.5">
-                  <Disc className="h-4.5 w-4.5 text-[var(--color-primary)] animate-spin-slow" />
-                  {editingTyre ? 'Inspect & Edit Tyre' : 'Register New Tyre'}
+                  <Truck className="h-4.5 w-4.5 text-[var(--color-primary)]" />
+                  Fit Tyre {fitForm.unitId ? (tyreUnits.find((u) => u.id === fitForm.unitId)?.serialNumber || '') : ''}
                 </h3>
                 <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                  {editingTyre ? `Serial: ${editingTyre.serialNumber}` : 'Add a brand new tyre record to the tyre fleet.'}
+                  Choose the vehicle and the 12-tyre dumper wheel position.
                 </p>
               </div>
               <button
-                onClick={() => setIsTyreModalOpen(false)}
+                type="button"
+                onClick={() => setFitForm(null)}
                 className="p-1.5 hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] rounded-full transition-colors"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
+            <div className="p-5 space-y-4 text-left">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Select Vehicle *</label>
+                  <select
+                    required
+                    value={fitForm.vehicleId}
+                    onChange={(e) => setFitForm({ ...fitForm, vehicleId: e.target.value })}
+                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                  >
+                    <option value="">-- Choose Vehicle --</option>
+                    {vehicles.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.vehicleNo} [{v.type.toUpperCase()}]
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Wheel Position *</label>
+                  <select
+                    required
+                    value={fitForm.position}
+                    onChange={(e) => setFitForm({ ...fitForm, position: e.target.value })}
+                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                  >
+                    <option value="">-- Select Position --</option>
+                    {TYRE_POSITIONS.map((p) => (
+                      <option key={p} value={p}>{TYRE_POSITION_LABELS[p]}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase">Odometer at Fitment (km)</label>
+                  <input
+                    type="number"
+                    placeholder="e.g. 24300"
+                    value={fitForm.odometer}
+                    onChange={(e) => setFitForm({ ...fitForm, odometer: e.target.value })}
+                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase">Log Notes</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. rotated from L2"
+                    value={fitForm.notes}
+                    onChange={(e) => setFitForm({ ...fitForm, notes: e.target.value })}
+                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="p-4 bg-[var(--color-surface-container)] border-t border-[var(--color-outline-variant)] flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setFitForm(null)}
+                className="px-4 py-2 border border-[var(--color-outline-variant)] rounded-full text-xs font-bold bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)]"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-5 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-bold transition shadow-xs"
+              >
+                Fit Tyre
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
-            <form onSubmit={handleSaveTyre}>
-              <div className="p-5 space-y-4 text-left max-h-[480px] overflow-y-auto">
+      {/* 5. REGISTER SERIAL MODAL — a new serial on an existing tyre item */}
+      {addSerialOpen && (() => {
+        const tyreItemOptions = items.filter((i) => i.type === 'asset' && isTyreItemName(i.name) && i.isActive !== false);
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-scrim)]/40 backdrop-blur-xs p-4 overflow-y-auto">
+            <form onSubmit={handleAddSerial} className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-xl border border-[var(--color-outline-variant)] max-w-md w-full overflow-hidden my-auto">
+              <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
+                <div>
+                  <h3 className="font-extrabold text-[var(--color-on-surface)] text-sm uppercase tracking-tight flex items-center gap-1.5">
+                    <Disc className="h-4.5 w-4.5 text-[var(--color-primary)] animate-spin-slow" />
+                    Register Tyre Serial
+                  </h3>
+                  <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
+                    New serial on a tyre item's unit register.
+                  </p>
+                </div>
+                <button type="button" onClick={() => setAddSerialOpen(false)} className="p-1.5 hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] rounded-full transition-colors">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="p-5 space-y-4 text-left">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Tyre Item *</label>
+                  <select
+                    required
+                    value={addSerialItem}
+                    onChange={(e) => setAddSerialItem(e.target.value)}
+                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                  >
+                    <option value="">-- Choose tyre item --</option>
+                    {tyreItemOptions.map((i) => (
+                      <option key={i.id} value={i.id}>{i.name}</option>
+                    ))}
+                  </select>
+                </div>
                 <div className="grid grid-cols-2 gap-4">
-                  {/* Serial Number */}
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Serial Number *</label>
                     <input
                       type="text"
                       placeholder="e.g. MRF-90821-X"
-                      value={formTyreSerial}
-                      onChange={(e) => setFormTyreSerial(e.target.value)}
-                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
+                      value={addSerialText}
+                      onChange={(e) => setAddSerialText(e.target.value)}
+                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none uppercase"
                       required
                     />
                   </div>
-
-                  {/* Brand */}
                   <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Brand *</label>
+                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Storage Location</label>
                     <select
-                      value={formTyreBrand}
-                      onChange={(e) => setFormTyreBrand(e.target.value)}
-                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                      required
-                    >
-                      <option value="MRF">MRF</option>
-                      <option value="Apollo">Apollo</option>
-                      <option value="Bridgestone">Bridgestone</option>
-                      <option value="Michelin">Michelin</option>
-                      <option value="JK Tyre">JK Tyre</option>
-                      <option value="CEAT">CEAT</option>
-                      <option value="Other">Other / Imported</option>
-                    </select>
-                  </div>
-
-                  {/* Size */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Size *</label>
-                    <input
-                      type="text"
-                      placeholder="e.g. 10.00R20"
-                      value={formTyreSize}
-                      onChange={(e) => setFormTyreSize(e.target.value)}
-                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                      required
-                    />
-                  </div>
-
-                  {/* Type */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Type</label>
-                    <select
-                      value={formTyreType}
-                      onChange={(e) => setFormTyreType(e.target.value as any)}
+                      value={addSerialLocation}
+                      onChange={(e) => setAddSerialLocation(e.target.value)}
                       className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
                     >
-                      <option value="radial">Radial (Steel Belted)</option>
-                      <option value="tubeless">Tubeless (Premium)</option>
-                      <option value="bias">Bias Ply (Nylon)</option>
+                      <option value="">-- None --</option>
+                      {locations.map((l) => (
+                        <option key={l.id} value={l.id}>{l.name}</option>
+                      ))}
                     </select>
                   </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4 pt-2 border-t border-[var(--color-outline-variant)]">
-                  {/* Status */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Status</label>
-                    <select
-                      value={formTyreStatus}
-                      onChange={(e) => {
-                        const nextStatus = e.target.value as any;
-                        setFormTyreStatus(nextStatus);
-                        if (nextStatus !== 'mounted') {
-                          setFormTyreVehicleId('');
-                          setFormTyrePosition('');
-                        }
-                      }}
-                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                    >
-                      <option value="available">Available (Spare Stock)</option>
-                      <option value="mounted">Mounted on Vehicle</option>
-                      <option value="retreading">In Retreading Yard</option>
-                      <option value="scrapped">Scrapped / Retired</option>
-                    </select>
-                  </div>
-
-                  {/* Last Inspection Condition */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Inspection Condition</label>
-                    <select
-                      value={formTyreCondition}
-                      onChange={(e) => setFormTyreCondition(e.target.value as any)}
-                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                    >
-                      <option value="excellent">Excellent (New/Retreaded)</option>
-                      <option value="good">Good (Normal Wear)</option>
-                      <option value="worn">Worn (Low Tread)</option>
-                      <option value="damaged">Damaged (Sidewall/Cut)</option>
-                    </select>
-                  </div>
-                </div>
-
-                {/* Mounted Options conditionally shown */}
-                {formTyreStatus === 'mounted' && (
-                  <div className="grid grid-cols-2 gap-4 p-3 bg-[var(--color-primary-container)]/20 rounded-2xl border border-[var(--color-outline-variant)]">
-                    <div className="space-y-1.5">
-                      <label className="text-[11px] font-extrabold text-[var(--color-primary)] uppercase">Select Vehicle *</label>
-                      <select
-                        value={formTyreVehicleId}
-                        onChange={(e) => setFormTyreVehicleId(e.target.value)}
-                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                        required={formTyreStatus === 'mounted'}
-                      >
-                        <option value="">-- Choose Vehicle --</option>
-                        {vehicles.map(v => (
-                          <option key={v.id} value={v.id}>
-                            {v.vehicleNo} [{v.type.toUpperCase()}]
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[11px] font-extrabold text-[var(--color-primary)] uppercase">Mount Position *</label>
-                      <select
-                        value={formTyrePosition}
-                        onChange={(e) => setFormTyrePosition(e.target.value)}
-                        className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                        required={formTyreStatus === 'mounted'}
-                      >
-                        <option value="">-- Select Position --</option>
-                        <option value="Front-Left (FL)">Front-Left (FL)</option>
-                        <option value="Front-Right (FR)">Front-Right (FR)</option>
-                        <option value="Rear-Left-Outer (RLO)">Rear-Left-Outer (RLO)</option>
-                        <option value="Rear-Left-Inner (RLI)">Rear-Left-Inner (RLI)</option>
-                        <option value="Rear-Right-Outer (RRO)">Rear-Right-Outer (RRO)</option>
-                        <option value="Rear-Right-Inner (RRI)">Rear-Right-Inner (RRI)</option>
-                        <option value="Spare (Cab Mounted)">Spare (Cab Mounted)</option>
-                      </select>
-                    </div>
-                  </div>
-                )}
-
-                <div className="grid grid-cols-2 gap-4 pt-2 border-t border-[var(--color-outline-variant)]">
-                  {/* Purchase Date */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Purchase Date</label>
-                    <input
-                      type="date"
-                      value={formTyrePurchaseDate}
-                      onChange={(e) => setFormTyrePurchaseDate(e.target.value)}
-                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                    />
-                  </div>
-
-                  {/* Purchase Cost */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Purchase Cost (₹)</label>
-                    <input
-                      type="number"
-                      placeholder="e.g. 18500"
-                      value={formTyrePurchaseCost}
-                      onChange={(e) => setFormTyrePurchaseCost(e.target.value)}
-                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4 pt-2 border-t border-[var(--color-outline-variant)]">
-                  {/* Thread Depth */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Tread Depth (mm)</label>
-                    <input
-                      type="number"
-                      step="0.1"
-                      placeholder="e.g. 12.5"
-                      value={formTyreThreadDepth}
-                      onChange={(e) => setFormTyreThreadDepth(e.target.value)}
-                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                    />
-                  </div>
-
-                  {/* Current Odometer */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Running Mileage (KM)</label>
-                    <input
-                      type="number"
-                      placeholder="e.g. 24300"
-                      value={formTyreOdometer}
-                      onChange={(e) => setFormTyreOdometer(e.target.value)}
-                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                {/* Notes */}
-                <div className="space-y-1.5 pt-2 border-t border-[var(--color-outline-variant)]">
-                  <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Log Notes & Remarks</label>
-                  <textarea
-                    rows={2}
-                    placeholder="Describe tread wear, alignment checks, puncture history, or casing defects..."
-                    value={formTyreNotes}
-                    onChange={(e) => setFormTyreNotes(e.target.value)}
-                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                  />
                 </div>
               </div>
-
               <div className="p-4 bg-[var(--color-surface-container)] border-t border-[var(--color-outline-variant)] flex justify-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => setIsTyreModalOpen(false)}
-                  className="px-4 py-2 border border-[var(--color-outline-variant)] rounded-full text-xs font-bold bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)]"
-                >
+                <button type="button" onClick={() => setAddSerialOpen(false)} className="px-4 py-2 border border-[var(--color-outline-variant)] rounded-full text-xs font-bold bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)]">
                   Cancel
                 </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-bold transition shadow-xs"
-                >
-                  {editingTyre ? 'Update Record' : 'Register Tyre'}
+                <button type="submit" className="px-5 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-bold transition shadow-xs">
+                  Register Serial
                 </button>
               </div>
             </form>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 };
