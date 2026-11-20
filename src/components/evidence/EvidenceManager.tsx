@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Folder,
   FolderPlus,
@@ -101,6 +101,26 @@ export function EvidenceManager({
   // Per-row upload progress (keyed by qid) rendered by UploadProgressBar
   const [uploadStates, setUploadStates] = useState<Record<string, UploadRowState>>({});
   const [isUploading, setIsUploading] = useState(false);
+  // DONE uploads self-dismiss (2026-11-20, user directive): the finished
+  // container vanishes 3 s after its upload resolves; no close icon on it.
+  const doneTimersRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    Object.keys(uploadStates).forEach((qid) => {
+      const st = uploadStates[qid];
+      if (st && st.status === 'done' && !doneTimersRef.current.has(qid)) {
+        doneTimersRef.current.add(qid);
+        window.setTimeout(() => {
+          doneTimersRef.current.delete(qid);
+          setUploadFilesQueue((prev) => prev.filter((f) => f.qid !== qid));
+          setUploadStates((prev) => {
+            const next = { ...prev };
+            delete next[qid];
+            return next;
+          });
+        }, 3000);
+      }
+    });
+  }, [uploadStates]);
   const uploadAbortsRef = useRef<Map<string, () => void>>(new Map());
   const [uploadTargetFolderId, setUploadTargetFolderId] = useState<string>(currentFolderId || '');
   const [uploadDescription, setUploadDescription] = useState('');
@@ -741,7 +761,9 @@ export function EvidenceManager({
                 <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
                   {uploadFilesQueue.map((file) => {
                     const rowState = uploadStates[file.qid] || { status: 'queued' as const };
-                    const canRemoveRow = !isUploading || (rowState.status === 'failed' || rowState.status === 'aborted');
+                    // 'done' rows self-dismiss (no close icon, auto-close 3s)
+                    const canRemoveRow =
+                      (!isUploading && rowState.status !== 'done') || rowState.status === 'failed' || rowState.status === 'aborted';
                     return (
                       <UploadProgressBar
                         key={file.qid}

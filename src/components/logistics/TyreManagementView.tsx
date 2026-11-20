@@ -2,14 +2,11 @@ import React, { useState, useEffect, useMemo } from 'react';
 import {
   Disc,
   Truck,
-  AlertCircle,
   X,
   Plus,
   Search,
   Filter,
   TrendingUp,
-  Compass,
-  Navigation2,
   Building,
   Archive,
   Undo2,
@@ -17,9 +14,11 @@ import {
   Layers,
   MoreVertical,
   ArchiveRestore,
+  History,
 } from 'lucide-react';
-import { Vehicle, TripSlip, CompanySettings, Item, ItemLocation, InventoryUnit, TYRE_POSITIONS, TYRE_POSITION_LABELS, isTyreItemName } from '../../types';
+import { Vehicle, CompanySettings, Item, ItemAttributeKey, ItemLocation, Party, InventoryUnit, InventoryUnitEvent, InventoryUnitEventType, TYRE_POSITIONS, TYRE_POSITION_LABELS, isTyreItemName } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
+import UnitRegisterModal from '../items/UnitRegisterModal';
 
 /**
  * TYRE MANAGEMENT (own sidebar feature) — REBUILT ON THE SERIAL REGISTER
@@ -28,7 +27,6 @@ import { cloudStore as localDb } from '../../services/cloudStore';
  * in inventory_units (lifecycle: in_stock → deployed on a fleet vehicle at
  * ONE of the 12 dumper positions → maintenance/retread → scrap/sold) and the
  * vehicle profile's Tyre diagram is the other half of this feature.
- * The View Transit tab (transit telemetry) keeps living under this gate.
  */
 export const TyreManagementView: React.FC = () => {
   // Database States — read through the serial register + item master
@@ -36,20 +34,29 @@ export const TyreManagementView: React.FC = () => {
   const [tyreUnits, setTyreUnits] = useState<InventoryUnit[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [locations, setLocations] = useState<ItemLocation[]>([]);
-  const [slips, setSlips] = useState<TripSlip[]>([]);
+  const [parties, setParties] = useState<Party[]>([]);
   const [settings, setSettings] = useState<CompanySettings | null>(null);
 
   // App Navigation & Filter state
-  const [activeSubTab, setActiveSubTab] = useState<'tyres' | 'transit'>('tyres');
+  const [activeSubTab, setActiveSubTab] = useState<'tyres' | 'history'>('tyres');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
 
+  // MOVEMENT LOG — ONE clubbed table (2026-11-20, user directive): every tyre
+  // serial's movements in a single newest-first register; a tyre filter
+  // (default All Tyres) slices it to one serial. No per-tyre drill-down. Events
+  // are fetched from the append-only unit log (/inventory-units/events) for
+  // ALL tyre units at once.
+  const [movements, setMovements] = useState<InventoryUnitEvent[] | null>(null);
+  const [movementsLoading, setMovementsLoading] = useState(false);
+  const [historyTyreFilter, setHistoryTyreFilter] = useState('all');
+
   // Fit / modals
   const [fitForm, setFitForm] = useState<{ unitId: string; vehicleId: string; position: string; odometer: string; notes: string } | null>(null);
-  const [addSerialOpen, setAddSerialOpen] = useState(false);
-  const [addSerialItem, setAddSerialItem] = useState('');
-  const [addSerialText, setAddSerialText] = useState('');
-  const [addSerialLocation, setAddSerialLocation] = useState('');
+  // REGISTER SERIAL — opens the SHARED unit-register modal (same as the
+  // serialized-inventory asset profile: supplier, purchase date/cost, and the
+  // item's declared per-unit attribute keys), with a tyre-item picker.
+  const [unitModalOpen, setUnitModalOpen] = useState(false);
 
   // Load and subscribe to database changes
   const loadData = () => {
@@ -57,7 +64,7 @@ export const TyreManagementView: React.FC = () => {
     setItems(allItems);
     setVehicles(localDb.getVehicles());
     setLocations(localDb.getLocations());
-    setSlips(localDb.getTripSlips());
+    setParties(localDb.getParties());
     setSettings(localDb.getSettings());
     // TYRE UNITS — serials of asset items whose name is Tyre/Tyres
     const tyreItemIdSet = new Set(allItems.filter((i) => i.type === 'asset' && isTyreItemName(i.name)).map((i) => i.id));
@@ -77,9 +84,65 @@ export const TyreManagementView: React.FC = () => {
     loadData();
   }, [activeSubTab]);
 
+  // MOVEMENT LOG data — one fetch keeps the log a single source slice; a
+  // failed fetch degrades to "empty log" rather than a broken pane.
+  useEffect(() => {
+    if (activeSubTab !== 'history') return;
+    let alive = true;
+    setMovementsLoading(true);
+    localDb.fetchUnitEvents()
+      .then((all: InventoryUnitEvent[]) => { if (alive) setMovements(all); })
+      .catch(() => { if (alive) setMovements([]); })
+      .finally(() => { if (alive) setMovementsLoading(false); });
+    return () => { alive = false; };
+  }, [activeSubTab]);
+
+  // Tyre movement labels — the full life cycle (fuller wording than the
+  // asset-profile timeline: this IS the tyre's story).
+  const MOVEMENT_META: Record<InventoryUnitEventType, { label: string; icon: typeof Truck; tone: string }> = {
+    entered: { label: 'Registered', icon: Disc, tone: 'text-[var(--color-on-surface)]' },
+    deployed: { label: 'Fitted on Vehicle', icon: Truck, tone: 'text-[var(--color-primary)]' },
+    returned: { label: 'Returned to Yard', icon: Undo2, tone: 'text-[var(--color-warning)]' },
+    maintenance: { label: 'Sent for Retreading', icon: TrendingUp, tone: 'text-[var(--color-info)]' },
+    restored: { label: 'Restored from Workshop', icon: ArchiveRestore, tone: 'text-[var(--color-info)]' },
+    scrapped: { label: 'Scrapped', icon: Archive, tone: 'text-[var(--color-error)]' },
+    unscrapped: { label: 'Unscrapped → Spare Stock', icon: Warehouse, tone: 'text-[var(--color-success)]' },
+    sold: { label: 'Sold Out', icon: Layers, tone: 'text-[var(--color-on-surface-variant)]' },
+  };
+
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
   const locationName = (id?: string) => (id ? locations.find((l) => l.id === id)?.name : undefined);
   const vehicleNo = (id?: string) => (id ? vehicles.find((v) => v.id === id)?.vehicleNo : undefined);
+
+  // REGISTER TABLE COLUMNS — one column per declared attribute key, exactly
+  // like the asset profile's serial register (union across all tyre items,
+  // key-first so renames stay a single source; capped for table width).
+  const tyreAttrColumns = useMemo(() => {
+    const byKey = new Map<string, ItemAttributeKey>();
+    items.filter((i) => i.type === 'asset' && isTyreItemName(i.name)).forEach((i) => {
+      (i.attributes || []).forEach((def) => { if (!byKey.has(def.key)) byKey.set(def.key, def); });
+    });
+    return Array.from(byKey.values()).slice(0, 5);
+  }, [items]);
+
+  // --- MOVEMENT LOG derived data ---
+  // One flat list across ALL tyre units (this view's units only), newest
+  // first; the tyre filter slices it to a single serial when chosen.
+  const unitById = useMemo(() => new Map(tyreUnits.map((u) => [u.id, u])), [tyreUnits]);
+
+  const filteredMovements = useMemo(() => {
+    const tyreIds = new Set(tyreUnits.map((u) => u.id));
+    return (movements || [])
+      .filter((ev) => tyreIds.has(ev.unitId) && (historyTyreFilter === 'all' || ev.unitId === historyTyreFilter))
+      .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  }, [movements, tyreUnits, historyTyreFilter]);
+
+  // Register entry points (serial click / ⋮ menu) jump here with the serial
+  // preselected in the filter — still the one clubbed table, just sliced.
+  const openMovementLog = (unitId: string) => {
+    setHistoryTyreFilter(unitId);
+    setActiveSubTab('history');
+  };
 
   // Format Helper
   const formatCurrency = (val: number) => {
@@ -164,20 +227,6 @@ export const TyreManagementView: React.FC = () => {
     localDb.unscrapInventoryUnit(u.id, { notes: 'Unscrapped from Tyre Management' });
   };
 
-  const handleAddSerial = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!addSerialItem || !addSerialText.trim()) return;
-    localDb.addInventoryUnit({
-      itemId: addSerialItem,
-      serialNumber: addSerialText.toUpperCase().trim(),
-      locationId: addSerialLocation || undefined,
-    });
-    setAddSerialOpen(false);
-    setAddSerialItem('');
-    setAddSerialText('');
-    setAddSerialLocation('');
-  };
-
   // Filters Calculation
   const filteredUnits = useMemo(() => {
     const q = searchQuery.toLowerCase();
@@ -186,6 +235,7 @@ export const TyreManagementView: React.FC = () => {
         u.serialNumber.toLowerCase().includes(q) ||
         (itemById.get(u.itemId)?.name || '').toLowerCase().includes(q) ||
         (u.vehicleId ? (vehicleNo(u.vehicleId) || '').toLowerCase().includes(q) : false) ||
+        (u.supplierName || '').toLowerCase().includes(q) ||
         (u.condition && u.condition.toLowerCase().includes(q));
       const matchesStatus = statusFilter === 'all' || u.status === statusFilter;
       return matchesSearch && matchesStatus;
@@ -215,15 +265,15 @@ export const TyreManagementView: React.FC = () => {
             </span>
           </button>
           <button
-            onClick={() => { setActiveSubTab('transit'); setSearchQuery(''); }}
+            onClick={() => { setActiveSubTab('history'); setSearchQuery(''); setHistoryTyreFilter('all'); }}
             className={`py-3 text-xs font-bold border-b-2 transition-all flex items-center gap-2 whitespace-nowrap ${
-              activeSubTab === 'transit'
+              activeSubTab === 'history'
                 ? 'border-[var(--color-primary)] text-[var(--color-primary)]'
                 : 'border-transparent text-[var(--color-on-surface-variant)] hover:text-[var(--color-on-surface)]'
             }`}
           >
-            <Compass className="h-4 w-4" />
-            View Transit
+            <History className="h-4 w-4" />
+            Movement Log
           </button>
         </nav>
       </div>
@@ -256,7 +306,7 @@ export const TyreManagementView: React.FC = () => {
               <option value="sold">Sold</option>
             </select>
             <button
-              onClick={() => setAddSerialOpen(true)}
+              onClick={() => setUnitModalOpen(true)}
               disabled={(() => {
                 const tyreItemOptions = items.filter((i) => i.type === 'asset' && isTyreItemName(i.name) && i.isActive !== false);
                 return tyreItemOptions.length === 0;
@@ -270,7 +320,7 @@ export const TyreManagementView: React.FC = () => {
               className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-bold shadow-xs transition whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Plus className="h-4 w-4" />
-              Register Serial
+              Register Tyre
             </button>
           </div>
         </div>
@@ -322,28 +372,17 @@ export const TyreManagementView: React.FC = () => {
 
             <div className="bg-[var(--color-surface-container-lowest)] p-5 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs flex items-center justify-between">
               <div>
-                <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Workshop &amp; Exits</p>
-                <h4 className="text-xl font-black text-[var(--color-warning)] mt-1">
-                  {tyreUnits.filter((u) => u.status === 'maintenance').length} at retread
+                <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Scrapped Tyres</p>
+                <h4 className="text-xl font-black text-[var(--color-error)] mt-1">
+                  {tyreUnits.filter((u) => u.status === 'scrapped').length} units
                 </h4>
                 <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-1.5 font-medium">
-                  {tyreUnits.filter((u) => u.status === 'scrapped' || u.status === 'sold').length} scrapped/sold lifetime
+                  {tyreUnits.filter((u) => u.status === 'maintenance').length} at retread · {tyreUnits.filter((u) => u.status === 'sold').length} sold lifetime
                 </p>
               </div>
-              <div className="p-2.5 bg-[var(--color-warning-container)] rounded-2xl">
-                <TrendingUp className="h-5 w-5 text-[var(--color-on-warning-container)]" />
+              <div className="p-2.5 bg-[var(--color-error-container)] rounded-2xl">
+                <Archive className="h-5 w-5 text-[var(--color-on-error-container)]" />
               </div>
-            </div>
-          </div>
-
-          {/* Quick Informational Notice banner */}
-          <div className="bg-[var(--color-warning-container)] border border-[var(--color-warning)]/30 rounded-[24px] p-4 flex gap-3 text-left">
-            <AlertCircle className="h-5 w-5 text-[var(--color-on-warning-container)] shrink-0 mt-0.5" />
-            <div className="space-y-1">
-              <h5 className="text-xs font-bold text-[var(--color-on-warning-container)] uppercase tracking-wider">Tyre Fitment Protocol</h5>
-              <p className="text-[11px] text-[var(--color-on-warning-container)]/90 leading-normal">
-                Every fitted tyre carries its 12-tyre dumper position (FL · FR · L1–L5 · R1–R5) — one serial per wheel, enforced by the server. The vehicle profile's Tyre diagram shows exactly which serial sits on which wheel; a swapped or damaged tyre must be unloaded to spare stock (or sent to retreading) before a fresh serial is fitted.
-              </p>
             </div>
           </div>
 
@@ -358,7 +397,7 @@ export const TyreManagementView: React.FC = () => {
                 </p>
               ) : (
                 <button
-                  onClick={() => setAddSerialOpen(true)}
+                  onClick={() => setUnitModalOpen(true)}
                   className="mt-4 px-4 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-semibold shadow-xs"
                 >
                   Register Your First Tyre Serial
@@ -371,11 +410,18 @@ export const TyreManagementView: React.FC = () => {
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-                      <th className="py-3.5 px-4">Serial / Item</th>
+                      <th className="py-3.5 px-4">Serial Number</th>
                       <th className="py-3.5 px-3">Status</th>
-                      <th className="py-3.5 px-3">Assignment / Location</th>
-                      <th className="py-3.5 px-3">Condition</th>
-                      <th className="py-3.5 px-3">Procurement</th>
+                      <th className="py-3.5 px-3">Location / Vehicle</th>
+                      <th className="py-3.5 px-3">Supplier</th>
+                      <th className="py-3.5 px-3">Purchase</th>
+                      <th className="py-3.5 px-3">Cost</th>
+                      {tyreAttrColumns.map((def) => (
+                        <th key={def.key} className="py-3.5 px-3 whitespace-nowrap">
+                          {def.label.toUpperCase()}
+                          {def.required && <span className="text-[var(--color-error)]">*</span>}
+                        </th>
+                      ))}
                       <th className="py-3.5 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
@@ -385,103 +431,79 @@ export const TyreManagementView: React.FC = () => {
                       const attrs = u.attributes ? Object.entries(u.attributes).filter(([, v]) => v !== undefined && v !== '') : [];
                       return (
                         <tr key={u.id} className="hover:bg-[var(--color-surface-container)]/40 transition-colors text-xs text-[var(--color-on-surface)]">
-                          {/* Serial & Item */}
+                          {/* Serial Number — link-styled; click opens this serial's Movement Log */}
                           <td className="py-3.5 px-4">
                             <div className="space-y-1">
-                              <div className="flex items-center gap-1.5">
-                                <span className="font-mono text-xs font-black bg-[var(--color-surface-container-highest)] text-[var(--color-on-surface)] px-2 py-0.5 rounded-full uppercase border border-[var(--color-outline-variant)]">
-                                  {u.serialNumber}
-                                </span>
-                                <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
-                                  u.status === 'deployed'
-                                    ? 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
-                                    : u.status === 'in_stock'
-                                      ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-                                      : u.status === 'maintenance'
-                                        ? 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)]'
-                                        : u.status === 'scrapped'
-                                          ? 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
-                                          : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
-                                }`}>
-                                  {u.status === 'deployed' ? 'fitted' : u.status === 'sold' ? 'sold out' : u.status}
-                                </span>
-                              </div>
-                              <div className="text-[11px] font-bold text-[var(--color-on-surface)]">
-                                {item?.name || '—'}
-                              </div>
-                              {attrs.length > 0 && (
-                                <div className="flex flex-wrap gap-1">
-                                  {attrs.slice(0, 3).map(([k, v]) => (
-                                    <span key={k} className="text-[9px] font-semibold text-[var(--color-on-surface-variant)] bg-[var(--color-surface-container)] px-1.5 py-0.2 rounded-full">{k}: {String(v)}</span>
-                                  ))}
-                                </div>
-                              )}
+                              <button
+                                onClick={() => openMovementLog(u.id)}
+                                title="Open this serial's movements in the Movement Log (preselected in the filter)"
+                                className="font-mono text-xs font-black text-[var(--color-primary)] underline underline-offset-2 decoration-2 hover:decoration-[var(--color-error)] uppercase"
+                              >
+                                {u.serialNumber}
+                              </button>
+                              <div className="text-[11px] font-bold text-[var(--color-on-surface)]">{item?.name || '—'}</div>
                             </div>
                           </td>
 
-                          {/* Status */}
+                          {/* Status — same pills as the serial register */}
                           <td className="py-3.5 px-3">
-                            <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase">
-                              {u.status === 'deployed' && <Truck className="h-3 w-3 text-[var(--color-primary)]" />}
-                              {u.status === 'in_stock' && <Warehouse className="h-3 w-3 text-[var(--color-success)]" />}
-                              {u.status === 'maintenance' && <TrendingUp className="h-3 w-3 text-[var(--color-info)]" />}
-                              {u.status === 'scrapped' && <Archive className="h-3 w-3 text-[var(--color-error)]" />}
-                              {u.status === 'sold' && <Layers className="h-3 w-3 text-[var(--color-on-surface-variant)]" />}
-                            </div>
-                          </td>
-
-                          {/* Assignment / Location */}
-                          <td className="py-3.5 px-3">
-                            {u.status === 'deployed' && u.vehicleId ? (
-                              <div className="space-y-0.5">
-                                <span className="font-bold text-[var(--color-on-primary-container)] bg-[var(--color-primary-container)] px-2 py-0.5 rounded-full inline-flex items-center gap-1">
-                                  <Truck className="h-3 w-3" /> {vehicleNo(u.vehicleId) || u.vehicleNo || 'Vehicle'}
-                                </span>
-                                <p className="text-[10px] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider">
-                                  @ {u.position ? TYRE_POSITION_LABELS[u.position as keyof typeof TYRE_POSITION_LABELS] || u.position : 'no position'}
-                                </p>
-                              </div>
-                            ) : u.status === 'maintenance' ? (
-                              <div className="text-[11px] text-[var(--color-on-surface-variant)] font-semibold flex items-center gap-1">
-                                <TrendingUp className="h-3.5 w-3.5 text-[var(--color-info)]" /> Retread Workshop
-                              </div>
-                            ) : u.status === 'scrapped' ? (
-                              <div className="text-[11px] text-[var(--color-on-surface-variant)] font-semibold flex items-center gap-1">
-                                <Archive className="h-3.5 w-3.5 text-[var(--color-error)]" /> Retired / Scrapped
-                              </div>
-                            ) : u.status === 'sold' ? (
-                              <div className="text-[11px] text-[var(--color-on-surface-variant)] font-semibold">Sold out · sale {u.saleNumber || '—'}</div>
-                            ) : (
-                              <div className="text-[11px] text-[var(--color-on-surface-variant)] font-semibold flex items-center gap-1">
-                                <Building className="h-3.5 w-3.5 text-[var(--color-outline)]" />
-                                {locationName(u.locationId) || u.locationName || 'Yard'}
-                              </div>
-                            )}
-                          </td>
-
-                          {/* Condition + purchase facts */}
-                          <td className="py-3.5 px-3">
-                            <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
-                              u.condition === 'excellent'
-                                ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
-                                : u.condition === 'good'
-                                  ? 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)]'
-                                  : u.condition === 'worn'
-                                    ? 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
-                                    : u.condition === 'damaged'
+                            <span className={`text-[9px] font-black uppercase tracking-wide px-2.5 py-1 rounded-full whitespace-nowrap ${
+                              u.status === 'deployed'
+                                ? 'bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
+                                : u.status === 'in_stock'
+                                  ? 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
+                                  : u.status === 'maintenance'
+                                    ? 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)]'
+                                    : u.status === 'scrapped'
                                       ? 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
                                       : 'bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)]'
                             }`}>
-                              {u.condition || 'unknown'}
+                              {u.status === 'deployed' ? 'in use' : u.status === 'in_stock' ? 'in spare' : u.status === 'maintenance' ? 'retreading' : u.status === 'sold' ? 'sold out' : u.status}
                             </span>
                           </td>
 
-                          {/* Procurement */}
-                          <td className="py-3.5 px-3 text-[11px] font-semibold text-[var(--color-on-surface-variant)]">
-                            {u.purchaseDate ? <div>{u.purchaseDate.split('T')[0]}</div> : null}
-                            {u.purchaseCost ? <div className="font-bold text-[var(--color-on-surface)]">{formatCurrency(u.purchaseCost)}</div> : null}
-                            {!u.purchaseDate && !u.purchaseCost && '—'}
+                          {/* Location / Vehicle — "VEHICLE · POSITION" when fitted */}
+                          <td className="py-3.5 px-3 text-[11px] font-bold text-[var(--color-on-surface)]">
+                            {u.status === 'deployed' && u.vehicleId ? (
+                              <div className="space-y-0.5">
+                                <span className="inline-flex items-center gap-1">
+                                  <Truck className="h-3 w-3 text-[var(--color-primary)]" />
+                                  {vehicleNo(u.vehicleId) || u.vehicleNo || 'Vehicle'}
+                                  <span className="text-[var(--color-outline)]">·</span>
+                                  {u.position || '—'}
+                                </span>
+                              </div>
+                            ) : u.status === 'maintenance' ? (
+                              <span className="text-[var(--color-on-surface-variant)] font-semibold flex items-center gap-1">
+                                <TrendingUp className="h-3.5 w-3.5 text-[var(--color-info)]" /> Retread Workshop
+                              </span>
+                            ) : u.status === 'sold' ? (
+                              <span className="text-[var(--color-on-surface-variant)] font-semibold">Sold out · sale {u.saleNumber || '—'}</span>
+                            ) : (
+                              <span className="text-[var(--color-on-surface-variant)] font-semibold flex items-center gap-1">
+                                <Building className="h-3.5 w-3.5 text-[var(--color-outline)]" />
+                                {locationName(u.locationId) || u.locationName || 'Yard'}
+                              </span>
+                            )}
                           </td>
+
+                          {/* Supplier (display copy resolved on read) */}
+                          <td className="py-3.5 px-3 text-[11px] font-semibold text-[var(--color-on-surface)]">{u.supplierName || '—'}</td>
+
+                          {/* Purchase date + Cost — numeric snapshots per row */}
+                          <td className="py-3.5 px-3 text-[11px] font-medium text-[var(--color-on-surface-variant)]">{u.purchaseDate ? u.purchaseDate.split('T')[0] : '—'}</td>
+                          <td className="py-3.5 px-3 text-[11px] font-black text-[var(--color-on-surface)]">{u.purchaseCost ? formatCurrency(u.purchaseCost) : '—'}</td>
+
+                          {/* Declared per-unit attribute columns */}
+                          {tyreAttrColumns.map((def) => {
+                            const raw = u.attributes?.[def.key];
+                            const shown = raw === undefined || raw === '' ? '—' : def.type === 'date' ? String(raw).split('T')[0] : String(raw);
+                            return (
+                              <td key={def.key} className="py-3.5 px-3 text-[11px] text-[var(--color-on-surface-variant)] whitespace-nowrap">
+                                {shown}
+                              </td>
+                            );
+                          })}
 
                           {/* Actions — ONE ⋮ menu per serial; the menu is
                               DISABLED once sold (a sold tyre is final). */}
@@ -514,96 +536,124 @@ export const TyreManagementView: React.FC = () => {
         </div>
       )}
 
-      {/* 2. VIEW TRANSIT — moved here with the Tyre feature split */}
-      {activeSubTab === 'transit' && (
-        <div className="bg-[var(--color-surface-container-lowest)] p-6 rounded-[28px] border border-[var(--color-outline-variant)] shadow-2xs space-y-4">
-          <div>
-            <h3 className="font-bold text-[var(--color-on-surface)] text-lg">Interactive Transit Simulation</h3>
-            <p className="text-xs text-[var(--color-on-surface-variant)]">
-              Live location estimation of dispatched hot-mix tippers and Bitumen tankers en route.
+      {/* 2. MOVEMENT LOG — ONE clubbed table (2026-11-20, user directive):
+          every tyre serial's movements in a single newest-first register; the
+          tyre filter (default All Tyres) slices it to one serial. */}
+      {activeSubTab === 'history' && (
+        <div className="space-y-4">
+          {/* FILTER BAR — All Tyres by default; pick one serial to slice */}
+          <div className="flex flex-col sm:flex-row gap-3 sm:items-center bg-[var(--color-surface-container-lowest)] p-3 rounded-[24px] border border-[var(--color-outline-variant)] shadow-2xs">
+            <div className="flex items-center gap-2 flex-1">
+              <Filter className="h-4 w-4 text-[var(--color-outline)] shrink-0" />
+              <select
+                value={historyTyreFilter}
+                onChange={(e) => setHistoryTyreFilter(e.target.value)}
+                className="py-2 pl-3.5 pr-8 border border-[var(--color-outline-variant)] rounded-full text-xs font-medium bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] w-full sm:max-w-sm"
+              >
+                <option value="all">All Tyres ({tyreUnits.length})</option>
+                {tyreUnits.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.serialNumber} · {itemById.get(u.itemId)?.name || 'Tyre'}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <p className="text-[11px] font-bold text-[var(--color-on-surface-variant)] shrink-0">
+              {movementsLoading
+                ? 'Loading movements…'
+                : `${filteredMovements.length} movement${filteredMovements.length === 1 ? '' : 's'}${historyTyreFilter === 'all' ? ' across all tyres' : ' for this serial'}`}
             </p>
           </div>
 
-          <div className="border border-[var(--color-outline-variant)] rounded-[24px] overflow-hidden bg-[#121316] p-6 text-white min-h-[400px] flex flex-col justify-between relative">
-            {/* Compass background grid effect */}
-            <div className="absolute inset-0 opacity-5 pointer-events-none bg-[radial-gradient(#fff_1px,transparent_1px)]" style={{ backgroundSize: '16px 16px' }}></div>
-
-            {/* Sim Plant Base Indicator */}
-            <div className="flex justify-between items-start">
-              <div className="bg-amber-600/20 border border-amber-500/60 p-3 rounded-2xl text-left max-w-xs space-y-1">
-                <span className="text-[10px] font-bold text-amber-400 uppercase tracking-widest block">Core Hub</span>
-                <p className="font-bold text-xs text-white">APEX BATCH PLANT BASE</p>
-                <p className="text-[9px] text-slate-300">Shirwal Bypass, Pune-Satara Road (NH-48)</p>
+          {movementsLoading ? (
+            <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-[28px] p-12 text-center shadow-2xs">
+              <p className="text-xs text-[var(--color-outline)] font-medium">Loading movement log…</p>
+            </div>
+          ) : filteredMovements.length === 0 ? (
+            <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-[28px] p-12 text-center shadow-2xs">
+              <History className="h-10 w-10 text-[var(--color-outline)] mx-auto mb-3" />
+              <p className="text-[var(--color-on-surface-variant)] font-medium text-xs">
+                {historyTyreFilter === 'all'
+                  ? 'No movement events recorded for any tyre yet.'
+                  : 'No movement events recorded for this serial yet.'}
+              </p>
+            </div>
+          ) : (
+            <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-[28px] overflow-clip shadow-2xs">
+              {/* STICKY HEADER (matches the orders table): the page scrolls and
+                  the header rides sticky beneath the app header (h-16) —
+                  overflow-clip keeps the rounded corners while letting the
+                  sticky thead anchor to the viewport (an overflow-x-auto /
+                  hidden ancestor would turn it into its own scroll
+                  container). */}
+              <div>
+                <table className="w-full text-left border-collapse">
+                  <thead className="sticky top-16 z-20">
+                    <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
+                      <th className="py-3.5 px-4">Date & Time</th>
+                      <th className="py-3.5 px-3">Serial Number</th>
+                      <th className="py-3.5 px-3">Movement</th>
+                      <th className="py-3.5 px-3">Vehicle</th>
+                      <th className="py-3.5 px-3">Position</th>
+                      <th className="py-3.5 px-3">Odometer</th>
+                      <th className="py-3.5 px-3">Location</th>
+                      <th className="py-3.5 px-4">Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--color-outline-variant)]">
+                    {filteredMovements.map((ev) => {
+                      const unit = unitById.get(ev.unitId);
+                      const meta = MOVEMENT_META[ev.type] || { label: ev.type, icon: History, tone: 'text-[var(--color-on-surface)]' };
+                      const EventIcon = meta.icon;
+                      const evVehicle = ev.vehicleId ? vehicleNo(ev.vehicleId) : undefined;
+                      const evPosition = ev.position ? TYRE_POSITION_LABELS[ev.position as keyof typeof TYRE_POSITION_LABELS] || ev.position : undefined;
+                      const evLocation = ev.locationId ? locationName(ev.locationId) : undefined;
+                      return (
+                        <tr key={ev.id} className="hover:bg-[var(--color-surface-container)]/40 transition-colors text-xs text-[var(--color-on-surface)]">
+                          <td className="py-3.5 px-4 text-[11px] font-medium text-[var(--color-on-surface-variant)] whitespace-nowrap">
+                            {ev.date ? new Date(ev.date).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '—'}
+                          </td>
+                          {/* Serial — click slices the table to this serial */}
+                          <td className="py-3.5 px-3">
+                            <button
+                              onClick={() => setHistoryTyreFilter(ev.unitId)}
+                              title="Filter the log to this serial"
+                              className="font-mono text-[11px] font-black uppercase text-[var(--color-primary)] hover:underline underline-offset-2"
+                            >
+                              {unit?.serialNumber || '—'}
+                            </button>
+                          </td>
+                          <td className="py-3.5 px-3">
+                            <span className={`inline-flex items-center gap-1.5 text-[11px] font-black uppercase tracking-wide whitespace-nowrap ${meta.tone}`}>
+                              <EventIcon className="h-3.5 w-3.5 shrink-0" />
+                              {meta.label}
+                              {ev.type === 'sold' && (unit?.saleNumber || ev.saleId) && (
+                                <span className="font-bold normal-case text-[var(--color-on-surface-variant)]">· sale {unit?.saleNumber || ev.saleId}</span>
+                              )}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-3 text-[11px] font-bold text-[var(--color-on-surface)] whitespace-nowrap">
+                            {evVehicle ? (
+                              <span className="inline-flex items-center gap-1">
+                                <Truck className="h-3 w-3 text-[var(--color-primary)]" />
+                                {evVehicle}
+                              </span>
+                            ) : '—'}
+                          </td>
+                          <td className="py-3.5 px-3 text-[11px] font-semibold text-[var(--color-on-surface)] whitespace-nowrap">{evPosition || '—'}</td>
+                          <td className="py-3.5 px-3 text-[11px] font-medium text-[var(--color-on-surface-variant)] whitespace-nowrap">
+                            {ev.odometer !== undefined && ev.odometer !== null ? `${Number(ev.odometer).toLocaleString('en-IN')} km` : '—'}
+                          </td>
+                          <td className="py-3.5 px-3 text-[11px] font-semibold text-[var(--color-on-surface-variant)] whitespace-nowrap">{evLocation || '—'}</td>
+                          <td className="py-3.5 px-4 text-[11px] font-medium text-[var(--color-on-surface-variant)] max-w-[240px] break-words">{ev.notes || '—'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
-
-              <div className="text-right space-y-1">
-                <p className="text-xs font-bold text-slate-400">STATUS TELEMETRY</p>
-                <p className="font-mono text-[10px] text-emerald-400">GPS Link Active • Signal 100%</p>
-              </div>
             </div>
-
-            {/* Simulated Live Vehicles on Route Map */}
-            <div className="space-y-6 my-10 relative">
-              {slips.filter((s) => s.status === 'transit' || s.status === 'loading').length === 0 ? (
-                <div className="text-center p-8 text-slate-400 space-y-2">
-                  <Navigation2 className="h-8 w-8 text-slate-600 mx-auto animate-bounce" />
-                  <p className="text-xs font-bold uppercase text-slate-300">No Vehicles in Transit</p>
-                  <p className="text-[10px] text-slate-500 max-w-sm mx-auto">
-                    Generate a new outward trip slip from a sales order and dispatch it. It will immediately show up in transit route telemetry here!
-                  </p>
-                </div>
-              ) : (
-                slips.filter((s) => s.status === 'transit' || s.status === 'loading').map((slip, i) => {
-                  const percent = slip.status === 'loading' ? 0 : 45 + ((i * 20) % 40);
-                  return (
-                    <div key={slip.id} className="space-y-2 relative">
-                      <div className="flex justify-between text-[11px] text-slate-400">
-                        <span className="font-bold">Trip: {slip.slipNumber} • {slip.materialName || 'Materials'}</span>
-                        <span className="font-mono text-amber-400">Target: {slip.destination}</span>
-                      </div>
-
-                      {/* Map track line */}
-                      <div className="h-1.5 bg-slate-800 rounded-full w-full relative">
-                        <div
-                          className="h-1.5 bg-gradient-to-r from-amber-500 to-emerald-500 rounded-full transition-all duration-1000"
-                          style={{ width: `${percent}%` }}
-                        ></div>
-
-                        <div
-                          className="absolute -top-3.5 transition-all duration-1000 -ml-3 cursor-pointer group"
-                          style={{ left: `${percent}%` }}
-                        >
-                          <div className="p-1 bg-amber-500 text-slate-950 rounded-full border border-white shadow shadow-amber-500/50 flex items-center gap-1.5">
-                            <Truck className="h-3.5 w-3.5 shrink-0 animate-bounce" />
-                            <span className="font-mono text-[9px] font-black">{slip.vehicleNo}</span>
-                          </div>
-
-                          <div className="absolute left-1/2 -translate-x-1/2 bottom-8 bg-slate-900 border border-slate-700 p-2.5 rounded-xl shadow-lg text-left text-[10px] w-48 hidden group-hover:block z-20 space-y-1 leading-normal font-sans text-slate-100">
-                            <p className="font-black text-amber-400 text-[11px]">{slip.vehicleNo}</p>
-                            <p>Driver: <span className="font-bold text-white">{slip.driverName || '—'}</span></p>
-                            <p>Speed: <span className="font-bold font-mono">48 Km/h</span></p>
-                            <p>Cargo: <span className="font-bold text-white">{slip.netWeightTonnes} MT</span></p>
-                            <p>Status: <span className="font-bold text-emerald-400 uppercase">{slip.status}</span></p>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="flex justify-between text-[10px] text-slate-500">
-                        <span>Plant Base (Loaded)</span>
-                        <span className="font-mono text-emerald-400">{percent}% Traveled ({slip.status === 'loading' ? 'In Loading Bay' : 'Active Road'})</span>
-                        <span>Site Destination (Unload)</span>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-
-            <div className="text-center text-[10px] text-slate-500 leading-normal border-t border-slate-800 pt-3 flex flex-wrap justify-between">
-              <p>🛈 Hover over any truck on the map to inspect vehicle speed, driver credentials, and payload telemetry.</p>
-              <p className="font-mono text-slate-400">AUTO-UPDATE INTERVAL: 5S</p>
-            </div>
-          </div>
+          )}
         </div>
       )}
 
@@ -622,6 +672,13 @@ export const TyreManagementView: React.FC = () => {
             <p className="px-3 py-1.5 text-[9px] font-black uppercase tracking-wider text-[var(--color-on-surface-variant)] border-b border-[var(--color-outline-variant)]/60 mb-1 truncate font-mono">
               {menuUnit.serialNumber} · {st === 'sold' ? 'sold out' : st === 'deployed' ? 'fitted' : st}
             </p>
+            <button
+              className={itemCls}
+              onClick={() => { closeUnitMenu(); openMovementLog(menuUnit.id); }}
+              title="Open this serial's full movement history in the Movement Log tab"
+            >
+              <History className="h-3.5 w-3.5 text-[var(--color-primary)] shrink-0" /> View Movement Log
+            </button>
             {st === 'in_stock' && (
               <>
                 <button
@@ -768,78 +825,20 @@ export const TyreManagementView: React.FC = () => {
         </div>
       )}
 
-      {/* 5. REGISTER SERIAL MODAL — a new serial on an existing tyre item */}
-      {addSerialOpen && (() => {
+      {/* 5. REGISTER SERIAL — the SHARED unit-register modal, identical to the
+          serialized-inventory asset profile (supplier + purchase facts + the
+          tyre item's declared per-unit attribute keys), with an item picker. */}
+      {unitModalOpen && (() => {
         const tyreItemOptions = items.filter((i) => i.type === 'asset' && isTyreItemName(i.name) && i.isActive !== false);
+        if (tyreItemOptions.length === 0) return null;
         return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-scrim)]/40 backdrop-blur-xs p-4 overflow-y-auto">
-            <form onSubmit={handleAddSerial} className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-xl border border-[var(--color-outline-variant)] max-w-md w-full overflow-hidden my-auto">
-              <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
-                <div>
-                  <h3 className="font-extrabold text-[var(--color-on-surface)] text-sm uppercase tracking-tight flex items-center gap-1.5">
-                    <Disc className="h-4.5 w-4.5 text-[var(--color-primary)] animate-spin-slow" />
-                    Register Tyre Serial
-                  </h3>
-                  <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                    New serial on a tyre item's unit register.
-                  </p>
-                </div>
-                <button type="button" onClick={() => setAddSerialOpen(false)} className="p-1.5 hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] rounded-full transition-colors">
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-              <div className="p-5 space-y-4 text-left">
-                <div className="space-y-1.5">
-                  <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Tyre Item *</label>
-                  <select
-                    required
-                    value={addSerialItem}
-                    onChange={(e) => setAddSerialItem(e.target.value)}
-                    className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                  >
-                    <option value="">-- Choose tyre item --</option>
-                    {tyreItemOptions.map((i) => (
-                      <option key={i.id} value={i.id}>{i.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Serial Number *</label>
-                    <input
-                      type="text"
-                      placeholder="e.g. MRF-90821-X"
-                      value={addSerialText}
-                      onChange={(e) => setAddSerialText(e.target.value)}
-                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none uppercase"
-                      required
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase">Storage Location</label>
-                    <select
-                      value={addSerialLocation}
-                      onChange={(e) => setAddSerialLocation(e.target.value)}
-                      className="w-full p-2.5 border border-[var(--color-outline-variant)] rounded-xl text-sm bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] focus:outline-none"
-                    >
-                      <option value="">-- None --</option>
-                      {locations.map((l) => (
-                        <option key={l.id} value={l.id}>{l.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-              </div>
-              <div className="p-4 bg-[var(--color-surface-container)] border-t border-[var(--color-outline-variant)] flex justify-end gap-3">
-                <button type="button" onClick={() => setAddSerialOpen(false)} className="px-4 py-2 border border-[var(--color-outline-variant)] rounded-full text-xs font-bold bg-[var(--color-surface-container-lowest)] text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)]">
-                  Cancel
-                </button>
-                <button type="submit" className="px-5 py-2 bg-[var(--color-primary)] hover:opacity-90 text-[var(--color-on-primary)] rounded-full text-xs font-bold transition shadow-xs">
-                  Register Serial
-                </button>
-              </div>
-            </form>
-          </div>
+          <UnitRegisterModal
+            items={tyreItemOptions}
+            parties={parties}
+            locations={locations}
+            currencySymbol={settings?.currency?.symbol || '₹'}
+            onClose={() => setUnitModalOpen(false)}
+          />
         );
       })()}
     </div>

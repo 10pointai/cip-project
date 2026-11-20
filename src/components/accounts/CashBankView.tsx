@@ -12,7 +12,6 @@ import {
   Calendar,
   CreditCard,
   Building2,
-  Trash2,
   CheckCircle2,
   AlertCircle,
   FileText,
@@ -76,9 +75,7 @@ interface CashBankViewProps {
   onUpdateAccount: (id: string, updates: Partial<CashBankAccount>) => void;
   onDeleteAccount: (id: string) => void;
   onAddTransfer: (transfer: Omit<InternalTransfer, 'id' | 'createdAt' | 'transferNumber'>) => void;
-  onDeleteTransfer: (id: string) => void;
   onAddAdjustment: (adj: Omit<AccountAdjustment, 'id' | 'createdAt' | 'adjustmentNumber' | 'previousBalance' | 'newBalance'>) => void;
-  onDeleteAdjustment: (id: string) => void;
   onOpenRecordPayment: (type: 'payment_in' | 'payment_out') => void;
 }
 
@@ -97,9 +94,7 @@ export function CashBankView({
   onUpdateAccount,
   onDeleteAccount,
   onAddTransfer,
-  onDeleteTransfer,
   onAddAdjustment,
-  onDeleteAdjustment,
   onOpenRecordPayment,
 }: CashBankViewProps) {
   const currencySymbol = settings.currency.symbol;
@@ -889,13 +884,12 @@ export function CashBankView({
                   <th className="py-3.5 px-4">To Account</th>
                   <th className="py-3.5 px-4">Ref / Cheque No.</th>
                   <th className="py-3.5 px-4 text-right">Amount</th>
-                  <th className="py-3.5 px-4 text-center">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--color-outline-variant)]">
                 {transfers.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-8 text-center text-xs text-[var(--color-on-surface-variant)]">
+                    <td colSpan={6} className="py-8 text-center text-xs text-[var(--color-on-surface-variant)]">
                       No internal transfer vouchers recorded yet.
                     </td>
                   </tr>
@@ -919,15 +913,6 @@ export function CashBankView({
                       </td>
                       <td className="py-3 px-4 text-right font-bold text-sm text-[var(--color-on-surface)]">
                         {formatCurrency(trf.amount, currencySymbol)}
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        <button
-                          onClick={() => onDeleteTransfer(trf.id)}
-                          className="p-1.5 text-[var(--color-outline)] hover:text-[var(--color-error)] rounded-full hover:bg-[var(--color-error-container)]/30 transition-colors"
-                          title="Delete Transfer Voucher"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
                       </td>
                     </tr>
                   ))
@@ -966,13 +951,12 @@ export function CashBankView({
                   <th className="py-3.5 px-4">Reason</th>
                   <th className="py-3.5 px-4 text-right">Adj Amount</th>
                   <th className="py-3.5 px-4 text-right">New Balance</th>
-                  <th className="py-3.5 px-4 text-center">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--color-outline-variant)]">
                 {adjustments.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="py-8 text-center text-xs text-[var(--color-on-surface-variant)]">
+                    <td colSpan={7} className="py-8 text-center text-xs text-[var(--color-on-surface-variant)]">
                       No adjustments logged yet.
                     </td>
                   </tr>
@@ -1011,15 +995,6 @@ export function CashBankView({
                       </td>
                       <td className="py-3 px-4 text-right font-mono font-bold text-[var(--color-on-surface)]">
                         {formatCurrency(adj.newBalance, currencySymbol)}
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        <button
-                          onClick={() => onDeleteAdjustment(adj.id)}
-                          className="p-1.5 text-[var(--color-outline)] hover:text-[var(--color-error)] rounded-full hover:bg-[var(--color-error-container)]/30 transition-colors"
-                          title="Delete Adjustment"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
                       </td>
                     </tr>
                   ))

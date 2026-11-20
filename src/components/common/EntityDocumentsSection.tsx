@@ -117,6 +117,23 @@ export function EntityDocumentsSection({ feature, entityId, staged = [], onStage
   const s3Root = FEATURE_CONFIG[feature].root;
   const ownerNoun = FEATURE_CONFIG[feature].noun;
 
+  // DONE rows self-dismiss (2026-11-20, user directive): three seconds after
+  // an upload finishes, its progress container vanishes — the document itself
+  // is already registered + linked, so nothing is lost. The done container
+  // carries NO close icon.
+  const doneTimersRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    rows.forEach((r) => {
+      if (r.state.status === 'done' && !doneTimersRef.current.has(r.qid)) {
+        doneTimersRef.current.add(r.qid);
+        window.setTimeout(() => {
+          doneTimersRef.current.delete(r.qid);
+          setRows((prev) => prev.filter((x) => x.qid !== r.qid));
+        }, 3000);
+      }
+    });
+  }, [rows]);
+
   // Load the linked docs for an existing record — detail modals pass the id
   // through an inline refresh counter so re-links re-render immediately.
   const [listVersion, setListVersion] = useState(0);
@@ -452,7 +469,8 @@ export function EntityDocumentsSection({ feature, entityId, staged = [], onStage
                   : undefined
               }
               onRemove={
-                ['queued', 'done', 'failed', 'aborted', 'awaiting-name'].includes(r.state.status) ? () => removeRow(r.qid) : undefined
+                // 'done' rows self-dismiss (no close icon, auto-close 3s)
+                ['queued', 'failed', 'aborted', 'awaiting-name'].includes(r.state.status) ? () => removeRow(r.qid) : undefined
               }
               extra={
                 // DOCUMENT NAME (user rule, staging model): pick stages the row;

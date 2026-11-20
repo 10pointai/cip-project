@@ -925,14 +925,13 @@ export function OrdersView({
         return;
       }
       updated[index].unitIds = undefined;
-      // Produce-direct follows the item: the run config re-seeds for the new
-      // item; a recipe-less item drops the toggle (the server refuses
+      // Produce-direct DEFAULTS ON when the item has its own recipe (user
+      // directive 2026-11-19) — the run config seeds from the recipe; a
+      // recipe-less item drops the toggle entirely (the server refuses
       // produce-direct lines with no recipe outright).
-      if (updated[index].produceDirect) {
-        const cfg = defaultRunConfig(value, formDate);
-        updated[index].produceDirect = Boolean(cfg);
-        updated[index].production = cfg;
-      }
+      const cfg = defaultRunConfig(value, formDate);
+      updated[index].produceDirect = Boolean(cfg);
+      updated[index].production = cfg;
       if (selectedProduct) {
         updated[index].rate = String(
           formType === 'sales'
@@ -2260,8 +2259,10 @@ export function OrdersView({
 
                             {/* PRODUCE & SELL DIRECTLY (2026-11-16): the run
                                 toggle — ON records a production run bound to
-                                this sale (recipe-less items render it
-                                disabled); the output never enters stock */}
+                                this sale (DEFAULTS ON when the item has its
+                                own recipe, 2026-11-19); a recipe-less item
+                                renders a plain "—" (2026-11-19 directive);
+                                the output never enters stock */}
                             {formType === 'sales' && (
                               <td className="py-2 px-3 text-center align-top">
                                 {(() => {
@@ -2269,27 +2270,23 @@ export function OrdersView({
                                     return <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)]">—</span>;
                                   }
                                   const lineMix = row.itemId ? activeMixByItem.get(row.itemId) : undefined;
-                                  const noRecipe = Boolean(row.itemId) && !lineMix;
+                                  if (!lineMix) {
+                                    return <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)]">—</span>;
+                                  }
                                   return (
                                     <div className="flex flex-col items-center gap-1">
                                       <button
                                         type="button"
                                         role="switch"
                                         aria-checked={Boolean(row.produceDirect)}
-                                        disabled={noRecipe}
-                                        title={noRecipe
-                                          ? 'No recipe (batch mix) exists for this item — create one in the Production module first.'
-                                          : row.produceDirect
-                                            ? 'Produce & sell directly is ON — the run ships straight to the party'
-                                            : 'Produce this item in a production run bound to this sale'}
+                                        title={row.produceDirect
+                                          ? 'Produce & sell directly is ON — the run ships straight to the party'
+                                          : 'Produce this item in a production run bound to this sale'}
                                         onClick={() => toggleProduceDirect(idx)}
-                                        className={`relative w-9 h-5 rounded-full transition-colors ${row.produceDirect ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-outline-variant)]'} ${noRecipe ? 'opacity-40 cursor-not-allowed' : ''}`}
+                                        className={`relative w-9 h-5 rounded-full transition-colors ${row.produceDirect ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-outline-variant)]'}`}
                                       >
                                         <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${row.produceDirect ? 'translate-x-4' : ''}`} />
                                       </button>
-                                      {noRecipe && (
-                                        <span className="text-[8px] font-bold text-[var(--color-on-surface-variant)] leading-tight">No recipe</span>
-                                      )}
                                     </div>
                                   );
                                 })()}

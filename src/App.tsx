@@ -247,20 +247,10 @@ function AppContent() {
     return trf;
   };
 
-  const handleDeleteTransfer = (id: string) => {
-    db.deleteTransfer(id);
-    showToast('Transfer voucher deleted.', 'info');
-  };
-
   const handleAddAdjustment = (adjData: any) => {
     const adj = db.addAdjustment(adjData);
     showToast(`Balance adjustment recorded!`);
     return adj;
-  };
-
-  const handleDeleteAdjustment = (id: string) => {
-    db.deleteAdjustment(id);
-    showToast('Adjustment voucher deleted.', 'info');
   };
 
   // Sales & Purchase handlers (relational order model).
@@ -587,9 +577,7 @@ function AppContent() {
               onUpdateAccount={handleUpdateAccount}
               onDeleteAccount={handleDeleteAccount}
               onAddTransfer={handleAddTransfer}
-              onDeleteTransfer={handleDeleteTransfer}
               onAddAdjustment={handleAddAdjustment}
-              onDeleteAdjustment={handleDeleteAdjustment}
               onOpenRecordPayment={(type) => {
                 setPaymentModalState({ isOpen: true, type });
               }}

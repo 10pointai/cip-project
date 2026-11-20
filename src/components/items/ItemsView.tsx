@@ -886,23 +886,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                                     {item.remarks}
                                   </p>
                                 )}
-                                {item.type === 'product' && itemLocs.length > 0 && (
-                                  <div className="flex items-center gap-1 flex-wrap mt-1.5">
-                                    {itemLocs.map((loc, lIdx) => (
-                                      <span
-                                        key={lIdx}
-                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[var(--color-surface-container)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] shadow-2xs"
-                                        title={`${loc.locationName}: ${(loc.currentStock || 0).toLocaleString('en-IN')} ${item.unit}`}
-                                      >
-                                        <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-primary)] shrink-0" />
-                                        <span className="font-medium text-[var(--color-on-surface-variant)]">{loc.locationName}:</span>
-                                        <span className="font-bold text-[var(--color-primary)]">
-                                          {(loc.currentStock || 0).toLocaleString('en-IN')} {item.unit}
-                                        </span>
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
+                               
                               </div>
                             </div>
                           </td>

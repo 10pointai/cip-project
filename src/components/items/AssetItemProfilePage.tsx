@@ -13,7 +13,6 @@ import {
   Warehouse,
   Truck,
   History,
-  AlertCircle,
   ExternalLink,
   MoreVertical,
 } from 'lucide-react';
@@ -32,6 +31,7 @@ import {
   isTyreItemName,
 } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
+import UnitRegisterModal from './UnitRegisterModal';
 
 const STATUS_CHIPS: Record<InventoryUnitStatus, { label: string; cls: string }> = {
   in_stock: { label: 'In Spare', cls: 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]' },
@@ -64,27 +64,9 @@ interface AssetItemProfilePageProps {
   onEdit: (item: Item) => void;
 }
 
-type UnitFormState = {
-  id?: string;
-  serialNumber: string;
-  supplierId: string;
-  locationId: string;
-  purchaseDate: string;
-  purchaseCost: string;
-  /** 2026-11-16 (dynamic attributes): values for the item's DECLARED keys —
-   *  draft strings in the form, coerced per key type on save (fixed facts:
-   *  serial, supplier, purchase date, cost; everything else is a key). */
-  attributes: Record<string, string>;
-};
-
-const emptyUnitForm = (): UnitFormState => ({
-  serialNumber: '',
-  supplierId: '',
-  locationId: '',
-  purchaseDate: new Date().toISOString().split('T')[0],
-  purchaseCost: '',
-  attributes: {},
-});
+/** The ADD/EDIT UNIT modal was extracted into `UnitRegisterModal` (2026-11-19)
+ *  so the Tyre Management register opens the exact same form; this page only
+ *  tracks open state + the unit being edited. */
 
 export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
   item,
@@ -99,17 +81,22 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
 }) => {
   const currencySymbol = settings.currencySymbol || '₹';
   const units = useMemo(() => inventoryUnits.filter((u) => u.itemId === item.id), [inventoryUnits, item.id]);
+  // TYRE-SCOPED REGISTER UI (user directive 2026-11-20): Status + Location /
+  // Vehicle columns and the Mark Scrap row action render ONLY for tyre items
+  // — every other serialised item's register drops them.
+  const isTyre = isTyreItemName(item.name);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<InventoryUnitStatus | 'all'>('all');
-  const [unitForm, setUnitForm] = useState<UnitFormState | null>(null); // open = add/EDIT modal
+  // ADD/EDIT UNIT modal (shared UnitRegisterModal) — open flag + edit target
+  const [unitFormOpen, setUnitFormOpen] = useState(false);
+  const [unitFormExisting, setUnitFormExisting] = useState<InventoryUnit | null>(null);
   const [deployForm, setDeployForm] = useState<{ unitId: string; vehicleId: string; position: string; odometer: string; notes: string } | null>(null);
   const [returnForm, setReturnForm] = useState<{ unitId: string; locationId: string; condition: string; odometer: string; notes: string } | null>(null);
   const [viewingUnit, setViewingUnit] = useState<InventoryUnit | null>(null);
   const [unitEvents, setUnitEvents] = useState<InventoryUnitEvent[] | null>(null);
   // DYNAMIC ATTRIBUTES: the item's declared per-unit key list + its editor
   const attrDefs = useMemo(() => (Array.isArray(item.attributes) ? item.attributes : []), [item.attributes]);
-  const [unitFormErr, setUnitFormErr] = useState('');
 
   const counts = useMemo(() => ({
     all: units.length,
@@ -154,83 +141,11 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
     }
   };
 
-  const handleSaveUnit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!unitForm) return;
-    // DYNAMIC ATTRIBUTES (2026-11-16): coerce the draft strings by the key
-    // type + enforce the per-key required flag (server re-validates)
-    const payload: Partial<InventoryUnit> & { itemId: string; serialNumber: string } = {
-      itemId: item.id,
-      serialNumber: unitForm.serialNumber.trim(),
-      supplierId: unitForm.supplierId || undefined,
-      locationId: unitForm.locationId || undefined,
-      purchaseDate: unitForm.purchaseDate || undefined,
-      purchaseCost: unitForm.purchaseCost === '' ? undefined : Number(unitForm.purchaseCost),
-    };
-    const attributes: Record<string, string | number> = {};
-    for (const def of attrDefs) {
-      const v = (unitForm.attributes[def.key] || '').trim();
-      if (!v) {
-        if (def.required) {
-          setUnitFormErr(`"${def.label}" is required for every ${item.name} entry.`);
-          return;
-        }
-        continue;
-      }
-      if (def.type === 'number') {
-        const n = Number(v);
-        if (!Number.isFinite(n)) {
-          setUnitFormErr(`"${def.label}" must be a number.`);
-          return;
-        }
-        attributes[def.key] = n;
-      } else if (def.type === 'select') {
-        if (!(def.options || []).includes(v)) {
-          setUnitFormErr(`"${def.label}" must be one of: ${(def.options || []).join(', ')}.`);
-          return;
-        }
-        attributes[def.key] = v;
-      } else {
-        attributes[def.key] = v;
-      }
-    }
-    // A unit with legacy stored attribute values keeps them unless the form
-    // explicitly renders the keys — send the (possibly cleared) map when the
-    // unit already carries any attribute data.
-    if (Object.keys(attributes).length > 0 || (unitForm.id && uHasStoredAttributes(unitForm.id))) {
-      payload.attributes = attributes;
-    }
-    if (unitForm.id) {
-      localDb.updateInventoryUnit(unitForm.id, payload);
-    } else {
-      localDb.addInventoryUnit(payload);
-    }
-    setUnitForm(null);
-  };
-
-  const uHasStoredAttributes = (unitId: string): boolean => {
-    const u = units.find((x) => x.id === unitId);
-    return Boolean(u?.attributes && Object.keys(u.attributes).length > 0);
-  };
-
-  /** Opens the add/edit unit modal, prefilling the declared keys' drafts. */
+  /** Opens the shared add/edit unit modal (UnitRegisterModal) with the
+   *  unit's stored facts prefilled when editing. */
   const openUnitForm = (existing?: InventoryUnit) => {
-    setUnitFormErr('');
-    if (existing) {
-      setUnitForm({
-        id: existing.id,
-        serialNumber: existing.serialNumber,
-        supplierId: existing.supplierId || '',
-        locationId: existing.locationId || '',
-        purchaseDate: existing.purchaseDate || '',
-        purchaseCost: existing.purchaseCost !== undefined ? String(existing.purchaseCost) : '',
-        attributes: Object.fromEntries(
-          attrDefs.map((def) => [def.key, String(existing.attributes?.[def.key] ?? '')])
-        ),
-      });
-    } else {
-      setUnitForm(emptyUnitForm());
-    }
+    setUnitFormExisting(existing || null);
+    setUnitFormOpen(true);
   };
 
   // SCRAP / UN-SCRAP (2026-11-17) — the register carries the same lifecycle
@@ -410,8 +325,8 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
             <thead className="sticky top-16 z-20">
               <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[10px]">
                 <th className="py-3 px-4">Serial Number</th>
-                <th className="py-3 px-3">Status</th>
-                <th className="py-3 px-3">Location / Vehicle</th>
+                {isTyre && <th className="py-3 px-3">Status</th>}
+                {isTyre && <th className="py-3 px-3">Location / Vehicle</th>}
                 <th className="py-3 px-3">Supplier</th>
                 <th className="py-3 px-3">Purchase</th>
                 <th className="py-3 px-3">Cost</th>
@@ -428,7 +343,7 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
             <tbody className="divide-y divide-[var(--color-outline-variant)]/60">
               {filteredUnits.length === 0 ? (
                 <tr>
-                  <td colSpan={7 + attrDefs.length} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                  <td colSpan={(isTyre ? 7 : 5) + attrDefs.length} className="py-12 text-center text-[var(--color-on-surface-variant)]">
                     <ScanBarcode className="w-8 h-8 mx-auto text-[var(--color-outline-variant)] mb-2" />
                     <p className="text-xs font-bold">{units.length === 0 ? 'No units registered yet' : 'No units match the filters'}</p>
                     <p className="text-[10px] mt-0.5">
@@ -452,20 +367,24 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
                         </button>
                         {u.notes && <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5 truncate max-w-[240px]">{u.notes}</p>}
                       </td>
-                      <td className="py-3 px-3">
-                        <span className={`inline-flex px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider whitespace-nowrap ${chip.cls}`}>
-                          {chip.label}
-                        </span>
-                      </td>
-                      <td className="py-3 px-3">
-                        {u.status === 'deployed' ? (
-                          <span className="font-semibold text-[var(--color-on-surface)]">
-                            {u.vehicleNo || 'Vehicle'}{u.position ? ` · ${u.position}` : ''}
+                      {isTyre && (
+                        <td className="py-3 px-3">
+                          <span className={`inline-flex px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider whitespace-nowrap ${chip.cls}`}>
+                            {chip.label}
                           </span>
-                        ) : (
-                          <span className="font-semibold text-[var(--color-on-surface-variant)]">{u.locationName || '—'}</span>
-                        )}
-                      </td>
+                        </td>
+                      )}
+                      {isTyre && (
+                        <td className="py-3 px-3">
+                          {u.status === 'deployed' ? (
+                            <span className="font-semibold text-[var(--color-on-surface)]">
+                              {u.vehicleNo || 'Vehicle'}{u.position ? ` · ${u.position}` : ''}
+                            </span>
+                          ) : (
+                            <span className="font-semibold text-[var(--color-on-surface-variant)]">{u.locationName || '—'}</span>
+                          )}
+                        </td>
+                      )}
                       <td className="py-3 px-3 text-[var(--color-on-surface)] font-semibold">{u.supplierName || partyName(u.supplierId) || '—'}</td>
                       <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">{fmtDate(u.purchaseDate)}</td>
                       <td className="py-3 px-3 font-bold text-[var(--color-on-surface)]">{fmtCost(u.purchaseCost)}</td>
@@ -528,139 +447,20 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
         </div>
       </div>
 
-      {/* ===== ADD / EDIT UNIT MODAL ===== */}
-      {unitForm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs">
-          <form onSubmit={handleSaveUnit} className="bg-[var(--color-surface-container-lowest)] w-full max-w-2xl rounded-3xl shadow-2xl border border-[var(--color-outline-variant)] flex flex-col max-h-[90vh]">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-[var(--color-primary-container)] text-[var(--color-primary)] flex items-center justify-center">
-                  <ScanBarcode className="w-4.5 h-4.5" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-[var(--color-on-surface)]">{unitForm.id ? `Edit Unit ${unitForm.serialNumber}` : `Register a Unit of ${item.name}`}</h3>
-                  <p className="text-[10px] text-[var(--color-on-surface-variant)]">The serial number makes the unit unique within this item's register</p>
-                </div>
-              </div>
-              <button type="button" onClick={() => setUnitForm(null)} className="p-2 text-[var(--color-outline)] hover:text-[var(--color-on-surface)] rounded-full hover:bg-[var(--color-surface-container-high)]">
-                <X className="w-4.5 h-4.5" />
-              </button>
-            </div>
-
-            <div className="p-6 overflow-y-auto space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Serial Number *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. MRF-2026-A-0007845"
-                    value={unitForm.serialNumber}
-                    onChange={(e) => setUnitForm({ ...unitForm, serialNumber: e.target.value })}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-mono font-bold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Supplier</label>
-                  <select
-                    value={unitForm.supplierId}
-                    onChange={(e) => setUnitForm({ ...unitForm, supplierId: e.target.value })}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
-                  >
-                    <option value="">— Not recorded —</option>
-                    {parties.map((p) => (
-                      <option key={p.id} value={p.id}>{p.name}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Storage Location</label>
-                  <select
-                    value={unitForm.locationId}
-                    onChange={(e) => setUnitForm({ ...unitForm, locationId: e.target.value })}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
-                  >
-                    <option value="">— None —</option>
-                    {locations.map((l) => (
-                      <option key={l.id} value={l.id}>{l.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Purchase Date</label>
-                  <input
-                    type="date"
-                    value={unitForm.purchaseDate}
-                    onChange={(e) => setUnitForm({ ...unitForm, purchaseDate: e.target.value })}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Purchase Cost ({currencySymbol})</label>
-                  <input
-                    type="number"
-                    step="any"
-                    placeholder="0.00"
-                    value={unitForm.purchaseCost}
-                    onChange={(e) => setUnitForm({ ...unitForm, purchaseCost: e.target.value })}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-bold text-[var(--color-on-surface)] focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              {/* DYNAMIC ATTRIBUTE INPUTS (2026-11-16): one input per declared
-                  key — text / number / date / pick-list — rendered from the
-                  item's key list (required keys are enforced on save) */}
-              {attrDefs.length > 0 && (
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  {attrDefs.map((def) => (
-                    <div key={def.key}>
-                      <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                        {def.label}{def.required && <span className="text-[var(--color-error)]"> *</span>}
-                      </label>
-                      {def.type === 'select' ? (
-                        <select
-                          value={unitForm.attributes[def.key] || ''}
-                          onChange={(e) => setUnitForm({ ...unitForm, attributes: { ...unitForm.attributes, [def.key]: e.target.value } })}
-                          className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
-                        >
-                          <option value="">— Not recorded —</option>
-                          {(def.options || []).map((opt) => (
-                            <option key={opt} value={opt}>{opt}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <input
-                          type={def.type === 'number' ? 'number' : def.type === 'date' ? 'date' : 'text'}
-                          step={def.type === 'number' ? 'any' : undefined}
-                          value={unitForm.attributes[def.key] || ''}
-                          onChange={(e) => setUnitForm({ ...unitForm, attributes: { ...unitForm.attributes, [def.key]: e.target.value } })}
-                          className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none"
-                        />
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {unitFormErr && (
-                <p className="text-[10px] font-bold text-[var(--color-error)] flex items-center gap-1">
-                  <AlertCircle className="w-3 h-3" /> {unitFormErr}
-                </p>
-              )}
-            </div>
-
-            <div className="px-6 py-4 border-t border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] flex justify-end gap-3">
-              <button type="button" onClick={() => setUnitForm(null)} className="px-5 py-2 border border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] rounded-full text-xs font-semibold hover:bg-[var(--color-surface-container)]">Cancel</button>
-              <button type="submit" className="px-6 py-2.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold hover:opacity-95">
-                {unitForm.id ? 'Save Unit' : 'Add Item'}
-              </button>
-            </div>
-          </form>
-        </div>
+      {/* ===== ADD / EDIT UNIT MODAL — shared UnitRegisterModal (2026-11-19);
+           the same form serves the Tyre Management register entry point ===== */}
+      {unitFormOpen && (
+        <UnitRegisterModal
+          items={[item]}
+          parties={parties}
+          locations={locations}
+          currencySymbol={currencySymbol}
+          existing={unitFormExisting}
+          onClose={() => setUnitFormOpen(false)}
+        />
       )}
+
+      {/* ===== DEPLOY MODAL ===== */}
 
       {/* ===== DEPLOY MODAL ===== */}
       {deployForm && (
@@ -835,7 +635,10 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
             if (!target) return null;
             return (
               <div className="pb-1.5">
-                {target.status === 'in_stock' && (
+                {/* ASSIGN TO VEHICLE — TYRES ONLY (user directive 2026-11-19):
+                    no other serialised inventory gets a vehicle-assignment
+                    action in the register. */}
+                {target.status === 'in_stock' && isTyreItemName(item.name) && (
                   <button
                     type="button"
                     onClick={() => {
@@ -871,7 +674,10 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
                     <Undo2 className="w-4 h-4 text-[var(--color-on-surface-variant)] shrink-0" /> Restore from Maintenance
                   </button>
                 )}
-                {target.status === 'in_stock' && (
+                {/* MARK SCRAP — TYRES ONLY (user directive 2026-11-20): the
+                    scrap/unscrap life-cycle is a tyre-register action; other
+                    serialised items keep fit/edit only. */}
+                {target.status === 'in_stock' && isTyre && (
                   <button
                     type="button"
                     onClick={() => { closeUnitMenu(); handleScrapUnit(target); }}

@@ -82,19 +82,17 @@ interface BulkDoc {
   paymentMode: string;
 }
 
-// 2026-10-28: the DIRECT invoice row is back in bulk too (like the single
-// create popover) — stock + forced credit apply equally to SO and Invoice.
+// 2026-11-20 (user directive): bulk creation offers ONLY Quotation and Sales
+// Order — direct invoices are not creatable from this modal.
 const STAGE_CHOICES: Array<{ id: SalesStage; label: string }> = [
   { id: 'quotation', label: 'Quotation' },
   { id: 'sales_order', label: 'Sales Order' },
-  { id: 'sales_invoice', label: 'Invoice (Direct)' },
 ];
 
 /** Document number prefix per stage (mirrors suggestStageNumber): */
 const PREFIX_BY_STAGE: Record<string, string> = {
   quotation: 'QUO',
   sales_order: 'SO',
-  sales_invoice: 'INV', // legacy rows only
 };
 
 const todayStr = () => new Date().toISOString().split('T')[0];
@@ -370,13 +368,13 @@ export function BulkSalesCreateModal({
         patch.rate = String(prod.salePrice ?? 0);
         patch.gstRate = String(prod.taxRateGst ?? 0);
       }
-      // Produce-direct follows the item: the run config re-seeds; a
-      // recipe-less item drops the toggle (the server refuses recipe-less
-      // produce lines outright).
-      if (line.produceDirect) {
-        patch.produceDirect = Boolean(activeMixByItem.get(value));
-        patch.production = defaultRunConfig(value, doc.date);
-      }
+      // Produce-direct DEFAULTS ON when the item has its own recipe (user
+      // directive 2026-11-19, matching the sale order form); a recipe-less
+      // item drops the toggle (the server refuses recipe-less produce lines
+      // outright).
+      const cfg = defaultRunConfig(value, doc.date);
+      patch.produceDirect = Boolean(cfg);
+      patch.production = cfg;
       patchLine(doc.id, line.id, patch);
       return;
     }
@@ -919,33 +917,32 @@ export function BulkSalesCreateModal({
 
                           {/* PRODUCE & SELL DIRECTLY — the run toggle for this
                               line: ON binds a production run to the eventual
-                              sale (recipe-less items render it disabled) */}
+                              sale (DEFAULTS ON when the item has its own
+                              recipe, 2026-11-19); a recipe-less item renders
+                              a plain "—" */}
                           <td className="py-1.5 px-1.5 text-center align-center">
                             {(() => {
                               if (isBulkAssetLine(line.itemId)) {
                                 return <span className="text-[11px] font-semibold text-[var(--color-on-surface-variant)]">—</span>;
                               }
-                              const noRecipe = Boolean(line.itemId) && !activeMixByItem.get(line.itemId);
+                              const lineMix = activeMixByItem.get(line.itemId);
+                              if (line.itemId && !lineMix) {
+                                return <span className="text-[11px] font-semibold text-[var(--color-on-surface-variant)]">—</span>;
+                              }
                               return (
                                 <div className="flex flex-col items-center gap-1">
                                   <button
                                     type="button"
                                     role="switch"
                                     aria-checked={Boolean(line.produceDirect)}
-                                    disabled={noRecipe}
-                                    title={noRecipe
-                                      ? 'No recipe (batch mix) exists for this item — create one in the Production module first.'
-                                      : line.produceDirect
-                                        ? 'Produce & sell directly is ON — the run ships straight to the party'
-                                        : 'Produce this item in a production run bound to the sale'}
+                                    title={line.produceDirect
+                                      ? 'Produce & sell directly is ON — the run ships straight to the party'
+                                      : 'Produce this item in a production run bound to the sale'}
                                     onClick={() => toggleLineProduce(doc, line)}
-                                    className={`relative w-9 h-5 rounded-full transition-colors ${line.produceDirect ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-outline-variant)]'} ${noRecipe ? 'opacity-40 cursor-not-allowed' : ''}`}
+                                    className={`relative w-9 h-5 rounded-full transition-colors ${line.produceDirect ? 'bg-[var(--color-primary)]' : 'bg-[var(--color-outline-variant)]'}`}
                                   >
                                     <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${line.produceDirect ? 'translate-x-4' : ''}`} />
                                   </button>
-                                  {noRecipe && (
-                                    <span className="text-[8px] font-bold text-[var(--color-on-surface-variant)] leading-tight">No recipe</span>
-                                  )}
                                 </div>
                               );
                             })()}

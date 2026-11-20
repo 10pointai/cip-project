@@ -89,9 +89,18 @@ const FEATURE_COLLECTIONS: Record<string, CollectionName[]> = {
   parties: ['parties', 'transactions', 'sales', 'saleInvoices', 'purchases', 'accounts'],
   'cash-bank': ['accounts', 'transfers', 'adjustments', 'transactions', 'parties', 'employeePayments'],
   items: ['items', 'categories', 'units', 'locations', 'stockAdjustments', 'inventoryUnits'],
-  sales: ['sales', 'saleInvoices', 'purchases', 'transactions', 'accounts'],
-  purchases: ['purchases', 'sales', 'transactions', 'accounts'],
+  // 'batchMixes' + 'productionBatches' ride with sales: the produce-direct
+  // run toggle in the sale form resolves each line's recipe from this
+  // snapshot — fetching them only on the Production tab left the sale order
+  // page recipe-blind (and hid a sale's bound runs on edit).
+  sales: ['sales', 'saleInvoices', 'purchases', 'transactions', 'accounts', 'batchMixes', 'productionBatches'],
+  purchases: ['purchases', 'sales', 'transactions', 'accounts', 'batchMixes'],
   production: ['productionBatches', 'batchMixes', 'items'],
+  // Tyre Management (own sidebar tab) builds the serial register from
+  // inventoryUnits of tyre-named asset items — without this entry
+  // loadFeature fetched NOTHING on first visit and the register stayed
+  // empty until the user opened Inventory/Logistics once (2026-11-20).
+  'tyre-management': ['inventoryUnits'],
   // drivers are employees with role 'driver' — loaded via 'employees'.
   logistics: [
     'vehicles', 'tripSlips', 'inventoryUnits', 'items', 'locations', 'employees', 'vehicleEmiEntries', 'vehicleExpenses',
