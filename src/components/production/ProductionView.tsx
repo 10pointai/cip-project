@@ -121,6 +121,19 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
     [selectableItems]
   );
 
+  // 2026-11-20: one ACTIVE recipe per item is server-enforced (db.ts refuses
+  // the POST) — keep the editor honest by hiding the items whose recipe is
+  // already active from the OUTPUT ITEM list. Editing re-picks only its own
+  // item (the mix being edited is excluded from the "taken" set).
+  const mixFormItemOptions = useMemo(() => {
+    const taken = new Set(
+      batchMixes
+        .filter((m) => m.isActive !== false && m.id !== mixForm?.id)
+        .map((m) => m.outputItemId)
+    );
+    return itemOptions.filter((o) => !taken.has(o.value));
+  }, [itemOptions, batchMixes, mixForm?.id]);
+
   const mixOptions = useMemo(
     () =>
       batchMixes
@@ -770,7 +783,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
                 <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">Output Item (What one mix produces — also the recipe's name)</label>
                 <div className="px-4 py-1.5 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full">
                   <SearchableSelect
-                    options={itemOptions}
+                    options={mixFormItemOptions}
                     value={mixForm.outputItemId}
                     onChange={(v) => updateMixForm({ outputItemId: v })}
                     placeholder="Type to search inventory items..."
