@@ -141,12 +141,14 @@ export function PartyStatementLedger({
       {/* Ledger Table — NO container scroll: the page scrolls and the header
           rides sticky beneath the app header (max rows real estate) */}
       <div>
-        <table className="w-full text-left text-xs border-collapse min-w-[1000px]">
+        <table className="w-full text-left text-xs border-collapse min-w-[1100px]">
           <thead className={`sticky ${stickyHeaderOffset} z-20`}>
             <tr className="bg-[var(--color-surface-container)] border-b border-[var(--color-outline-variant)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
               <th className="py-3 px-4">Doc Id</th>
               <th className="py-3 px-3 w-[170px]">Stage</th>
               <th className="py-3 px-3">Particulars</th>
+              {/* DONE-BY AUDIT (2026-11-21): who recorded the payment/voucher row */}
+              <th className="py-3 px-3 w-[110px]">Recorded By</th>
               <th className="py-3 px-3 text-right w-[112px]">Amount</th>
               <th className="py-3 px-3 text-right w-[112px]">Payment</th>
               <th className="py-3 px-3 text-right">Running Balance</th>
@@ -157,7 +159,7 @@ export function PartyStatementLedger({
             {/* Document-ledger rows */}
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={7} className="py-10 text-center text-xs text-[var(--color-on-surface-variant)] italic">
+                <td colSpan={8} className="py-10 text-center text-xs text-[var(--color-on-surface-variant)] italic">
                   {statement.rows.length === 0
                     ? 'No sales, purchases or payments recorded for this party yet.'
                     : 'No documents found matching your search or active filter.'}
@@ -361,6 +363,19 @@ export function PartyStatementLedger({
                           {entry.particulars || '—'}
                         </p>
                       )}
+                    </td>
+                    {/* Recorded By — DONE-BY AUDIT (2026-11-21): the acting
+                        user resolved live from the users master. Order rows
+                        carry their sale/purchase master's creator (stamped
+                        with the Sales feature pass); payment/voucher rows
+                        carry the transaction's booking user. */}
+                    <td className="py-3 px-2.5 text-[11px] font-medium text-[var(--color-on-surface)] truncate max-w-[110px]">
+                      {isOrder
+                        ? (entry.sale?.createdByName ||
+                           entry.purchase?.createdByName ||
+                           <span className="italic text-[var(--color-outline)]">Legacy</span>)
+                        : (entry.transaction?.createdByName ||
+                           <span className="italic text-[var(--color-outline)]">Unknown</span>)}
                     </td>
                     <td className="py-3 px-2.5 text-right">
                       {(() => {

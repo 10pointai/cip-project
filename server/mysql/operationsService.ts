@@ -1,5 +1,6 @@
 import { executeMysqlQuery, executeMysqlOne } from './queryClient';
 import { isMysqlConfigured } from './connection';
+import { resolveActorNames } from './financeService';
 import { Item, ItemAttributeKey, ItemCategory, ItemUnit, ItemLocation, ProductionBatchRun, BatchMix, Vehicle, Driver, TripSlip, VehicleExpenseEntry, ItemStockAdjustment, StockMovementLog, Sale, Purchase, SaleInvoice, InventoryUnit, InventoryUnitEvent, InventoryUnitStatus, InventoryUnitEventType } from '../../src/types';
 import { serverDb } from '../db';
 import { computeItemValuation } from '../inventoryValuation';
@@ -60,6 +61,10 @@ function mapItemRow(it: any): Item {
     })(),
     createdAt: it.created_at,
     updatedAt: it.updated_at,
+    // DONE-BY AUDIT (2026-11-21): ids from the row; display names filled by
+    // resolveActorNames (live view of the users master — §2).
+    createdById: it.created_by_id || undefined,
+    updatedById: it.updated_by_id || undefined,
   };
 }
 
@@ -183,7 +188,7 @@ async function attachMovementsToItems(items: Item[]): Promise<Item[]> {
 
 export async function fetchItemsDirect(filter: { categoryId?: string; type?: string; query?: string }): Promise<Item[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getItems(filter);
+    return resolveActorNames(serverDb.getItems(filter));
   }
 
   // Category name + unit string resolved with JOINs against the masters
@@ -211,56 +216,64 @@ export async function fetchItemsDirect(filter: { categoryId?: string; type?: str
 
   sql += ' ORDER BY it.name ASC';
   const rows = await executeMysqlQuery(sql, params);
-  const items = rows.map(mapItemRow);
+  const items = await resolveActorNames(rows.map(mapItemRow));
   return attachMovementsToItems(await attachLocationsToItems(items));
 }
 
 export async function fetchItemByIdDirect(id: string): Promise<Item | null> {
   if (!isMysqlConfigured()) {
-    return serverDb.getItemById(id) || null;
+    const raw = serverDb.getItemById(id);
+    if (!raw) return null;
+    return (await resolveActorNames([raw as Item]))[0];
   }
   const row = await executeMysqlOne('SELECT * FROM items WHERE id = ?', [id]);
   if (!row) return null;
-  const item = mapItemRow(row);
+  const [item] = await resolveActorNames([mapItemRow(row)]);
   const hydrated = await attachMovementsToItems(await attachLocationsToItems([item]));
   return hydrated[0] || item;
 }
 
 export async function fetchCategoriesDirect(): Promise<ItemCategory[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getCategories();
+    return resolveActorNames(serverDb.getCategories());
   }
   const rows = await executeMysqlQuery('SELECT * FROM item_categories ORDER BY name ASC');
-  return rows.map((r: any) => ({
+  return resolveActorNames(rows.map((r: any) => ({
     id: r.id,
     name: r.name,
     description: r.description || undefined,
     type: r.type || 'both',
     color: r.color || undefined,
     createdAt: r.created_at,
-  }));
+    // DONE-BY AUDIT (2026-11-21)
+    createdById: r.created_by_id || undefined,
+    updatedById: r.updated_by_id || undefined,
+  })));
 }
 
 export async function fetchUnitsDirect(): Promise<ItemUnit[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getUnits();
+    return resolveActorNames(serverDb.getUnits());
   }
   const rows = await executeMysqlQuery('SELECT * FROM item_units ORDER BY name ASC');
-  return rows.map((r: any) => ({
+  return resolveActorNames(rows.map((r: any) => ({
     id: r.id,
     code: r.code,
     name: r.name,
     allowDecimal: Boolean(r.allow_decimal),
     isStandard: Boolean(r.is_standard),
-  }));
+    // DONE-BY AUDIT (2026-11-21)
+    createdById: r.created_by_id || undefined,
+    updatedById: r.updated_by_id || undefined,
+  })));
 }
 
 export async function fetchLocationsDirect(): Promise<ItemLocation[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getLocations();
+    return resolveActorNames(serverDb.getLocations());
   }
   const rows = await executeMysqlQuery('SELECT * FROM item_locations ORDER BY name ASC');
-  return rows.map((r: any) => ({
+  return resolveActorNames(rows.map((r: any) => ({
     id: r.id,
     name: r.name,
     code: r.code || undefined,
@@ -269,12 +282,15 @@ export async function fetchLocationsDirect(): Promise<ItemLocation[]> {
     type: r.type || 'yard',
     isStandard: Boolean(r.is_standard),
     createdAt: r.created_at,
-  }));
+    // DONE-BY AUDIT (2026-11-21)
+    createdById: r.created_by_id || undefined,
+    updatedById: r.updated_by_id || undefined,
+  })));
 }
 
 export async function fetchStockAdjustmentsDirect(): Promise<ItemStockAdjustment[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getStockAdjustments();
+    return resolveActorNames(serverDb.getStockAdjustments());
   }
   // FK store: adjustments keep item_id/location_id only; names resolved via JOIN
   // so item/location renames stay in sync everywhere.
@@ -291,7 +307,7 @@ export async function fetchStockAdjustmentsDirect(): Promise<ItemStockAdjustment
      LEFT JOIN item_locations tloc ON tloc.id = a.to_location_id
      ORDER BY a.created_at DESC, a.adjustment_date DESC`
   );
-  return rows.map((a: any) => ({
+  const mapped = rows.map((a: any) => ({
     id: a.id,
     adjustmentNumber: a.adjustment_number,
     itemId: a.item_id,
@@ -314,7 +330,11 @@ export async function fetchStockAdjustmentsDirect(): Promise<ItemStockAdjustment
     referenceNumber: a.reference_number || undefined,
     notes: a.notes || undefined,
     createdAt: a.created_at,
+    // DONE-BY AUDIT (2026-11-21)
+    createdById: a.created_by_id || undefined,
+    updatedById: a.updated_by_id || undefined,
   }));
+  return resolveActorNames(mapped);
 }
 
 // ==========================================
@@ -323,10 +343,10 @@ export async function fetchStockAdjustmentsDirect(): Promise<ItemStockAdjustment
 
 export async function fetchBatchesDirect(): Promise<ProductionBatchRun[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getProductionBatches();
+    return resolveActorNames(serverDb.getProductionBatches());
   }
   const rows = await executeMysqlQuery('SELECT * FROM production_batches ORDER BY date DESC, created_at DESC');
-  return rows.map((b: any) => ({
+  return resolveActorNames(rows.map((b: any) => ({
     id: b.id,
     batchNumber: b.batch_number,
     date: b.date,
@@ -347,7 +367,10 @@ export async function fetchBatchesDirect(): Promise<ProductionBatchRun[]> {
     mixTemperatureCelsius: b.mix_temperature_celsius !== null && b.mix_temperature_celsius !== undefined ? parseNum(b.mix_temperature_celsius) : undefined,
     notes: b.notes || undefined,
     createdAt: b.created_at,
-  }));
+    // DONE-BY AUDIT (2026-11-21)
+    createdById: b.created_by_id || undefined,
+    updatedById: b.updated_by_id || undefined,
+  })));
 }
 
 // ==========================================
@@ -358,19 +381,22 @@ export async function fetchBatchesDirect(): Promise<ProductionBatchRun[]> {
 // ==========================================
 
 export async function fetchBatchMixesDirect(): Promise<BatchMix[]> {
-  return serverDb.getBatchMixes();
+  // DONE-BY AUDIT (2026-11-21): acting-user names resolve live.
+  return resolveActorNames(serverDb.getBatchMixes());
 }
 
 export async function fetchBatchMixByIdDirect(id: string): Promise<BatchMix | undefined> {
-  return serverDb.getBatchMixById(id);
+  const raw = serverDb.getBatchMixById(id);
+  if (!raw) return undefined;
+  return (await resolveActorNames([raw]))[0];
 }
 
-export async function createBatchMixDirect(data: any): Promise<BatchMix> {
-  return serverDb.createBatchMix(data);
+export async function createBatchMixDirect(data: any, actorId?: string): Promise<BatchMix> {
+  return serverDb.createBatchMix(data, actorId);
 }
 
-export async function updateBatchMixDirect(id: string, updates: any): Promise<BatchMix | undefined> {
-  return serverDb.updateBatchMix(id, updates);
+export async function updateBatchMixDirect(id: string, updates: any, actorId?: string): Promise<BatchMix | undefined> {
+  return serverDb.updateBatchMix(id, updates, actorId);
 }
 
 export async function deleteBatchMixDirect(id: string): Promise<boolean> {
@@ -424,6 +450,10 @@ function mapUnitRow(u: any): InventoryUnit {
     })(),
     createdAt: u.created_at,
     updatedAt: u.updated_at || undefined,
+    // DONE-BY AUDIT (2026-11-21): ids from the row; display names filled by
+    // resolveActorNames (live view of the users master — §2).
+    createdById: u.created_by_id || undefined,
+    updatedById: u.updated_by_id || undefined,
     // Display copies (JOINs; display-only — Golden Rule §2)
     itemName: u.item_display || undefined,
     itemCode: u.item_code || undefined,
@@ -438,7 +468,7 @@ export async function fetchInventoryUnitsDirect(itemId?: string): Promise<Invent
   if (!isMysqlConfigured()) {
     const units = serverDb.getInventoryUnits().filter((u) => !itemId || u.itemId === itemId);
     // Sandbox reads resolve display copies from the hydrated masters.
-    return units.map((u) => ({
+    const mapped = units.map((u) => ({
       ...u,
       itemName: serverDb.getItems().find((i) => i.id === u.itemId)?.name,
       locationName: serverDb.getLocations().find((l) => l.id === u.locationId)?.name,
@@ -446,28 +476,29 @@ export async function fetchInventoryUnitsDirect(itemId?: string): Promise<Invent
       supplierName: serverDb.getParties().find((p) => p.id === u.supplierId)?.name,
       saleNumber: (serverDb.getSales() as any[]).find((s) => s.id === u.saleId)?.saleNumber,
     }));
+    return resolveActorNames(mapped);
   }
   if (itemId) {
     const rows = await executeMysqlQuery(`${UNIT_SELECT} WHERE iu.item_id = ? ORDER BY iu.created_at DESC`, [itemId]);
-    return rows.map(mapUnitRow);
+    return resolveActorNames(rows.map(mapUnitRow));
   }
   const rows = await executeMysqlQuery(`${UNIT_SELECT} ORDER BY iu.created_at DESC`);
-  return rows.map(mapUnitRow);
+  return resolveActorNames(rows.map(mapUnitRow));
 }
 
 export async function fetchInventoryUnitEventsDirect(unitId?: string): Promise<InventoryUnitEvent[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getInventoryUnitEvents(unitId);
+    return resolveActorNames(serverDb.getInventoryUnitEvents(unitId));
   }
   if (unitId) {
     const rows = await executeMysqlQuery(
       'SELECT * FROM inventory_unit_events WHERE unit_id = ? ORDER BY date DESC, created_at DESC',
       [unitId]
     );
-    return rows.map((e: any) => mapUnitEventRow(e));
+    return resolveActorNames(rows.map((e: any) => mapUnitEventRow(e)));
   }
   const rows = await executeMysqlQuery('SELECT * FROM inventory_unit_events ORDER BY date DESC, created_at DESC');
-  return rows.map((e: any) => mapUnitEventRow(e));
+  return resolveActorNames(rows.map((e: any) => mapUnitEventRow(e)));
 }
 
 function mapUnitEventRow(e: any): InventoryUnitEvent {
@@ -484,51 +515,53 @@ function mapUnitEventRow(e: any): InventoryUnitEvent {
     saleId: e.sale_id || undefined,
     supplierId: e.party_id || undefined,
     createdAt: e.created_at,
+    // DONE-BY AUDIT (2026-11-21); name filled by resolveActorNames
+    createdById: e.created_by_id || undefined,
   };
 }
 
-export async function createInventoryUnitDirect(data: any): Promise<InventoryUnit> {
-  return serverDb.createInventoryUnit(data);
+export async function createInventoryUnitDirect(data: any, actorId?: string): Promise<InventoryUnit> {
+  return serverDb.createInventoryUnit(data, actorId);
 }
 
-export async function createInventoryUnitsBulkDirect(entries: any[]): Promise<InventoryUnit[]> {
-  return serverDb.createInventoryUnitsBulk(entries);
+export async function createInventoryUnitsBulkDirect(entries: any[], actorId?: string): Promise<InventoryUnit[]> {
+  return serverDb.createInventoryUnitsBulk(entries, actorId);
 }
 
-export async function updateInventoryUnitDirect(id: string, updates: any): Promise<InventoryUnit> {
-  return serverDb.updateInventoryUnit(id, updates);
+export async function updateInventoryUnitDirect(id: string, updates: any, actorId?: string): Promise<InventoryUnit> {
+  return serverDb.updateInventoryUnit(id, updates, actorId);
 }
 
-export async function deployInventoryUnitDirect(id: string, data: any): Promise<InventoryUnit> {
-  return serverDb.deployInventoryUnit(id, data);
+export async function deployInventoryUnitDirect(id: string, data: any, actorId?: string): Promise<InventoryUnit> {
+  return serverDb.deployInventoryUnit(id, data, actorId);
 }
 
-export async function returnInventoryUnitDirect(id: string, data: any): Promise<InventoryUnit> {
-  return serverDb.returnInventoryUnit(id, data);
+export async function returnInventoryUnitDirect(id: string, data: any, actorId?: string): Promise<InventoryUnit> {
+  return serverDb.returnInventoryUnit(id, data, actorId);
 }
 
-export async function maintainInventoryUnitDirect(id: string, data: any): Promise<InventoryUnit> {
-  return serverDb.maintainInventoryUnit(id, data);
+export async function maintainInventoryUnitDirect(id: string, data: any, actorId?: string): Promise<InventoryUnit> {
+  return serverDb.maintainInventoryUnit(id, data, actorId);
 }
 
-export async function restoreInventoryUnitDirect(id: string, data: any): Promise<InventoryUnit> {
-  return serverDb.restoreInventoryUnit(id, data);
+export async function restoreInventoryUnitDirect(id: string, data: any, actorId?: string): Promise<InventoryUnit> {
+  return serverDb.restoreInventoryUnit(id, data, actorId);
 }
 
-export async function scrapInventoryUnitDirect(id: string, data: any): Promise<InventoryUnit> {
-  return serverDb.scrapInventoryUnit(id, data);
+export async function scrapInventoryUnitDirect(id: string, data: any, actorId?: string): Promise<InventoryUnit> {
+  return serverDb.scrapInventoryUnit(id, data, actorId);
 }
 
-export async function unscrapInventoryUnitDirect(id: string, data: any): Promise<InventoryUnit> {
-  return serverDb.unscrapInventoryUnit(id, data);
+export async function unscrapInventoryUnitDirect(id: string, data: any, actorId?: string): Promise<InventoryUnit> {
+  return serverDb.unscrapInventoryUnit(id, data, actorId);
 }
 
 export async function deleteInventoryUnitDirect(id: string): Promise<boolean> {
   return serverDb.deleteInventoryUnit(id);
 }
 
-export async function markUnitsSoldDirect(unitIds: string[], saleId: string, notes?: string): Promise<InventoryUnit[]> {
-  return serverDb.markUnitsSold(unitIds, saleId, notes);
+export async function markUnitsSoldDirect(unitIds: string[], saleId: string, notes?: string, actorId?: string): Promise<InventoryUnit[]> {
+  return serverDb.markUnitsSold(unitIds, saleId, notes, actorId);
 }
 
 
@@ -547,25 +580,29 @@ export async function markUnitsSoldDirect(unitIds: string[], saleId: string, not
 // ==========================================
 
 export async function fetchSalesDirect(): Promise<Sale[]> {
-  return serverDb.getSales();
+  // DONE-BY AUDIT (2026-11-21): acting-user names resolve live from the
+  // users master on both the MySQL-rehydrated sandbox and the local sandbox.
+  return resolveActorNames(serverDb.getSales());
 }
 
 export async function fetchSaleByIdDirect(id: string): Promise<Sale | null> {
-  return serverDb.getSaleById(id) || null;
+  const raw = serverDb.getSaleById(id);
+  if (!raw) return null;
+  return (await resolveActorNames([raw]))[0];
 }
 
-export async function createSaleDirect(data: any): Promise<Sale> {
-  return serverDb.createSale(data);
+export async function createSaleDirect(data: any, actorId?: string): Promise<Sale> {
+  return serverDb.createSale(data, actorId);
 }
 
-export async function updateSaleDirect(id: string, updates: any): Promise<Sale | null> {
+export async function updateSaleDirect(id: string, updates: any, actorId?: string): Promise<Sale | null> {
   // redateCurrentStage: a master edit that inserts an order date re-dates the
   // edited (current) stage document with it — stage docs always show the
   // user-inserted order date, never a created/modified date.
-  return serverDb.updateSale(id, updates, { redateCurrentStage: true });
+  return serverDb.updateSale(id, updates, { redateCurrentStage: true }, actorId);
 }
 
-export async function addSaleStageDirect(id: string, stageInput: any): Promise<Sale | null> {
+export async function addSaleStageDirect(id: string, stageInput: any, actorId?: string): Promise<Sale | null> {
   // Master date/notes/party ride along; items are NOT pushed through
   // updateSale — the new stage owns its own rows (seeded from the current
   // stage's rows, or from stageInput.items when the caller provides them).
@@ -576,9 +613,9 @@ export async function addSaleStageDirect(id: string, stageInput: any): Promise<S
   // Party is LOCKED at creation — stage issuance never touches it.
   if (Object.keys(masterUpdates).length > 0) {
     // skipMysqlSync: addSaleStage syncs AFTER the stage save with final state
-  serverDb.updateSale(id, masterUpdates, { skipMysqlSync: true });
+  serverDb.updateSale(id, masterUpdates, { skipMysqlSync: true }, actorId);
   }
-  return serverDb.addSaleStage(id, stageInput);
+  return serverDb.addSaleStage(id, stageInput, actorId);
 }
 
 export async function deleteSaleDirect(id: string): Promise<boolean> {
@@ -595,15 +632,17 @@ export async function fetchNextRstDirect(): Promise<{ nextRst: string }> {
 // ==========================================
 
 export async function fetchSaleInvoicesDirect(): Promise<SaleInvoice[]> {
-  return serverDb.getSaleInvoices();
+  return resolveActorNames(serverDb.getSaleInvoices());
 }
 
 export async function fetchSaleInvoiceByIdDirect(id: string): Promise<SaleInvoice | null> {
-  return serverDb.getSaleInvoiceById(id) || null;
+  const raw = serverDb.getSaleInvoiceById(id);
+  if (!raw) return null;
+  return (await resolveActorNames([raw]))[0];
 }
 
-export async function createSaleInvoiceDirect(data: any): Promise<SaleInvoice> {
-  return serverDb.createSaleInvoice(data);
+export async function createSaleInvoiceDirect(data: any, actorId?: string): Promise<SaleInvoice> {
+  return serverDb.createSaleInvoice(data, actorId);
 }
 
 export async function deleteSaleInvoiceDirect(id: string): Promise<boolean> {
@@ -611,24 +650,26 @@ export async function deleteSaleInvoiceDirect(id: string): Promise<boolean> {
 }
 
 export async function fetchPurchasesDirect(): Promise<Purchase[]> {
-  return serverDb.getPurchases();
+  return resolveActorNames(serverDb.getPurchases());
 }
 
 export async function fetchPurchaseByIdDirect(id: string): Promise<Purchase | null> {
-  return serverDb.getPurchaseById(id) || null;
+  const raw = serverDb.getPurchaseById(id);
+  if (!raw) return null;
+  return (await resolveActorNames([raw]))[0];
 }
 
-export async function createPurchaseDirect(data: any): Promise<Purchase> {
-  return serverDb.createPurchase(data);
+export async function createPurchaseDirect(data: any, actorId?: string): Promise<Purchase> {
+  return serverDb.createPurchase(data, actorId);
 }
 
-export async function updatePurchaseDirect(id: string, updates: any): Promise<Purchase | null> {
+export async function updatePurchaseDirect(id: string, updates: any, actorId?: string): Promise<Purchase | null> {
   // redateCurrentStage: master-edit order-date insertions re-date the current
   // stage document (mirror of updateSaleDirect — see its comment).
-  return serverDb.updatePurchase(id, updates, { redateCurrentStage: true });
+  return serverDb.updatePurchase(id, updates, { redateCurrentStage: true }, actorId);
 }
 
-export async function addPurchaseStageDirect(id: string, stageInput: any): Promise<Purchase | null> {
+export async function addPurchaseStageDirect(id: string, stageInput: any, actorId?: string): Promise<Purchase | null> {
   // Goods-receipt saves carry the master edits + received quantities: apply
   // them to the master items BEFORE the stage save so its totals and inward
   // use them.
@@ -639,9 +680,9 @@ export async function addPurchaseStageDirect(id: string, stageInput: any): Promi
   if (stageInput.items) masterUpdates.items = stageInput.items;
   if (Object.keys(masterUpdates).length > 0) {
     // skipMysqlSync: addPurchaseStage syncs AFTER the stage save with final state
-  serverDb.updatePurchase(id, masterUpdates, { skipMysqlSync: true });
+  serverDb.updatePurchase(id, masterUpdates, { skipMysqlSync: true }, actorId);
   }
-  return serverDb.addPurchaseStage(id, stageInput);
+  return serverDb.addPurchaseStage(id, stageInput, actorId);
 }
 
 export async function deletePurchaseDirect(id: string): Promise<boolean> {
@@ -654,7 +695,7 @@ export async function deletePurchaseDirect(id: string): Promise<boolean> {
 
 export async function fetchVehiclesDirect(): Promise<Vehicle[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getVehicles();
+    return resolveActorNames(serverDb.getVehicles());
   }
   // Driver display name JOINs from the employees master — FK-only storage,
   // so renames/deactivation in Employees propagate to every vehicle display.
@@ -664,7 +705,7 @@ export async function fetchVehiclesDirect(): Promise<Vehicle[]> {
     LEFT JOIN employees e ON e.id = v.assigned_driver_id
     ORDER BY v.registration_number ASC
   `);
-  return rows.map((v: any) => ({
+  return resolveActorNames(rows.map((v: any) => ({
     id: v.id,
     vehicleNo: v.registration_number || v.vehicleNo || '',
     type: (v.type as any) || 'tipper',
@@ -678,6 +719,10 @@ export async function fetchVehiclesDirect(): Promise<Vehicle[]> {
     fitnessExpiry: v.fitness_expiry_date || v.fitnessExpiry || undefined,
     notes: v.notes || undefined,
     createdAt: v.created_at || new Date().toISOString(),
+    // DONE-BY AUDIT (2026-11-21): ids from the row; display names filled by
+    // resolveActorNames (live view of the users master — §2).
+    createdById: v.created_by_id || undefined,
+    updatedById: v.updated_by_id || undefined,
     // EMI/financing config — persisted on the vehicle row (the auto-debit
     // cron and the EMI ledger read from these columns).
     emiDetails: {
@@ -698,7 +743,7 @@ export async function fetchVehiclesDirect(): Promise<Vehicle[]> {
       lastPaymentDate: v.emi_last_payment_date || undefined,
       notes: v.emi_notes || undefined,
     },
-  }));
+  })));
 }
 
 export async function fetchDriversDirect(): Promise<Driver[]> {
@@ -778,7 +823,9 @@ export async function fetchTripSlipsDirect(): Promise<TripSlip[]> {
 export async function fetchVehicleExpensesDirect(vehicleId?: string): Promise<VehicleExpenseEntry[]> {
   if (!isMysqlConfigured()) {
     // Sandbox read — identical hydration contract as the MySQL path
-    return serverDb.getVehicleExpenseEntries(vehicleId);
+    const sandbox = serverDb.getVehicleExpenseEntries(vehicleId);
+    const filtered = vehicleId ? sandbox.filter((e: any) => e.vehicleId === vehicleId) : sandbox;
+    return resolveActorNames(filtered);
   }
   // FK-only storage (Golden Rule §2): the vehicle number and account name JOIN
   // their masters — renames in Fleet / Cash & Bank propagate to every row.
@@ -792,7 +839,7 @@ export async function fetchVehicleExpensesDirect(vehicleId?: string): Promise<Ve
      ORDER BY xe.date DESC, xe.created_at DESC`,
     vehicleId ? [vehicleId] : undefined
   );
-  return rows.map((e: any) => ({
+  const mapped = rows.map((e: any) => ({
     id: e.id,
     entryType: (e.entry_type as any) || 'expense',
     vehicleId: e.vehicle_id,
@@ -810,14 +857,18 @@ export async function fetchVehicleExpensesDirect(vehicleId?: string): Promise<Ve
     accountName: e.account_display || e.accountName || undefined,
     dieselLocationName: e.diesel_location_display || undefined,
     createdAt: e.created_at,
+    // DONE-BY AUDIT (2026-11-21)
+    createdById: e.created_by_id || undefined,
+    updatedById: e.updated_by_id || undefined,
   }));
+  return resolveActorNames(mapped);
 }
 
-export async function createVehicleExpenseDirect(slipData: any): Promise<VehicleExpenseEntry> {
+export async function createVehicleExpenseDirect(slipData: any, actorId?: string): Promise<VehicleExpenseEntry> {
   // Single writer: serverDb.addVehicleExpenseEntry owns the balance recalc,
   // the audit row, the liveSync AND the create-time document linking — this
   // function duplicates nothing (same shape as createTripSlipDirect).
-  return serverDb.addVehicleExpenseEntry(slipData);
+  return serverDb.addVehicleExpenseEntry(slipData, actorId);
 }
 
 async function syncItemLocationMappings(itemId: string, locations: any[]) {
@@ -868,8 +919,8 @@ async function syncItemLocationMappings(itemId: string, locations: any[]) {
   }
 }
 
-export async function createItemDirect(itemData: any): Promise<Item> {
-  const item = serverDb.createItem(itemData);
+export async function createItemDirect(itemData: any, actorId?: string): Promise<Item> {
+  const item = serverDb.createItem(itemData, actorId);
   if (!isMysqlConfigured()) return item;
 
   // FK store (Golden Rule §2): categoryId + unit_id only — the category name,
@@ -881,8 +932,9 @@ export async function createItemDirect(itemData: any): Promise<Item> {
       id, name, code, type, category_id, unit_id, hsn_sac_code,
       tax_rate_gst, sale_price, purchase_price, opening_stock, opening_stock_price,
       opening_stock_date, technical_specs, remarks, is_active, current_stock,
-      min_stock_level, max_capacity, last_stock_update,  created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      min_stock_level, max_capacity, last_stock_update,
+      created_by_id, updated_by_id, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       name=VALUES(name), code=VALUES(code), type=VALUES(type),
       category_id=VALUES(category_id), unit_id=VALUES(unit_id),
@@ -896,6 +948,7 @@ export async function createItemDirect(itemData: any): Promise<Item> {
       current_stock=VALUES(current_stock), min_stock_level=VALUES(min_stock_level),
       max_capacity=VALUES(max_capacity),
       last_stock_update=VALUES(last_stock_update),
+      created_by_id=VALUES(created_by_id), updated_by_id=VALUES(updated_by_id),
       updated_at=VALUES(updated_at)`,
     [
       item.id,
@@ -919,6 +972,8 @@ export async function createItemDirect(itemData: any): Promise<Item> {
       item.maxCapacity || null,
       item.lastStockUpdate || null,
       // Movements live in the stock_movements ledger only — never on the items row.
+      (item as any).createdById || null,
+      (item as any).updatedById || null,
       item.createdAt || new Date().toISOString(),
       item.updatedAt || new Date().toISOString(),
     ]
@@ -935,8 +990,8 @@ export async function createItemDirect(itemData: any): Promise<Item> {
   return item;
 }
 
-export async function updateItemDirect(id: string, updates: any): Promise<Item | null> {
-  const item = serverDb.updateItem(id, updates);
+export async function updateItemDirect(id: string, updates: any, actorId?: string): Promise<Item | null> {
+  const item = serverDb.updateItem(id, updates, actorId);
   if (!item || !isMysqlConfigured()) return item;
 
   // FK store + full-SET from the merged item (no COALESCE, no name copies —
@@ -965,6 +1020,7 @@ export async function updateItemDirect(id: string, updates: any): Promise<Item |
       movements = NULL,
       attributes = ?,
       last_stock_update = ?,
+      updated_by_id = ?,
       updated_at = ?
     WHERE id = ?`,
     [
@@ -989,6 +1045,10 @@ export async function updateItemDirect(id: string, updates: any): Promise<Item |
       // DYNAMIC ATTRIBUTES (serialized, 2026-11-16): the declared key list
       item.attributes && item.attributes.length > 0 ? JSON.stringify(item.attributes) : null,
       item.lastStockUpdate || null,
+      // DONE-BY AUDIT (2026-11-21): updated_by_id moves with the editing
+      // actor; created_by_id is deliberately NOT in this SET — the booking
+      // user is a historical fact.
+      (item as any).updatedById || null,
       item.updatedAt || new Date().toISOString(),
       id,
     ]
@@ -1052,20 +1112,20 @@ export async function createBatchDirect(batchData: any): Promise<ProductionBatch
   return batch;
 }
 
-export async function createVehicleDirect(vehData: any): Promise<Vehicle> {
-  const veh = serverDb.createVehicle(vehData);
+export async function createVehicleDirect(vehData: any, actorId?: string): Promise<Vehicle> {
+  const veh = serverDb.createVehicle(vehData, actorId);
   if (!isMysqlConfigured()) return veh;
 
   await executeMysqlQuery(
     `INSERT INTO vehicles (
       id, registration_number, type, capacity_tonnes, ownership, status,
       assigned_driver_id, insurance_expiry_date, insurance_monthly_amount,
-      fitness_expiry_date, notes, created_at,
+      fitness_expiry_date, notes, created_by_id, updated_by_id, created_at,
       emi_has_emi, emi_financier_name, emi_loan_account_number, emi_amount,
       emi_due_day, emi_loan_start_date, emi_loan_end_date, emi_total_loan_amount,
       emi_interest_rate, emi_tenure_months, emi_paid_count, emi_account_id,
       emi_auto_debit_account, emi_status, emi_last_payment_date, emi_notes
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       registration_number=VALUES(registration_number), type=VALUES(type),
       capacity_tonnes=VALUES(capacity_tonnes), ownership=VALUES(ownership),
@@ -1093,6 +1153,8 @@ export async function createVehicleDirect(vehData: any): Promise<Vehicle> {
       veh.insuranceMonthlyAmount ?? null,
       veh.fitnessExpiry || null,
       veh.notes || null,
+      (veh as any).createdById || null,
+      (veh as any).updatedById || null,
       veh.createdAt || new Date().toISOString(),
       // EMI financing config
       veh.emiDetails?.hasEmi ? 1 : 0,

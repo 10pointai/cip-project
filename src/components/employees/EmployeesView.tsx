@@ -360,12 +360,14 @@ export function EmployeesView({ focusEmployeeId, onFocusHandled, onProfileBack }
                     <th className="p-4">Compensation</th>
                     <th className="p-4">Status</th>
                     <th className="p-4 text-right">Current Balance</th>
+                    {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
+                    <th className="p-4">Created By</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--color-outline-variant)]/60 text-xs">
                   {filteredEmployees.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="p-8 text-center text-[var(--color-on-surface-variant)] font-semibold">
+                      <td colSpan={7} className="p-8 text-center text-[var(--color-on-surface-variant)] font-semibold">
                         No employees found matching filters.
                       </td>
                     </tr>
@@ -408,6 +410,10 @@ export function EmployeesView({ focusEmployeeId, onFocusHandled, onProfileBack }
                         </td>
                         <td className={`p-4 text-right font-black ${empBalance(emp.id) < 0 ? 'text-[var(--color-error)]' : 'text-[var(--color-success)]'}`}>
                           {formatCurrency(empBalance(emp.id), currencySymbol)}
+                        </td>
+                        {/* DONE-BY AUDIT (2026-11-21) */}
+                        <td className="p-4 text-[11px] font-medium text-[var(--color-on-surface)]">
+                          {emp.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
                         </td>
                       </tr>
                     ))

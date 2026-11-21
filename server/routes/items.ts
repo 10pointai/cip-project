@@ -27,6 +27,10 @@ export const itemsRouter = Router();
 
 itemsRouter.use(authenticateToken);
 
+// DONE-BY AUDIT (2026-11-21): the acting user comes from the verified
+// session; the request body is never trusted for the actor stamp.
+const actingUserId = (req: AuthenticatedRequest): string | undefined => req.user?.id;
+
 // GET /api/items — items are scoped to the caller's assigned inventory
 // locations (user rule 2026-10-30): items living only in unassigned
 // locations are hidden, and item aggregates recompute from allowed rows so
@@ -84,7 +88,7 @@ itemsRouter.post('/', requirePermission('manage_inventory'), async (req: Authent
       if (err instanceof ScopeError) return res.status(403).json({ success: false, error: err.message });
       throw err;
     }
-    const newItem = await createItemDirect(itemData);
+    const newItem = await createItemDirect(itemData, actingUserId(req));
     res.status(201).json({ success: true, message: 'Item created successfully', data: newItem });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -121,7 +125,7 @@ itemsRouter.put('/:id', requirePermission('manage_inventory'), async (req: Authe
       if (err instanceof ScopeError) return res.status(403).json({ success: false, error: err.message });
       throw err;
     }
-    const updated = await updateItemDirect(req.params.id, req.body);
+    const updated = await updateItemDirect(req.params.id, req.body, actingUserId(req));
     if (!updated) {
       return res.status(404).json({ success: false, error: 'Item not found' });
     }
@@ -184,16 +188,16 @@ categoriesRouter.get('/', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-categoriesRouter.post('/', requirePermission('manage_inventory'), (req, res) => {
+categoriesRouter.post('/', requirePermission('manage_inventory'), (req: AuthenticatedRequest, res) => {
   try {
-    res.status(201).json({ success: true, data: serverDb.createCategory(req.body) });
+    res.status(201).json({ success: true, data: serverDb.createCategory(req.body, actingUserId(req)) });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-categoriesRouter.put('/:id', requirePermission('manage_inventory'), (req, res) => {
+categoriesRouter.put('/:id', requirePermission('manage_inventory'), (req: AuthenticatedRequest, res) => {
   try {
-    res.json({ success: true, data: serverDb.updateCategory(req.params.id, req.body) });
+    res.json({ success: true, data: serverDb.updateCategory(req.params.id, req.body, actingUserId(req)) });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -216,16 +220,16 @@ unitsRouter.get('/', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-unitsRouter.post('/', requirePermission('manage_inventory'), (req, res) => {
+unitsRouter.post('/', requirePermission('manage_inventory'), (req: AuthenticatedRequest, res) => {
   try {
-    res.status(201).json({ success: true, data: serverDb.createUnit(req.body) });
+    res.status(201).json({ success: true, data: serverDb.createUnit(req.body, actingUserId(req)) });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-unitsRouter.put('/:id', requirePermission('manage_inventory'), (req, res) => {
+unitsRouter.put('/:id', requirePermission('manage_inventory'), (req: AuthenticatedRequest, res) => {
   try {
-    res.json({ success: true, data: serverDb.updateUnit(req.params.id, req.body) });
+    res.json({ success: true, data: serverDb.updateUnit(req.params.id, req.body, actingUserId(req)) });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -252,9 +256,9 @@ locationsRouter.get('/', async (req: AuthenticatedRequest, res: Response) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-locationsRouter.post('/', requirePermission('manage_inventory'), (req, res) => {
+locationsRouter.post('/', requirePermission('manage_inventory'), (req: AuthenticatedRequest, res) => {
   try {
-    res.status(201).json({ success: true, data: serverDb.createLocation(req.body) });
+    res.status(201).json({ success: true, data: serverDb.createLocation(req.body, actingUserId(req)) });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -267,7 +271,7 @@ locationsRouter.put('/:id', requirePermission('manage_inventory'), async (req: A
     if (scope.restricted && !scope.allowed.has(req.params.id)) {
       return res.status(403).json({ success: false, error: 'Cannot modify a location outside your assigned inventory locations.' });
     }
-    res.json({ success: true, data: serverDb.updateLocation(req.params.id, req.body) });
+    res.json({ success: true, data: serverDb.updateLocation(req.params.id, req.body, actingUserId(req)) });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -306,7 +310,7 @@ stockAdjustmentsRouter.post('/', requirePermission('manage_inventory'), async (r
       if (err instanceof ScopeError) return res.status(403).json({ success: false, error: err.message });
       throw err;
     }
-    const adj = serverDb.createStockAdjustment(req.body);
+    const adj = serverDb.createStockAdjustment(req.body, actingUserId(req));
     // Include the freshly-stocked item so the client gets an authoritative snapshot
     const item = serverDb.getItemById(adj.itemId) || null;
     res.status(201).json({ success: true, data: adj, item });

@@ -371,12 +371,14 @@ export function EmployeeLedgerView({ employees, focusedEmpId }: EmployeeLedgerVi
                 <th className="p-4 min-w-[140px]">Amount</th>
                 <th className="p-4">Ledger Entry</th>
                 <th className="p-4">Employee Balance</th>
+                {/* DONE-BY AUDIT (2026-11-21): manual payroll rows only — engine accruals show — */}
+                <th className="p-4">Recorded By</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--color-outline-variant)]/60 text-xs">
               {displayLines.length === 0 ? (
                 <tr>
-                  <td colSpan={focusEmp ? 6 : 7} className="p-8 text-center text-[var(--color-on-surface-variant)] font-semibold">
+                  <td colSpan={focusEmp ? 7 : 8} className="p-8 text-center text-[var(--color-on-surface-variant)] font-semibold">
                     No transactions yet — record the first entry (opening balances are carried on each employee's card).
                   </td>
                 </tr>
@@ -445,6 +447,12 @@ export function EmployeeLedgerView({ employees, focusedEmpId }: EmployeeLedgerVi
                       </td>
                       <td className="p-4 font-black text-[var(--color-on-surface)]">
                         {formatCurrency(line.balance, currencySymbol)}
+                      </td>
+                      {/* DONE-BY AUDIT (2026-11-21): only employer-entered rows carry a recorder; wage accruals are engine rows */}
+                      <td className="p-4 text-[11px] font-medium text-[var(--color-on-surface)]">
+                        {line.source === 'accrual_engine' || line.type === 'wage_accrual'
+                          ? <span className="text-[var(--color-outline)]">—</span>
+                          : (line.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>)}
                       </td>
                     </tr>
                   );

@@ -39,7 +39,46 @@ function mapTransactionRow(t: any): Transaction {
     status: t.status || 'paid',
     dueDate: t.due_date || undefined,
     createdAt: t.created_at,
+    // DONE-BY AUDIT (2026-11-21): ids from the row; display names are filled
+    // by resolveActorNames below (live view of the users master — §2).
+    createdById: t.created_by_id || undefined,
+    updatedById: t.updated_by_id || undefined,
   };
+}
+
+/**
+ * DONE-BY AUDIT (2026-11-21) — resolves the acting-user display names on
+ * fetched ids. Golden Rule §2: only the user FK is stored on the row; the
+ * name (full_name, falling back to the username) is a LIVE VIEW of the users
+ * master — renames propagate everywhere, and a deleted user's rows simply
+ * show blank. Works for both the MySQL path (users table) and the sandbox
+ * fallback (serverDb.getUsers()).
+ */
+export async function resolveActorNames<
+  T extends { createdById?: string; updatedById?: string; createdByName?: string; updatedByName?: string }
+>(rows: T[]): Promise<T[]> {
+  const ids = new Set<string>();
+  for (const r of rows) {
+    if (r.createdById) ids.add(r.createdById);
+    if (r.updatedById) ids.add(r.updatedById);
+  }
+  if (ids.size === 0) return rows;
+  let userRows: Array<{ id: string; full_name?: string; fullName?: string; username?: string }> = [];
+  try {
+    if (isMysqlConfigured()) {
+      userRows = await executeMysqlQuery('SELECT id, full_name, username FROM users');
+    } else {
+      userRows = (serverDb.getUsers() || []) as any;
+    }
+  } catch {
+    return rows; // a users lookup failure never breaks the main read
+  }
+  const nameById = new Map(userRows.map((u) => [u.id, String(u.full_name || u.fullName || '').trim() || (u.username || '')]));
+  for (const r of rows) {
+    if (r.createdById) r.createdByName = nameById.get(r.createdById);
+    if (r.updatedById) r.updatedByName = nameById.get(r.updatedById);
+  }
+  return rows;
 }
 
 function mapPartyRow(p: any): Party {
@@ -70,6 +109,10 @@ function mapPartyRow(p: any): Party {
     isActive: Boolean(p.is_active),
     createdAt: p.created_at,
     updatedAt: p.updated_at,
+    // DONE-BY AUDIT (2026-11-21): ids from the row; display names are filled
+    // by resolveActorNames below (live view of the users master — §2).
+    createdById: p.created_by_id || undefined,
+    updatedById: p.updated_by_id || undefined,
   };
 }
 
@@ -89,6 +132,10 @@ function mapAccountRow(a: any): CashBankAccount {
     isActive: Boolean(a.is_active),
     createdAt: a.created_at,
     updatedAt: a.updated_at,
+    // DONE-BY AUDIT (2026-11-21): ids from the row; display names filled by
+    // resolveActorNames below (live view of the users master — §2).
+    createdById: a.created_by_id || undefined,
+    updatedById: a.updated_by_id || undefined,
   };
 }
 
@@ -98,7 +145,7 @@ function mapAccountRow(a: any): CashBankAccount {
 
 export async function fetchTransactionsDirect(filter: { partyId?: string; type?: string; status?: string }): Promise<Transaction[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getTransactions(filter);
+    return resolveActorNames(serverDb.getTransactions(filter));
   }
 
   // partyName AND accountName are LIVE VIEWS (Golden Rule §2): JOIN the
@@ -126,12 +173,14 @@ export async function fetchTransactionsDirect(filter: { partyId?: string; type?:
   sql += ' ORDER BY t.date DESC, t.created_at DESC';
 
   const rows = await executeMysqlQuery(sql, params);
-  return rows.map(mapTransactionRow);
+  return resolveActorNames(rows.map(mapTransactionRow));
 }
 
 export async function fetchTransactionByIdDirect(id: string): Promise<Transaction | null> {
   if (!isMysqlConfigured()) {
-    return serverDb.getTransactionById(id) || null;
+    const raw = serverDb.getTransactionById(id);
+    if (!raw) return null;
+    return (await resolveActorNames([raw as Transaction]))[0];
   }
   // JOIN-resolved read model (party/account names live via masters — §2)
   const row = await executeMysqlOne(
@@ -142,7 +191,8 @@ export async function fetchTransactionByIdDirect(id: string): Promise<Transactio
      WHERE t.id = ?`,
     [id]
   );
-  return row ? mapTransactionRow(row) : null;
+  if (!row) return null;
+  return (await resolveActorNames([mapTransactionRow(row)]))[0];
 }
 
 export async function deleteTransactionDirect(id: string): Promise<boolean> {
@@ -205,7 +255,7 @@ export async function deleteTransactionDirect(id: string): Promise<boolean> {
 
 export async function fetchPartiesDirect(filter: { type?: string; category?: string; query?: string }): Promise<Party[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getParties(filter);
+    return resolveActorNames(serverDb.getParties(filter));
   }
 
   let sql = 'SELECT * FROM parties WHERE 1=1';
@@ -227,19 +277,22 @@ export async function fetchPartiesDirect(filter: { type?: string; category?: str
 
   sql += ' ORDER BY name ASC';
   const rows = await executeMysqlQuery(sql, params);
-  return rows.map(mapPartyRow);
+  return resolveActorNames(rows.map(mapPartyRow));
 }
 
 export async function fetchPartyByIdDirect(id: string): Promise<Party | null> {
   if (!isMysqlConfigured()) {
-    return serverDb.getPartyById(id) || null;
+    const raw = serverDb.getPartyById(id);
+    if (!raw) return null;
+    return (await resolveActorNames([raw as Party]))[0];
   }
   const row = await executeMysqlOne('SELECT * FROM parties WHERE id = ?', [id]);
-  return row ? mapPartyRow(row) : null;
+  if (!row) return null;
+  return (await resolveActorNames([mapPartyRow(row)]))[0];
 }
 
-export async function createPartyDirect(partyData: any): Promise<Party> {
-  const created = serverDb.createParty(partyData);
+export async function createPartyDirect(partyData: any, actorId?: string): Promise<Party> {
+  const created = serverDb.createParty(partyData, actorId);
   if (!isMysqlConfigured()) {
     return created;
   }
@@ -248,14 +301,15 @@ export async function createPartyDirect(partyData: any): Promise<Party> {
     `INSERT INTO parties (
       id, name, trade_name, type, category, gstin, pan, contact_person, phone, email,
       address, payment_terms_days, credit_limit, opening_balance, opening_balance_type,
-      current_balance, notes, is_active, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      current_balance, notes, is_active, created_by_id, updated_by_id, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       name=VALUES(name), trade_name=VALUES(trade_name), type=VALUES(type), category=VALUES(category),
       gstin=VALUES(gstin), pan=VALUES(pan), contact_person=VALUES(contact_person), phone=VALUES(phone),
       email=VALUES(email), address=VALUES(address), payment_terms_days=VALUES(payment_terms_days),
       credit_limit=VALUES(credit_limit), opening_balance=VALUES(opening_balance),
       current_balance=VALUES(current_balance), notes=VALUES(notes), is_active=VALUES(is_active),
+      created_by_id=VALUES(created_by_id), updated_by_id=VALUES(updated_by_id),
       updated_at=VALUES(updated_at)`,
     [
       created.id,
@@ -276,6 +330,8 @@ export async function createPartyDirect(partyData: any): Promise<Party> {
       created.currentBalance || 0,
       created.notes || null,
       created.isActive ?? true,
+      (created as any).createdById || null,
+      (created as any).updatedById || null,
       created.createdAt,
       created.updatedAt || created.createdAt,
     ]
@@ -283,10 +339,11 @@ export async function createPartyDirect(partyData: any): Promise<Party> {
   return created;
 }
 
-export async function updatePartyDirect(id: string, updates: any): Promise<Party> {
+export async function updatePartyDirect(id: string, updates: any, actorId?: string): Promise<Party> {
   // serverDb.updateParty merges updates, recalculates the balance from the
   // opening balance + all vouchers, and live-syncs the full row to MySQL.
-  const updated = await serverDb.updateParty(id, updates);
+  // actorId (DONE-BY AUDIT 2026-11-21) stamps updated_by_id on the row.
+  const updated = await serverDb.updateParty(id, updates, actorId);
   if (!isMysqlConfigured()) {
     return updated;
   }
@@ -294,6 +351,8 @@ export async function updatePartyDirect(id: string, updates: any): Promise<Party
   // FULL SET from the merged party (no COALESCE): every field on the form is
   // authoritative, including values the user CLEARED (sent as ''/0) — and
   // opening_balance / opening_balance_type / recalculated current_balance.
+  // created_by_id is deliberately NOT in this set — the booking user is a
+  // historical fact (updated_by_id below carries the editing actor).
   await executeMysqlQuery(
     `UPDATE parties SET
       name = ?,
@@ -313,6 +372,7 @@ export async function updatePartyDirect(id: string, updates: any): Promise<Party
       current_balance = ?,
       notes = ?,
       is_active = ?,
+      updated_by_id = ?,
       updated_at = ?
     WHERE id = ?`,
     [
@@ -333,6 +393,7 @@ export async function updatePartyDirect(id: string, updates: any): Promise<Party
       updated.currentBalance || 0,
       updated.notes || null,
       updated.isActive ?? true,
+      (updated as any).updatedById || null,
       updated.updatedAt || new Date().toISOString(),
       id,
     ]
@@ -356,23 +417,26 @@ export async function deletePartyDirect(id: string): Promise<boolean> {
 
 export async function fetchAccountsDirect(): Promise<CashBankAccount[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getAccounts();
+    return resolveActorNames(serverDb.getAccounts());
   }
   const rows = await executeMysqlQuery('SELECT * FROM cash_bank_accounts ORDER BY name ASC');
-  return rows.map(mapAccountRow);
+  return resolveActorNames(rows.map(mapAccountRow));
 }
 
 export async function fetchAccountByIdDirect(id: string): Promise<CashBankAccount | null> {
   if (!isMysqlConfigured()) {
-    return serverDb.getAccountById(id) || null;
+    const raw = serverDb.getAccountById(id);
+    if (!raw) return null;
+    return (await resolveActorNames([raw as CashBankAccount]))[0];
   }
   const row = await executeMysqlOne('SELECT * FROM cash_bank_accounts WHERE id = ?', [id]);
-  return row ? mapAccountRow(row) : null;
+  if (!row) return null;
+  return (await resolveActorNames([mapAccountRow(row)]))[0];
 }
 
 export async function fetchTransfersDirect(): Promise<InternalTransfer[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getTransfers();
+    return resolveActorNames(serverDb.getTransfers());
   }
   // Account display names resolved with JOINs against the account master
   // (Golden Rule §2) so account renames propagate to every transfer display.
@@ -383,7 +447,7 @@ export async function fetchTransfersDirect(): Promise<InternalTransfer[]> {
      LEFT JOIN cash_bank_accounts ta ON ta.id = tr.to_account_id
      ORDER BY tr.date DESC, tr.created_at DESC`
   );
-  return rows.map((r: any) => ({
+  const mapped = rows.map((r: any) => ({
     id: r.id,
     transferNumber: r.transfer_number,
     date: r.date,
@@ -396,12 +460,17 @@ export async function fetchTransfersDirect(): Promise<InternalTransfer[]> {
     referenceNumber: r.reference_number || undefined,
     notes: r.notes || undefined,
     createdAt: r.created_at,
+    // DONE-BY AUDIT (2026-11-21): ids from the row; names filled by
+    // resolveActorNames below (§2).
+    createdById: r.created_by_id || undefined,
+    updatedById: r.updated_by_id || undefined,
   }));
+  return resolveActorNames(mapped);
 }
 
 export async function fetchAdjustmentsDirect(): Promise<AccountAdjustment[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getAdjustments();
+    return resolveActorNames(serverDb.getAdjustments());
   }
   // Account display name/type resolved with JOINs (Golden Rule §2).
   const rows = await executeMysqlQuery(
@@ -410,7 +479,7 @@ export async function fetchAdjustmentsDirect(): Promise<AccountAdjustment[]> {
      LEFT JOIN cash_bank_accounts acc ON acc.id = aj.account_id
      ORDER BY aj.date DESC, aj.created_at DESC`
   );
-  return rows.map((r: any) => ({
+  const mapped = rows.map((r: any) => ({
     id: r.id,
     adjustmentNumber: r.adjustment_number,
     accountId: r.account_id,
@@ -425,5 +494,10 @@ export async function fetchAdjustmentsDirect(): Promise<AccountAdjustment[]> {
     referenceNumber: r.reference_number || undefined,
     notes: r.notes || undefined,
     createdAt: r.created_at,
+    // DONE-BY AUDIT (2026-11-21): ids from the row; names filled by
+    // resolveActorNames below (§2).
+    createdById: r.created_by_id || undefined,
+    updatedById: r.updated_by_id || undefined,
   }));
+  return resolveActorNames(mapped);
 }

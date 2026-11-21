@@ -1,15 +1,15 @@
 import { getMysqlPool, isMysqlConfigured } from './connection';
 import { serverDb } from '../db';
 
-export async function writeTransactionACID(txnData: any) {
+export async function writeTransactionACID(txnData: any, actorId?: string) {
   if (!isMysqlConfigured()) {
-    const created = serverDb.createTransaction(txnData);
+    const created = serverDb.createTransaction(txnData, false, actorId);
     return { executedOnAzure: false, message: 'Executed on local storage (MySQL not configured)', data: created };
   }
 
   const pool = getMysqlPool();
   if (!pool) {
-    const created = serverDb.createTransaction(txnData);
+    const created = serverDb.createTransaction(txnData, false, actorId);
     return { executedOnAzure: false, message: 'MySQL pool unavailable, used local storage', data: created };
   }
 
@@ -37,9 +37,11 @@ export async function writeTransactionACID(txnData: any) {
 
     await conn.query(
       // FKs only (Golden Rule §2): no party_name/account_name copies stored;
-      // display names JOIN from the masters at read time.
-      `INSERT INTO transactions (id, voucher_number, date, account_id, type, party_id, amount, payment_mode, reference_number, material_or_service, quantity_tonnes, description, status, due_date, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      // display names JOIN from the masters at read time. DONE-BY AUDIT
+      // (2026-11-21): actor ids are the session user's (server-stamped,
+      // never client-supplied); display names JOIN from users at read time.
+      `INSERT INTO transactions (id, voucher_number, date, account_id, type, party_id, amount, payment_mode, reference_number, material_or_service, quantity_tonnes, description, status, due_date, created_at, created_by_id, updated_by_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
        voucher_number = VALUES(voucher_number),
        date = VALUES(date),
@@ -53,8 +55,9 @@ export async function writeTransactionACID(txnData: any) {
        quantity_tonnes = VALUES(quantity_tonnes),
        description = VALUES(description),
        status = VALUES(status),
-       due_date = VALUES(due_date)`,
-      [id, voucherNumber, date, accountId, type, partyId, amount, paymentMode, referenceNumber, materialOrService, quantityTonnes, description, status, dueDate, createdAt]
+       due_date = VALUES(due_date),
+       updated_by_id = COALESCE(VALUES(updated_by_id), updated_by_id)`,
+      [id, voucherNumber, date, accountId, type, partyId, amount, paymentMode, referenceNumber, materialOrService, quantityTonnes, description, status, dueDate, createdAt, actorId || null, actorId || null]
     );
 
     if (partyId) {
@@ -113,7 +116,7 @@ export async function writeTransactionACID(txnData: any) {
       status,
       dueDate,
       createdAt,
-    }, true);
+    }, true, actorId);
 
     return {
       executedOnAzure: true,
@@ -141,22 +144,22 @@ export async function writeItemStockAdjustmentACID(itemId: string, delta: number
   };
 }
 
-export async function writeProductionBatchACID(batchData: any) {
+export async function writeProductionBatchACID(batchData: any, actorId?: string) {
   if (!isMysqlConfigured()) {
-    const created = serverDb.createProductionBatch(batchData);
+    const created = serverDb.createProductionBatch(batchData, actorId);
     return { executedOnAzure: false, message: 'Executed on local storage (MySQL not configured)', data: created };
   }
 
   const pool = getMysqlPool();
   if (!pool) {
-    const created = serverDb.createProductionBatch(batchData);
+    const created = serverDb.createProductionBatch(batchData, actorId);
     return { executedOnAzure: false, message: 'MySQL pool unavailable', data: created };
   }
 
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
-    const created = serverDb.createProductionBatch(batchData);
+    const created = serverDb.createProductionBatch(batchData, actorId);
     await conn.commit();
     return {
       executedOnAzure: true,

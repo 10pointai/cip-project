@@ -542,8 +542,13 @@ class ServerLocalDatabase {
     return this.data.settings;
   }
 
-  public updateSettings(updates: Partial<CompanySettings>): CompanySettings {
+  public updateSettings(updates: Partial<CompanySettings>, actorId?: string): CompanySettings {
     this.data.settings = { ...this.data.settings, ...updates };
+    // DONE-BY AUDIT (2026-11-21): a settings edit never takes the actor from
+    // the client body; a legacy row without a stamp adopts the first saver.
+    delete (this.data.settings as any).updatedById;
+    delete (this.data.settings as any).updatedByName;
+    if (actorId) this.data.settings.updatedById = actorId;
     this.logAudit('UPDATE', 'SETTINGS', undefined, `Updated company profile: ${this.data.settings.companyName}`);
     this.save();
     liveSyncSettings(this.data.settings);
@@ -577,7 +582,11 @@ class ServerLocalDatabase {
     return this.data.parties.find((p) => p.id === id);
   }
 
-  public createParty(partyData: Omit<Party, 'id' | 'createdAt' | 'updatedAt' | 'currentBalance'> & { currentBalance?: number }): Party {
+  // DONE-BY AUDIT (2026-11-21): every mutating entry point takes an optional
+  // trailing actorId (the server-stamped session user) and stamps it onto the
+  // row — createdById on create, updatedById on edit. The stamping is done
+  // HERE (the sandbox the MySQL layer mirrors), never on the client.
+  public createParty(partyData: Omit<Party, 'id' | 'createdAt' | 'updatedAt' | 'currentBalance'> & { currentBalance?: number }, actorId?: string): Party {
     // Monotonic clock id: concurrent creates must never share an id
     const newId = `pty-${this.nextLedgerMs()}`;
     // documentIds ride the create payload like createSale's flow — staged
@@ -599,6 +608,8 @@ class ServerLocalDatabase {
       currentBalance: initialBal,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      createdById: actorId || (partyData as any).createdById,
+      updatedById: actorId || (partyData as any).updatedById,
     };
 
     this.data.parties.unshift(newParty);
@@ -641,16 +652,23 @@ class ServerLocalDatabase {
     return created;
   }
 
-  public updateParty(id: string, updates: Partial<Party>): Party {
+  public updateParty(id: string, updates: Partial<Party>, actorId?: string): Party {
     const index = this.data.parties.findIndex((p) => p.id === id);
     if (index === -1) throw new Error(`Party ${id} not found.`);
     // Defensive strip: edit-mode uploads link immediately via the documents
     // endpoint, so documentIds should never ride an update — never persist it.
     delete (updates as any).documentIds;
+    // A party master edit must never rewrite createdById (strip any client
+    // forgery); updatedById moves only with a real acting user.
+    delete (updates as any).createdById;
+    delete (updates as any).updatedById;
+    delete (updates as any).createdByName;
+    delete (updates as any).updatedByName;
     const updated = {
       ...this.data.parties[index],
       ...updates,
       updatedAt: new Date().toISOString(),
+      ...(actorId ? { updatedById: actorId } : {}),
     };
     this.data.parties[index] = updated;
     this.recalculatePartyBalance(id);
@@ -710,16 +728,26 @@ class ServerLocalDatabase {
     return t ? this.hydrateTransactionParty(t) : undefined;
   }
 
-  public createTransaction(data: Omit<Transaction, 'id' | 'createdAt'> & { id?: string; createdAt?: string }, skipLiveSync: boolean = false): Transaction {
+  public createTransaction(data: Omit<Transaction, 'id' | 'createdAt'> & { id?: string; createdAt?: string }, skipLiveSync: boolean = false, actorId?: string): Transaction {
     const newId = data.id || `txn-${Date.now()}`;
     const newTxn: Transaction = {
       ...data,
       id: newId,
       createdAt: data.createdAt || new Date().toISOString(),
+      createdById: actorId || (data as any).createdById,
+      updatedById: actorId || (data as any).updatedById,
     };
     const existingIndex = this.data.transactions.findIndex((t) => t.id === newId);
     if (existingIndex !== -1) {
-      this.data.transactions[existingIndex] = newTxn;
+      // Upsert-replace (idempotent re-run of the same stage save): the
+      // ORIGINAL journal voucher's booking user is a historical fact — keep
+      // their createdById even when a later re-save replays the row; only
+      // updatedById moves when a real actor is present.
+      this.data.transactions[existingIndex] = {
+        ...newTxn,
+        createdById: this.data.transactions[existingIndex].createdById || newTxn.createdById,
+        updatedById: actorId || newTxn.updatedById,
+      };
     } else {
       this.data.transactions.unshift(newTxn);
     }
@@ -735,11 +763,21 @@ class ServerLocalDatabase {
     return newTxn;
   }
 
-  public updateTransaction(id: string, updates: Partial<Transaction>): Transaction {
+  public updateTransaction(id: string, updates: Partial<Transaction>, actorId?: string): Transaction {
     const index = this.data.transactions.findIndex((t) => t.id === id);
     if (index === -1) throw new Error(`Transaction ${id} not found.`);
     const previous = this.data.transactions[index];
-    const updated = { ...previous, ...updates };
+    // A voucher edit never rewrites who booked it (strip client forgery);
+    // updatedById moves only with a real acting user.
+    delete (updates as any).createdById;
+    delete (updates as any).updatedById;
+    delete (updates as any).createdByName;
+    delete (updates as any).updatedByName;
+    const updated = {
+      ...previous,
+      ...updates,
+      ...(actorId ? { updatedById: actorId } : {}),
+    };
     this.data.transactions[index] = updated;
 
     this.recalculatePartyBalance(updated.partyId);
@@ -863,7 +901,7 @@ class ServerLocalDatabase {
     return raw ? this.hydrateItemWithMovements(raw) : undefined;
   }
 
-  public createItem(data: Partial<Item>): Item {
+  public createItem(data: Partial<Item>, actorId?: string): Item {
     const newId = data.id || `itm-${Date.now()}`;
     // documentIds ride the create payload like createParty's flow — staged
     // uploads (Pending/*) registered while the form was open; strip before
@@ -943,6 +981,9 @@ class ServerLocalDatabase {
       id: newId,
       createdAt: data.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      // DONE-BY AUDIT (2026-11-21): the session user who registered the item
+      createdById: actorId || (data as any).createdById,
+      updatedById: actorId || (data as any).updatedById,
     };
     // Movements are ledger-only: never persist movement history on the item row.
     // valuationRate/stockValue are read-time computations — likewise never persisted.
@@ -973,14 +1014,20 @@ class ServerLocalDatabase {
     return newItem;
   }
 
-  public updateItem(id: string, updates: Partial<Item>): Item {
+  public updateItem(id: string, updates: Partial<Item>, actorId?: string): Item {
     const index = this.data.items.findIndex((i) => i.id === id);
     if (index === -1) {
-      return this.createItem({ ...updates, id });
+      return this.createItem({ ...updates, id }, actorId);
     }
     // Defensive strip: edit-mode uploads link immediately via the documents
     // endpoint, so documentIds should never ride an update — never persist it.
     delete (updates as any).documentIds;
+    // DONE-BY AUDIT (2026-11-21): a master edit never rewrites the booking
+    // user (strip client forgery); updatedById moves only with a real actor.
+    delete (updates as any).createdById;
+    delete (updates as any).updatedById;
+    delete (updates as any).createdByName;
+    delete (updates as any).updatedByName;
     // TYPE SANITATION (2026-11-17): same as createItem — a corrupted
     // (event-object) type never re-persists; the field is simply dropped so
     // the stored value survives.
@@ -1051,6 +1098,7 @@ class ServerLocalDatabase {
       stockLocation: stockLocationStr,
       id,
       updatedAt: new Date().toISOString(),
+      ...(actorId ? { updatedById: actorId } : {}),
     };
     // DYNAMIC ATTRIBUTES (serialized, 2026-11-16): a trackable item's key list
     // may grow/change while its units live — existing units keep their stored
@@ -1291,7 +1339,7 @@ class ServerLocalDatabase {
     return this.data.categories;
   }
 
-  public createCategory(cat: Partial<ItemCategory>): ItemCategory {
+  public createCategory(cat: Partial<ItemCategory>, actorId?: string): ItemCategory {
     const newId = cat.id || `cat-${Date.now()}`;
     const existingIdx = this.data.categories.findIndex((c) => c.id === newId);
     const newCat: ItemCategory = {
@@ -1302,6 +1350,9 @@ class ServerLocalDatabase {
       ...cat,
       id: newId,
       createdAt: cat.createdAt || new Date().toISOString(),
+      // DONE-BY AUDIT (2026-11-21)
+      createdById: actorId || (cat as any).createdById,
+      updatedById: actorId || (cat as any).updatedById,
     };
     if (existingIdx !== -1) {
       this.data.categories[existingIdx] = newCat;
@@ -1313,12 +1364,15 @@ class ServerLocalDatabase {
     return newCat;
   }
 
-  public updateCategory(id: string, updates: Partial<ItemCategory>): ItemCategory {
+  public updateCategory(id: string, updates: Partial<ItemCategory>, actorId?: string): ItemCategory {
     const idx = this.data.categories.findIndex((c) => c.id === id);
     if (idx === -1) {
-      return this.createCategory({ ...updates, id });
+      return this.createCategory({ ...updates, id }, actorId);
     }
-    this.data.categories[idx] = { ...this.data.categories[idx], ...updates, id };
+    // DONE-BY AUDIT (2026-11-21): only a real actor moves updatedById
+    delete (updates as any).createdById;
+    delete (updates as any).createdByName;
+    this.data.categories[idx] = { ...this.data.categories[idx], ...updates, id, ...(actorId ? { updatedById: actorId } : {}) };
     this.save();
     liveSyncCategory(this.data.categories[idx]);
     return this.data.categories[idx];
@@ -1338,7 +1392,7 @@ class ServerLocalDatabase {
     return this.data.units;
   }
 
-  public createUnit(unit: Partial<ItemUnit>): ItemUnit {
+  public createUnit(unit: Partial<ItemUnit>, actorId?: string): ItemUnit {
     const newId = unit.id || `unit-${Date.now()}`;
     const existingIdx = this.data.units.findIndex((u) => u.id === newId);
     const newUnit: ItemUnit = {
@@ -1348,6 +1402,9 @@ class ServerLocalDatabase {
       isStandard: Boolean(unit.isStandard),
       ...unit,
       id: newId,
+      // DONE-BY AUDIT (2026-11-21)
+      createdById: actorId || (unit as any).createdById,
+      updatedById: actorId || (unit as any).updatedById,
     };
     if (existingIdx !== -1) {
       this.data.units[existingIdx] = newUnit;
@@ -1359,12 +1416,15 @@ class ServerLocalDatabase {
     return newUnit;
   }
 
-  public updateUnit(id: string, updates: Partial<ItemUnit>): ItemUnit {
+  public updateUnit(id: string, updates: Partial<ItemUnit>, actorId?: string): ItemUnit {
     const idx = this.data.units.findIndex((u) => u.id === id);
     if (idx === -1) {
-      return this.createUnit({ ...updates, id });
+      return this.createUnit({ ...updates, id }, actorId);
     }
-    this.data.units[idx] = { ...this.data.units[idx], ...updates, id };
+    // DONE-BY AUDIT (2026-11-21): only a real actor moves updatedById
+    delete (updates as any).createdById;
+    delete (updates as any).createdByName;
+    this.data.units[idx] = { ...this.data.units[idx], ...updates, id, ...(actorId ? { updatedById: actorId } : {}) };
     this.save();
     liveSyncUnit(this.data.units[idx]);
     return this.data.units[idx];
@@ -1384,7 +1444,7 @@ class ServerLocalDatabase {
     return this.data.locations;
   }
 
-  public createLocation(loc: Partial<ItemLocation>): ItemLocation {
+  public createLocation(loc: Partial<ItemLocation>, actorId?: string): ItemLocation {
     const newId = loc.id || `loc-${Date.now()}`;
     const existingIdx = this.data.locations.findIndex((l) => l.id === newId);
     const newLoc: ItemLocation = {
@@ -1397,6 +1457,9 @@ class ServerLocalDatabase {
       ...loc,
       id: newId,
       createdAt: loc.createdAt || new Date().toISOString(),
+      // DONE-BY AUDIT (2026-11-21)
+      createdById: actorId || (loc as any).createdById,
+      updatedById: actorId || (loc as any).updatedById,
     };
     if (existingIdx !== -1) {
       this.data.locations[existingIdx] = newLoc;
@@ -1408,12 +1471,15 @@ class ServerLocalDatabase {
     return newLoc;
   }
 
-  public updateLocation(id: string, updates: Partial<ItemLocation>): ItemLocation {
+  public updateLocation(id: string, updates: Partial<ItemLocation>, actorId?: string): ItemLocation {
     const idx = this.data.locations.findIndex((l) => l.id === id);
     if (idx === -1) {
-      return this.createLocation({ ...updates, id });
+      return this.createLocation({ ...updates, id }, actorId);
     }
-    this.data.locations[idx] = { ...this.data.locations[idx], ...updates, id };
+    // DONE-BY AUDIT (2026-11-21): only a real actor moves updatedById
+    delete (updates as any).createdById;
+    delete (updates as any).createdByName;
+    this.data.locations[idx] = { ...this.data.locations[idx], ...updates, id, ...(actorId ? { updatedById: actorId } : {}) };
     this.save();
     liveSyncLocation(this.data.locations[idx]);
     return this.data.locations[idx];
@@ -1498,7 +1564,7 @@ class ServerLocalDatabase {
     return (this.data.stockAdjustments || []).map((a) => this.hydrateStockAdjustment(a));
   }
 
-  public createStockAdjustment(adjData: Partial<ItemStockAdjustment>): ItemStockAdjustment {
+  public createStockAdjustment(adjData: Partial<ItemStockAdjustment>, actorId?: string): ItemStockAdjustment {
     if (!this.data.stockAdjustments) {
       this.data.stockAdjustments = [];
     }
@@ -1586,6 +1652,9 @@ class ServerLocalDatabase {
       referenceNumber: adjData.referenceNumber || '',
       notes: adjData.notes || '',
       createdAt: adjData.createdAt || new Date().toISOString(),
+      // DONE-BY AUDIT (2026-11-21): the session user who recorded the voucher
+      createdById: actorId || (adjData as any).createdById,
+      updatedById: actorId || (adjData as any).updatedById,
     };
     // Store the FK of the chosen storage location (display name is resolved at read time)
     if (isTransfer) {
@@ -1885,7 +1954,7 @@ class ServerLocalDatabase {
 
   /** Post (idempotently, by id) the sale_invoice journal voucher for the
    *  invoice stage — amount is a statutory snapshot of the stage total. */
-  private upsertSaleInvoiceVoucher(sale: Sale, stage: SalesOrderStage): string {
+  private upsertSaleInvoiceVoucher(sale: Sale, stage: SalesOrderStage, actorId?: string): string {
     const party = this.data.parties.find((p) => p.id === sale.partyId);
     const existingVoucher = sale.invoiceVoucherId
       ? (this.data.transactions || []).find((t) => t.id === sale.invoiceVoucherId)
@@ -1908,6 +1977,8 @@ class ServerLocalDatabase {
         description: `${docLabel} ${stage.stageNumber} — sale ${sale.saleNumber}`,
         status: this.cashFlowSettled(sale) ? 'paid' : 'pending',
       },
+      false,
+      actorId
     );
     return voucherId;
   }
@@ -1915,7 +1986,7 @@ class ServerLocalDatabase {
   /** Post (idempotently) the payment_in receipt voucher crediting the chosen
    *  Cash/Bank account; throws when the settlement account is unknown (the
    *  routes surface it as a 400 via the bizStatus pattern). */
-  private upsertSaleReceiptVoucher(sale: Sale, stage: SalesOrderStage, settlementAccountId: string, paymentMode?: string): string {
+  private upsertSaleReceiptVoucher(sale: Sale, stage: SalesOrderStage, settlementAccountId: string, paymentMode?: string, actorId?: string): string {
     const account = (this.data.accounts || []).find((a) => a.id === settlementAccountId && a.isActive);
     if (!account) {
       throw new Error('Selected settlement account was not found — please choose an active Cash/Bank account.');
@@ -1940,7 +2011,9 @@ class ServerLocalDatabase {
         referenceNumber: stage.stageNumber,
         description: `Receipt against Sales Invoice ${stage.stageNumber} — sale ${sale.saleNumber}`,
         status: 'paid',
-      }
+      },
+      false,
+      actorId
     );
     return voucherId;
   }
@@ -1962,7 +2035,8 @@ class ServerLocalDatabase {
     sale: Sale,
     stage: SalesOrderStage,
     settlement: { settle: boolean; type?: 'none' | 'credit' | 'account'; settlementAccountId?: string; paymentMode?: PaymentMode },
-    stageType?: SalesStage
+    stageType?: SalesStage,
+    actorId?: string
   ): void {
     // Legacy fallback: old clients send only updateCash — settle ⇒ account.
     const flowType = settlement.type ?? (settlement.settle ? 'account' as const : undefined);
@@ -1997,7 +2071,7 @@ class ServerLocalDatabase {
     //    the later invoice save re-upserts it with the invoice-stage total.
     //    For 'account'/legacy flows it belongs to the invoice document.
     if (isInvoice || flowType === 'credit') {
-      const billId = this.upsertSaleInvoiceVoucher(sale, stage);
+      const billId = this.upsertSaleInvoiceVoucher(sale, stage, actorId);
       sale.invoiceVoucherId = billId;
     }
 
@@ -2005,7 +2079,7 @@ class ServerLocalDatabase {
     //    and it keeps the settled STAGE total — a later invoice difference
     //    simply stays outstanding on the party ledger).
     if (flowType === 'account' && !wasSettled) {
-      const payId = this.upsertSaleReceiptVoucher(sale, stage, settlement.settlementAccountId!, settlement.paymentMode);
+      const payId = this.upsertSaleReceiptVoucher(sale, stage, settlement.settlementAccountId!, settlement.paymentMode, actorId);
       sale.settlementVoucherId = payId;
       sale.settlementAccountId = settlement.settlementAccountId;
       sale.paymentMode = settlement.paymentMode || sale.paymentMode;
@@ -2023,7 +2097,7 @@ class ServerLocalDatabase {
     if (sale.invoiceVoucherId) {
       const invoiceTxn = (this.data.transactions || []).find((t) => t.id === sale.invoiceVoucherId);
       if (invoiceTxn && invoiceTxn.status !== (this.cashFlowSettled(sale) ? 'paid' : 'pending') && invoiceTxn.status !== 'cancelled') {
-        this.updateTransaction(invoiceTxn.id, { status: this.cashFlowSettled(sale) ? 'paid' : 'pending' });
+        this.updateTransaction(invoiceTxn.id, { status: this.cashFlowSettled(sale) ? 'paid' : 'pending' }, actorId);
       }
     }
     // Push the recalculated party/account balances to MySQL.
@@ -2041,7 +2115,8 @@ class ServerLocalDatabase {
     purchase: Purchase,
     stage: PurchaseOrderStage,
     settlement: { settle: boolean; type?: 'none' | 'credit' | 'account'; settlementAccountId?: string; paymentMode?: PaymentMode },
-    stageType?: PurchaseStage
+    stageType?: PurchaseStage,
+    actorId?: string
   ): void {
     // Legacy fallback: old clients send only updateCash — settle ⇒ account.
     const flowType = settlement.type ?? (settlement.settle ? 'account' as const : undefined);
@@ -2105,7 +2180,9 @@ class ServerLocalDatabase {
           referenceNumber: stage.stageNumber,
           description: `${docLabel} ${stage.stageNumber} — purchase ${purchase.purchaseNumber}`,
           status: this.cashFlowSettled(purchase) ? 'paid' : 'pending',
-        }
+        },
+        false,
+        actorId
       );
       purchase.invoiceVoucherId = billId;
     }
@@ -2131,7 +2208,9 @@ class ServerLocalDatabase {
           referenceNumber: stage.stageNumber,
           description: `Payout against purchase ${purchase.purchaseNumber} (stage ${stage.stageNumber})`,
           status: 'paid',
-        }
+        },
+        false,
+        actorId
       );
       purchase.settlementVoucherId = payId;
       purchase.settlementAccountId = settlement.settlementAccountId;
@@ -2149,7 +2228,7 @@ class ServerLocalDatabase {
     if (purchase.invoiceVoucherId && isGrn) {
       const billTxn = (this.data.transactions || []).find((t) => t.id === purchase.invoiceVoucherId);
       if (billTxn && billTxn.status !== (this.cashFlowSettled(purchase) ? 'paid' : 'pending') && billTxn.status !== 'cancelled') {
-        this.updateTransaction(billTxn.id, { status: this.cashFlowSettled(purchase) ? 'paid' : 'pending' });
+        this.updateTransaction(billTxn.id, { status: this.cashFlowSettled(purchase) ? 'paid' : 'pending' }, actorId);
       }
     }
     // Push the recalculated party/account balances to MySQL.
@@ -2473,7 +2552,7 @@ class ServerLocalDatabase {
    * FIFO: adjustItemStock records the blended consumed rate). Guarded by the
    * master's inventory_applied flag — the toggle can never double-post.
    */
-  public applySaleInventory(sale: Sale, referenceNumber?: string, force = false): boolean {
+  public applySaleInventory(sale: Sale, referenceNumber?: string, force = false, actorId?: string): boolean {
     if (sale.inventoryApplied && !force) return false;
     // TRACKABLE lines: their register units flip to SOLD here (sale FK on the
     // unit + a 'sold' event) — no ledger movement applies to asset items.
@@ -2482,7 +2561,7 @@ class ServerLocalDatabase {
       .flatMap((li) => li.unitIds || []);
     if (assetUnitIds.length > 0) {
       try {
-        this.markUnitsSold(assetUnitIds, sale.id, `Sold against sale ${sale.saleNumber}${referenceNumber && referenceNumber !== sale.saleNumber ? ` (${referenceNumber})` : ''}`);
+        this.markUnitsSold(assetUnitIds, sale.id, `Sold against sale ${sale.saleNumber}${referenceNumber && referenceNumber !== sale.saleNumber ? ` (${referenceNumber})` : ''}`, actorId);
       } catch (e: any) {
         console.error(`[DB] Unit sale failed for sale ${sale.saleNumber}:`, e.message);
       }
@@ -2527,7 +2606,7 @@ class ServerLocalDatabase {
    * (possibly edited) line set re-applies. A unit that meanwhile changed
    * hands elsewhere keeps its new state (release only what still points here).
    */
-  private releaseUnitsFromSale(sale: Sale, reason: string): void {
+  private releaseUnitsFromSale(sale: Sale, reason: string, actorId?: string): void {
     const owned = (this.data.inventoryUnits || []).filter(
       (u) => u.saleId === sale.id && u.status === 'sold'
     );
@@ -2537,7 +2616,7 @@ class ServerLocalDatabase {
       unit.vehicleId = undefined;
       unit.position = undefined;
       unit.updatedAt = new Date().toISOString();
-      this.postUnitEvent(unit, 'returned', { notes: `${reason} ${sale.saleNumber} — unit re-entered the register`, saleId: undefined });
+      this.postUnitEvent(unit, 'returned', { notes: `${reason} ${sale.saleNumber} — unit re-entered the register`, saleId: undefined }, actorId);
       this.logAudit('UPDATE', 'INVENTORY_UNIT', unit.id, `Unit ${unit.serialNumber} released back to register (${reason.trim()})`);
       liveSyncInventoryUnit(unit);
     }
@@ -2551,10 +2630,10 @@ class ServerLocalDatabase {
    * append-only ledger stays idempotent (an already-reversed dispatch is never
    * reversed twice).
    */
-  public unapplySaleInventory(sale: Sale, reason = 'Reversal of sales dispatch'): void {
+  public unapplySaleInventory(sale: Sale, reason = 'Reversal of sales dispatch', actorId?: string): void {
     // TRACKABLE units first: release what this sale holds before reversing
     // the product movements.
-    this.releaseUnitsFromSale(sale, reason);
+    this.releaseUnitsFromSale(sale, reason, actorId);
     const originals = (this.data.stockMovements || []).filter(
       (m) => m.referenceId === sale.id && m.type === 'sale_dispatch'
     );
@@ -2616,7 +2695,7 @@ class ServerLocalDatabase {
    * but an UNTOUCHED produce-direct line must not churn its run (its raw
    * materials would needlessly re-consume, reshuffling the FIFO lots).
    */
-  private syncSaleDirectRuns(sale: Sale, apply: boolean): void {
+  private syncSaleDirectRuns(sale: Sale, apply: boolean, actorId?: string): void {
     const items = sale.items || [];
     const directLines = items.filter((li) => li.produceDirect && (Number(li.quantity) || 0) > 0);
     const unlinked = new Set(directLines.map((li) => li.id));
@@ -2646,7 +2725,7 @@ class ServerLocalDatabase {
     if (!apply) return;
     for (const line of directLines) {
       if (!unlinked.has(line.id)) continue;
-      this.createDirectSaleRun(sale, line);
+      this.createDirectSaleRun(sale, line, actorId);
     }
   }
 
@@ -2658,7 +2737,7 @@ class ServerLocalDatabase {
    * Throws when the item has no recipe — the caller aborts the whole sale
    * (nothing half-posts).
    */
-  private createDirectSaleRun(sale: Sale, line: SalesOrderItem): ProductionBatchRun {
+  private createDirectSaleRun(sale: Sale, line: SalesOrderItem, actorId?: string): ProductionBatchRun {
     const item = this.findItemRaw(line.itemId);
     if (!item) throw new Error(`Produce-direct line: item ${line.itemId} no longer exists in the items master.`);
     const cfg = ((line as any).production || {}) as {
@@ -2699,7 +2778,7 @@ class ServerLocalDatabase {
       saleItemId: line.id,
       directSale: true,
       skipOutputLot: true,
-    });
+    }, actorId);
   }
 
   /**
@@ -2772,7 +2851,8 @@ class ServerLocalDatabase {
   private createPurchaseUnit(
     purchase: Purchase,
     li: PurchaseOrderItem,
-    stageDate: string
+    stageDate: string,
+    actorId?: string
   ): void {
     const item = this.findItemRaw(li.itemId);
     if (!item || item.type !== 'asset' || !li.unitEntry) return;
@@ -2796,19 +2876,19 @@ class ServerLocalDatabase {
       purchaseCost: Number(li.rate) > 0 ? Number(li.rate) : undefined, // auto: the line rate
       attributes: li.unitEntry.attributes || {},
       entryNotes: `Registered against purchase ${purchase.purchaseNumber}`,
-    });
+    }, actorId);
     this.logAudit('CREATE', 'INVENTORY_UNIT', unit.id, `Unit ${unit.serialNumber} of ${item.name} registered from purchase ${purchase.purchaseNumber}`);
   }
 
   /** Reconciles ALL serialized lines of a purchase against the register. */
-  private syncPurchaseSerializedUnits(purchase: Purchase, stageDate?: string): void {
+  private syncPurchaseSerializedUnits(purchase: Purchase, stageDate?: string, actorId?: string): void {
     const desired = new Map<string, string>(); // serial → line id
     for (const li of purchase.items || []) {
       const item = this.findItemRaw(li.itemId);
       if (item?.type !== 'asset' || !li.unitEntry) continue;
       desired.set(li.unitEntry.serialNumber.trim().toLowerCase(), li.id);
       try {
-        this.createPurchaseUnit(purchase, li, stageDate || purchase.date);
+        this.createPurchaseUnit(purchase, li, stageDate || purchase.date, actorId);
       } catch (e: any) {
         // A duplicate/bad serial fails the save with a clear message
         throw new Error(`Purchase ${purchase.purchaseNumber}: ${e.message}`);
@@ -2965,7 +3045,7 @@ class ServerLocalDatabase {
     return sale ? this.hydrateSale(sale) : undefined;
   }
 
-  public createSale(data: any): Sale {
+  public createSale(data: any, actorId?: string): Sale {
     const saleId = data.id || `sale-${this.nextLedgerMs()}-${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
     const transportCharges = Number(data.transportCharges) || 0;
@@ -3051,8 +3131,8 @@ class ServerLocalDatabase {
       // PRODUCE-&-SELL-DIRECTLY lines record their runs FIRST: a failed run
       // (no recipe / insufficient raw stock) aborts the whole sale so nothing
       // half-posts (client rule: the toggle promises produce + sell).
-      this.syncSaleDirectRuns(sale, true);
-      if (this.applySaleInventory(sale, firstStage.stageNumber, true)) {
+      this.syncSaleDirectRuns(sale, true, actorId);
+      if (this.applySaleInventory(sale, firstStage.stageNumber, true, actorId)) {
         sale.inventoryApplied = true;
       }
       const askedType = (stageInput as any).settlementType;
@@ -3061,12 +3141,15 @@ class ServerLocalDatabase {
         type: 'credit',
         settlementAccountId: undefined,
         paymentMode: undefined,
-      }, firstStage.stageType as SalesStage);
+      }, firstStage.stageType as SalesStage, actorId);
       this.logAudit('CREATE', 'SALE_CASH', saleId, `Forced flow on sale ${sale.saleNumber} at ${firstStage.stageType} (inventory forced; credit journal)${askedType && askedType !== 'credit' ? ` — client asked ${askedType}, overridden to credit` : ''}`);
     } else if (stageInput.updateCash) {
       this.logAudit('DISPATCH', 'SALE_CASH', saleId, `Cash application requested at ${firstStage.stageType} stage — applies at the sales-order stage`);
     }
     sale.status = this.computeSalesStatus(sale);
+    // DONE-BY AUDIT (2026-11-21): the session user who registered the sale
+    sale.createdById = actorId || (data as any).createdById;
+    sale.updatedById = actorId || (data as any).updatedById;
 
     this.data.sales.unshift(sale);
     delete (sale as any).documentIds; // never persisted — linked below
@@ -3084,11 +3167,12 @@ class ServerLocalDatabase {
   public updateSale(
     id: string,
     updates: Partial<Sale> & { items?: SalesOrderItemInput[]; updateInventory?: boolean },
-    opts: { skipMysqlSync?: boolean; redateCurrentStage?: boolean } = {}
+    opts: { skipMysqlSync?: boolean; redateCurrentStage?: boolean } = {},
+    actorId?: string
   ): Sale | null {
     const index = (this.data.sales || []).findIndex((s) => s.id === id);
     if (index === -1) {
-      return this.createSale({ ...updates, id });
+      return this.createSale({ ...updates, id }, actorId);
     }
     const existing = this.data.sales[index];
     const stagesArr = existing.stages || [];
@@ -3162,8 +3246,8 @@ class ServerLocalDatabase {
         latestStage.items = normalized;
       }
       if (existing.inventoryApplied && !identical) {
-        this.unapplySaleInventory(existing, 'Edit compensation for sale');
-        if (this.applySaleInventory(existing, existing.saleNumber, true)) {
+        this.unapplySaleInventory(existing, 'Edit compensation for sale', actorId);
+        if (this.applySaleInventory(existing, existing.saleNumber, true, actorId)) {
           existing.inventoryApplied = true;
         } else {
           existing.inventoryApplied = false;
@@ -3190,7 +3274,7 @@ class ServerLocalDatabase {
     // shows the Deduct Stockyard Inventory switch (default OFF) — enabled only
     // while the dispatch has never posted (user rule for the edit-stage flow).
     if (updates.updateInventory && !existing.inventoryApplied) {
-      if (this.applySaleInventory(existing, existing.saleNumber)) {
+      if (this.applySaleInventory(existing, existing.saleNumber, false, actorId)) {
         existing.inventoryApplied = true;
       }
     }
@@ -3203,7 +3287,7 @@ class ServerLocalDatabase {
     // — its bound runs are removed wholesale just below.
     const cancellingNow = (updates as any).status === 'cancelled' && !wasCancelled;
     if (!cancellingNow) {
-      this.syncSaleDirectRuns(existing, existing.inventoryApplied);
+      this.syncSaleDirectRuns(existing, existing.inventoryApplied, actorId);
     }
 
     // Payment-flow switch on the master EDIT: a flow never applied at
@@ -3225,13 +3309,13 @@ class ServerLocalDatabase {
         type: editSettleType,
         settlementAccountId: (updates as any).settlementAccountId,
         paymentMode: (updates as any).paymentMode,
-      }, latestStage.stageType as SalesStage);
+      }, latestStage.stageType as SalesStage, actorId);
       this.logAudit('CREATE', 'SALE_CASH', id, `Payment flow on sale ${existing.saleNumber} via edit at ${latestStage.stageType} (type=${editSettleType})`);
     }
 
     // Cancellation reverses the applied dispatch (policy: revisit with user)
     if (updates.status === 'cancelled' && !wasCancelled && existing.inventoryApplied) {
-      this.unapplySaleInventory(existing, 'Cancellation reversal for sale');
+      this.unapplySaleInventory(existing, 'Cancellation reversal for sale', actorId);
       existing.inventoryApplied = false;
     }
     // A cancelled sale keeps no direct-sale runs — bound runs are removed and
@@ -3242,6 +3326,10 @@ class ServerLocalDatabase {
     if (updates.status) existing.status = updates.status;
     existing.status = this.computeSalesStatus(existing);
 
+    // DONE-BY AUDIT (2026-11-21): only a real actor moves updatedById; the
+    // booking user (createdById) never changes on an edit.
+    if (actorId && !existing.createdById) existing.createdById = actorId;
+    if (actorId) existing.updatedById = actorId;
     this.logAudit('UPDATE', 'SALE', id, `Updated sale ${existing.saleNumber}`);
     this.save();
     // When a composite flow (e.g. addSaleStageDirect) follows this call with
@@ -3273,7 +3361,7 @@ class ServerLocalDatabase {
    * or an exact copy of the current stage's lines — and previous stage values
    * remain untouched forever (a quotation cannot be edited after advancing).
    */
-  public addSaleStage(id: string, stageInput: SalesOrderStageInput): Sale | null {
+  public addSaleStage(id: string, stageInput: SalesOrderStageInput, actorId?: string): Sale | null {
     const sale = (this.data.sales || []).find((s) => s.id === id);
     if (!sale) return null;
     const stagesArr = sale.stages || [];
@@ -3398,11 +3486,11 @@ class ServerLocalDatabase {
     // ledger at this save. (The invoice-stage rung is retired — consolidated
     // invoices post nothing; see createSaleInvoice.)
     if (stage.stageType === 'sales_order') {
-      if (!sale.inventoryApplied && this.applySaleInventory(sale, stage.stageNumber, true)) {
+      if (!sale.inventoryApplied && this.applySaleInventory(sale, stage.stageNumber, true, actorId)) {
         sale.inventoryApplied = true;
         // The dispatch stands now — bound direct-sale runs come to life
         // (client rule: produce + sell, run qty locked to the sale lines).
-        this.syncSaleDirectRuns(sale, true);
+        this.syncSaleDirectRuns(sale, true, actorId);
       }
       const askedType = (stageInput as any).settlementType;
       this.applySaleCash(sale, stage, {
@@ -3410,13 +3498,15 @@ class ServerLocalDatabase {
         type: 'credit',
         settlementAccountId: undefined,
         paymentMode: undefined,
-      }, 'sales_order');
+      }, 'sales_order', actorId);
       this.logAudit('CREATE', 'SALE_CASH', id, `Forced flow on sale ${sale.saleNumber} at ${stage.stageType} ${stage.stageNumber} (inventory forced; credit journal)${askedType && askedType !== 'credit' ? ` — client asked ${askedType}, overridden to credit` : ''}`);
     } else if (stageInput.updateCash) {
       this.logAudit('DISPATCH', 'SALE_CASH', id, `Cash application requested at ${stage.stageType} stage — applies at the sales-order stage`);
     }
     sale.status = this.computeSalesStatus(sale);
     sale.updatedAt = now;
+    // DONE-BY AUDIT (2026-11-21): the stage issuance edited the master row
+    if (actorId) sale.updatedById = actorId;
 
     this.logAudit('UPDATE', 'SALE_STAGE', id, `Issued stage ${stage.stageType} ${stage.stageNumber} on sale ${sale.saleNumber}`);
     this.save();
@@ -3563,7 +3653,7 @@ class ServerLocalDatabase {
    * vouchers against the party (Record Payment), un-keyed to the invoice.
    * The displayed settlement rides the members: all-credit ⇒ 'credit'.
    */
-  public createSaleInvoice(data: any): SaleInvoice {
+  public createSaleInvoice(data: any, actorId?: string): SaleInvoice {
     const now = new Date().toISOString();
     const partyId = data.partyId;
     const invoiceDate = data.date || now.split('T')[0];
@@ -3608,6 +3698,9 @@ class ServerLocalDatabase {
     // 1. Catch-up inventory: a member that never applied its dispatch
     //    (legacy rows that predate the forced rule) dispatches NOW.
     for (const sale of sales) {
+      // Legacy catch-up dispatch — no session actor is threaded here (the
+      // consolidated invoice posts nothing itself); the units keep whoever
+      // booked them originally.
       if (!sale.inventoryApplied && this.applySaleInventory(sale, sale.saleNumber, true)) {
         sale.inventoryApplied = true;
         // Produce-&-sell-directly lines: the dispatch stands — their bound
@@ -3698,6 +3791,10 @@ class ServerLocalDatabase {
       this.syncSaleToMysql(sale);
     }
 
+    // DONE-BY AUDIT (2026-11-21): the session user who consolidated the invoice
+    invoice.createdById = actorId || (data as any).createdById;
+    invoice.updatedById = actorId || (data as any).updatedById;
+
     (this.data.salesInvoices = this.data.salesInvoices || []).unshift(invoice);
     this.logAudit('CREATE', 'SALE_INVOICE', invoiceId, `Consolidated invoice ${invoiceNumber} created for ${members.length} sales order(s) (₹${totalAmount}; document-only — member journals already carry the receivable)`);
     this.save();
@@ -3775,7 +3872,7 @@ class ServerLocalDatabase {
     return purchase ? this.hydratePurchase(purchase) : undefined;
   }
 
-  public createPurchase(data: any): Purchase {
+  public createPurchase(data: any, actorId?: string): Purchase {
     const purchaseId = data.id || `purc-${this.nextLedgerMs()}-${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
     const items = this.normalizePurchaseItemLines(purchaseId, data.items || []);
@@ -3843,17 +3940,20 @@ class ServerLocalDatabase {
         type: (stageInput as any).settlementType,
         settlementAccountId: stageInput.settlementAccountId,
         paymentMode: stageInput.paymentMode,
-      }, stage.stageType);
+      }, stage.stageType, actorId);
       this.logAudit('CREATE', 'PURCHASE_CASH', purchaseId, `Payment flow on purchase ${purchase.purchaseNumber} at ${stage.stageType} (type=${(stageInput as any).settlementType ?? (stageInput.updateCash ? 'account(legacy)' : 'legacy-off')})`);
     } else if (stageInput.updateCash) {
       this.logAudit('DISPATCH', 'PURCHASE_CASH', purchaseId, `Cash application requested at ${stage.stageType} stage — applies at the purchase-order stage`);
     }
     purchase.status = this.computePurchaseStatus(purchase);
+    // DONE-BY AUDIT (2026-11-21): the session user who registered the purchase
+    purchase.createdById = actorId || (data as any).createdById;
+    purchase.updatedById = actorId || (data as any).updatedById;
 
     // SERIALISED lines (2026-11-16): a purchase created straight at PO/GRN
     // registers its units right away (PO too, per the user's rule)
     if (stage.stageType === 'purchase_order' || stage.stageType === 'goods_receipt') {
-      this.syncPurchaseSerializedUnits(purchase, stage.date);
+      this.syncPurchaseSerializedUnits(purchase, stage.date, actorId);
     }
 
     this.data.purchases.unshift(purchase);
@@ -3869,11 +3969,12 @@ class ServerLocalDatabase {
   public updatePurchase(
     id: string,
     updates: Partial<Purchase> & { items?: PurchaseOrderItemInput[]; updateInventory?: boolean },
-    opts: { skipMysqlSync?: boolean; redateCurrentStage?: boolean } = {}
+    opts: { skipMysqlSync?: boolean; redateCurrentStage?: boolean } = {},
+    actorId?: string
   ): Purchase | null {
     const index = (this.data.purchases || []).findIndex((p) => p.id === id);
     if (index === -1) {
-      return this.createPurchase({ ...updates, id });
+      return this.createPurchase({ ...updates, id }, actorId);
     }
     const existing = this.data.purchases[index];
     const wasCancelled = existing.status === 'cancelled';
@@ -3945,7 +4046,7 @@ class ServerLocalDatabase {
         type: editSettleType,
         settlementAccountId: (updates as any).settlementAccountId,
         paymentMode: (updates as any).paymentMode,
-      }, latestStage.stageType as PurchaseStage);
+      }, latestStage.stageType as PurchaseStage, actorId);
       this.logAudit('CREATE', 'PURCHASE_CASH', id, `Payment flow on purchase ${existing.purchaseNumber} via edit at ${latestStage.stageType} (type=${editSettleType})`);
     }
 
@@ -3968,8 +4069,11 @@ class ServerLocalDatabase {
     // SERIALISED lines (2026-11-16): the register follows the line set on a
     // master edit (new serials register per stage rules; removed serials tear
     // down while untouched in stock)
-    this.syncPurchaseSerializedUnits(existing, existing.date);
+    this.syncPurchaseSerializedUnits(existing, existing.date, actorId);
 
+    // DONE-BY AUDIT (2026-11-21): only a real actor moves updatedById
+    if (actorId && !existing.createdById) existing.createdById = actorId;
+    if (actorId) existing.updatedById = actorId;
     this.logAudit('UPDATE', 'PURCHASE', id, `Updated purchase ${existing.purchaseNumber}`);
     this.save();
     // Composite flows (addPurchaseStageDirect) sync AFTER the stage save —
@@ -3989,7 +4093,7 @@ class ServerLocalDatabase {
    * type; re-saving a stage type UPDATES its existing row). `updateInventory`
    * applies the one-shot goods inward (receivedQuantity at GRN).
    */
-  public addPurchaseStage(id: string, stageInput: PurchaseOrderStageInput): Purchase | null {
+  public addPurchaseStage(id: string, stageInput: PurchaseOrderStageInput, actorId?: string): Purchase | null {
     const purchase = (this.data.purchases || []).find((p) => p.id === id);
     if (!purchase) return null;
     const now = new Date().toISOString();
@@ -4057,7 +4161,7 @@ class ServerLocalDatabase {
         type: (stageInput as any).settlementType,
         settlementAccountId: stageInput.settlementAccountId,
         paymentMode: stageInput.paymentMode,
-      }, stageType);
+      }, stageType, actorId);
       this.logAudit('CREATE', 'PURCHASE_CASH', id, `Payment flow on purchase ${purchase.purchaseNumber} at ${stageType} ${stageRow?.stageNumber || stageNumber} (type=${(stageInput as any).settlementType ?? (stageInput.updateCash ? 'account(legacy)' : 'legacy-off')})`);
     } else if (stageInput.updateCash) {
       this.logAudit('DISPATCH', 'PURCHASE_CASH', id, `Cash application requested at ${stageType} stage — applies at the purchase-order stage`);
@@ -4066,10 +4170,12 @@ class ServerLocalDatabase {
     // units its serialized lines carry (PO too, per the user's rule) and
     // reconciles removed serials with the register.
     if (stageType === 'purchase_order' || stageType === 'goods_receipt') {
-      this.syncPurchaseSerializedUnits(purchase, stageRow?.date || now.split('T')[0]);
+      this.syncPurchaseSerializedUnits(purchase, stageRow?.date || now.split('T')[0], actorId);
     }
     purchase.status = this.computePurchaseStatus(purchase);
     purchase.updatedAt = now;
+    // DONE-BY AUDIT (2026-11-21): the stage issuance edited the master row
+    if (actorId) purchase.updatedById = actorId;
 
     this.logAudit('UPDATE', 'PURCHASE_STAGE', id, `Added stage ${stageType} ${stageNumber} to purchase ${purchase.purchaseNumber}`);
     this.save();
@@ -4210,7 +4316,7 @@ class ServerLocalDatabase {
     throw new Error(`"${out}" already has an active recipe (BM ${clash.mixNumber} — ${clash.name}). One recipe per item is strict: edit that recipe or delete it instead of creating a second one.`);
   }
 
-  public createBatchMix(data: any): BatchMix {
+  public createBatchMix(data: any, actorId?: string): BatchMix {
     const clean = this.sanitizeBatchMix(data);
     this.assertSingleActiveMixForItem(clean.outputItemId);
     const newMix: BatchMix = {
@@ -4218,6 +4324,9 @@ class ServerLocalDatabase {
       id: `bmix-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       mixNumber: this.nextBatchMixNumber(),
       createdAt: new Date().toISOString(),
+      // DONE-BY AUDIT (2026-11-21)
+      createdById: actorId || (data as any).createdById,
+      updatedById: actorId || (data as any).updatedById,
     };
     // Ingredient rows are server-minted ids (replaced wholesale per save).
     for (const ing of newMix.ingredients) ing.id = `bmi-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -4228,9 +4337,12 @@ class ServerLocalDatabase {
     return newMix;
   }
 
-  public updateBatchMix(id: string, updates: any): BatchMix | undefined {
+  public updateBatchMix(id: string, updates: any, actorId?: string): BatchMix | undefined {
     const idx = this.data.batchMixes?.findIndex((m) => m.id === id);
     if (idx === undefined || idx === -1) return undefined;
+    // DONE-BY AUDIT (2026-11-21): the booking user never changes on an edit
+    delete (updates as any).createdById;
+    delete (updates as any).createdByName;
     const clean = this.sanitizeBatchMix({ ...this.data.batchMixes[idx], ...updates });
     // One-recipe-per-item holds through edits too — retargeting the output
     // item or re-activating the mix cannot steal an item that has a recipe.
@@ -4244,6 +4356,7 @@ class ServerLocalDatabase {
         id: `bmi-${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${Math.random().toString(36).slice(2, 4)}`,
       })),
     };
+    if (actorId) updated.updatedById = actorId;
     this.data.batchMixes[idx] = updated;
     this.logAudit('UPDATE', 'BATCH_MIX', id, `Recipe ${updated.mixNumber} (${updated.name}) updated`);
     this.save();
@@ -4442,7 +4555,7 @@ class ServerLocalDatabase {
    * Register ONE physical unit of an asset item. Always enters at `in_stock`
    * (GRN capture / manual entry / legacy backfill) with an 'entered' event.
    */
-  public createInventoryUnit(data: any): InventoryUnit {
+  public createInventoryUnit(data: any, actorId?: string): InventoryUnit {
     const itemId = String(data.itemId || '').trim();
     const item = this.requireAssetItem(itemId);
     const serial = String(data.serialNumber || '').trim();
@@ -4459,6 +4572,10 @@ class ServerLocalDatabase {
       updatedAt: now,
       ...this.validateUnitPayload({ ...data, id: undefined, itemId, serialNumber: serial }, itemId),
     };
+    // DONE-BY AUDIT (2026-11-21): the session user who registered the unit
+    // (a client/seed caller may carry its own fallback id)
+    unit.createdById = actorId || (data as any).createdById;
+    unit.updatedById = actorId || (data as any).updatedById;
 
     const event: InventoryUnitEvent = {
       id: `iue-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -4469,6 +4586,9 @@ class ServerLocalDatabase {
       supplierId: unit.supplierId,
       locationId: unit.locationId,
       createdAt: now,
+      // DONE-BY AUDIT (2026-11-21): the registrant; a GRN-captured unit carries
+      // the purchase save's acting user
+      ...(actorId ? { createdById: actorId } : {}),
     };
 
     this.data.inventoryUnits = [unit, ...(this.data.inventoryUnits || [])];
@@ -4481,9 +4601,9 @@ class ServerLocalDatabase {
   }
 
   /** Register N units at once (purchase GRN with serials / legacy backfill). */
-  public createInventoryUnitsBulk(entries: any[]): InventoryUnit[] {
+  public createInventoryUnitsBulk(entries: any[], actorId?: string): InventoryUnit[] {
     if (!Array.isArray(entries) || entries.length === 0) throw new Error('No units to register.');
-    return entries.map((e) => this.createInventoryUnit(e));
+    return entries.map((e) => this.createInventoryUnit(e, actorId));
   }
 
   /**
@@ -4491,9 +4611,15 @@ class ServerLocalDatabase {
    * vehicle, sale linkage) are NOT editable here — lifecycle moves through the
    * explicit endpoints so every transition lands in the event log.
    */
-  public updateInventoryUnit(id: string, updates: any): InventoryUnit {
+  public updateInventoryUnit(id: string, updates: any, actorId?: string): InventoryUnit {
     const unit = this.data.inventoryUnits?.find((u) => u.id === id);
     if (!unit) throw new Error('Unit not found.');
+    // DONE-BY AUDIT (2026-11-21): a register edit never rewrites the
+    // registrant (strip client forgery); updatedById moves with a real actor.
+    delete (updates as any).createdById;
+    delete (updates as any).updatedById;
+    delete (updates as any).createdByName;
+    delete (updates as any).updatedByName;
     const item = this.findItemRaw(unit.itemId);
 
     for (const locked of ['status', 'vehicleId', 'position', 'fitOdometer', 'saleId', 'itemId']) {
@@ -4506,7 +4632,7 @@ class ServerLocalDatabase {
     if (unit.status !== 'in_stock' && patch.locationId !== undefined) {
       delete patch.locationId;
     }
-    const updated: InventoryUnit = { ...unit, ...patch, updatedAt: new Date().toISOString() };
+    const updated: InventoryUnit = { ...unit, ...patch, updatedAt: new Date().toISOString(), ...(actorId ? { updatedById: actorId } : {}) };
     const idx = this.data.inventoryUnits!.findIndex((u) => u.id === id);
     this.data.inventoryUnits![idx] = updated;
     this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${updated.serialNumber} of ${item?.name} updated`);
@@ -4518,7 +4644,7 @@ class ServerLocalDatabase {
   /** Append one lifecycle event for a unit (shared shape for the moves below). */
   private postUnitEvent(unit: InventoryUnit, type: InventoryUnitEventType, ctx: {
     notes?: string; vehicleId?: string; position?: string; odometer?: number; locationId?: string; saleId?: string;
-  }): InventoryUnitEvent {
+  }, actorId?: string): InventoryUnitEvent {
     const now = new Date().toISOString();
     const event: InventoryUnitEvent = {
       id: `iue-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -4532,6 +4658,8 @@ class ServerLocalDatabase {
       locationId: ctx.locationId,
       saleId: ctx.saleId,
       createdAt: now,
+      // DONE-BY AUDIT (2026-11-21): the operator who performed the movement
+      ...(actorId ? { createdById: actorId } : {}),
     };
     this.data.inventoryUnitEvents = [event, ...(this.data.inventoryUnitEvents || [])];
     liveSyncInventoryUnitEvent(event);
@@ -4543,7 +4671,7 @@ class ServerLocalDatabase {
    *  item MUST carry one of the 12 dumper positions (FL/FR/L1..L5/R1..R5)
    *  and each position holds at most one fitted unit per vehicle; every
    *  OTHER unit may ride a vehicle but never a position (it is stripped). */
-  public deployInventoryUnit(id: string, data: any): InventoryUnit {
+  public deployInventoryUnit(id: string, data: any, actorId?: string): InventoryUnit {
     const unit = this.data.inventoryUnits?.find((u) => u.id === id);
     if (!unit) throw new Error('Unit not found.');
     if (unit.status !== 'in_stock') throw new Error(`Unit ${unit.serialNumber} is already ${unit.status.replace('_', ' ')} — only in-stock units can be deployed.`);
@@ -4577,13 +4705,14 @@ class ServerLocalDatabase {
     unit.position = position ?? undefined;
     unit.fitOdometer = data.odometer !== undefined && data.odometer !== null && data.odometer !== '' ? Number(data.odometer) : unit.fitOdometer;
     unit.updatedAt = new Date().toISOString();
+    if (actorId) unit.updatedById = actorId;
     this.postUnitEvent(unit, 'deployed', {
       notes: data.notes?.trim() || data.deployNotes?.trim() || `${item?.name || 'Unit'} ${unit.serialNumber} mounted on ${(vehicle as any).vehicleNo || 'vehicle'}${unit.position ? ` @ ${unit.position}` : ''}${unit.fitOdometer ? ` @ ${unit.fitOdometer} km` : ''}`,
       vehicleId,
       position: unit.position,
       odometer: unit.fitOdometer,
       locationId: contextLocation,
-    });
+    }, actorId);
     this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${unit.serialNumber} (${item?.name}) deployed to vehicle`);
     this.save();
     liveSyncInventoryUnit(unit);
@@ -4591,7 +4720,7 @@ class ServerLocalDatabase {
   }
 
   /** Take the unit off the vehicle back into stock. */
-  public returnInventoryUnit(id: string, data: any): InventoryUnit {
+  public returnInventoryUnit(id: string, data: any, actorId?: string): InventoryUnit {
     const unit = this.data.inventoryUnits?.find((u) => u.id === id);
     if (!unit) throw new Error('Unit not found.');
     if (unit.status !== 'deployed') throw new Error(`Unit ${unit.serialNumber} is not deployed (${unit.status.replace('_', ' ')}).`);
@@ -4605,13 +4734,14 @@ class ServerLocalDatabase {
     if (locationId) unit.locationId = locationId;
     if (data.condition && ['excellent', 'good', 'worn', 'damaged'].includes(data.condition)) unit.condition = data.condition;
     unit.updatedAt = new Date().toISOString();
+    if (actorId) unit.updatedById = actorId;
     this.postUnitEvent(unit, 'returned', {
       notes: data.notes?.trim() || 'Removed from vehicle back to storage',
       vehicleId: lastVehicleId,
       position: lastPosition,
       odometer,
       locationId: unit.locationId,
-    });
+    }, actorId);
     this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${unit.serialNumber} returned to stock`);
     this.save();
     liveSyncInventoryUnit(unit);
@@ -4620,14 +4750,15 @@ class ServerLocalDatabase {
 
   /** Send the unit for upkeep (retreading, rebore, repair). The deployment
    *  context is kept — a tyre may be retreaded while it stays where it was. */
-  public maintainInventoryUnit(id: string, data: any): InventoryUnit {
+  public maintainInventoryUnit(id: string, data: any, actorId?: string): InventoryUnit {
     const unit = this.data.inventoryUnits?.find((u) => u.id === id);
     if (!unit) throw new Error('Unit not found.');
     if (unit.status === 'maintenance') throw new Error(`Unit ${unit.serialNumber} is already in maintenance.`);
     if (unit.status === 'sold' || unit.status === 'scrapped') throw new Error(`Unit ${unit.serialNumber} has left the register (sold/scrapped) — maintenance is not possible.`);
     unit.status = 'maintenance';
     unit.updatedAt = new Date().toISOString();
-    this.postUnitEvent(unit, 'maintenance', { notes: data?.notes?.trim() || data?.maintenanceNotes?.trim() || 'Sent for maintenance / retreading', vehicleId: unit.vehicleId, locationId: unit.locationId });
+    if (actorId) unit.updatedById = actorId;
+    this.postUnitEvent(unit, 'maintenance', { notes: data?.notes?.trim() || data?.maintenanceNotes?.trim() || 'Sent for maintenance / retreading', vehicleId: unit.vehicleId, locationId: unit.locationId }, actorId);
     this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${unit.serialNumber} sent for maintenance`);
     this.save();
     liveSyncInventoryUnit(unit);
@@ -4635,7 +4766,7 @@ class ServerLocalDatabase {
   }
 
   /** Bring a unit out of maintenance back into stock. */
-  public restoreInventoryUnit(id: string, data: any): InventoryUnit {
+  public restoreInventoryUnit(id: string, data: any, actorId?: string): InventoryUnit {
     const unit = this.data.inventoryUnits?.find((u) => u.id === id);
     if (!unit) throw new Error('Unit not found.');
     if (unit.status !== 'maintenance') throw new Error(`Unit ${unit.serialNumber} is not in maintenance.`);
@@ -4644,10 +4775,11 @@ class ServerLocalDatabase {
     if (locationId) unit.locationId = locationId;
     if (data?.condition && ['excellent', 'good', 'worn', 'damaged'].includes(data.condition)) unit.condition = data.condition;
     unit.updatedAt = new Date().toISOString();
+    if (actorId) unit.updatedById = actorId;
     this.postUnitEvent(unit, 'restored', {
       notes: data?.notes?.trim() || data?.maintenanceNotes?.trim() || 'Returned from maintenance',
       locationId: unit.locationId,
-    });
+    }, actorId);
     this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${unit.serialNumber} restored from maintenance`);
     this.save();
     liveSyncInventoryUnit(unit);
@@ -4655,7 +4787,7 @@ class ServerLocalDatabase {
   }
 
   /** Retire the unit permanently (beyond repair / beyond use). */
-  public scrapInventoryUnit(id: string, data: any): InventoryUnit {
+  public scrapInventoryUnit(id: string, data: any, actorId?: string): InventoryUnit {
     const unit = this.data.inventoryUnits?.find((u) => u.id === id);
     if (!unit) throw new Error('Unit not found.');
     if (unit.status === 'sold') throw new Error(`Unit ${unit.serialNumber} was already sold.`);
@@ -4672,13 +4804,14 @@ class ServerLocalDatabase {
     unit.vehicleId = undefined;
     unit.position = undefined;
     unit.updatedAt = new Date().toISOString();
+    if (actorId) unit.updatedById = actorId;
     const item = this.findItemRaw(unit.itemId);
     this.postUnitEvent(unit, 'scrapped', {
       notes: data?.notes?.trim() || data?.reason?.trim() || `Unit ${unit.serialNumber} scrapped`,
       vehicleId: lastVehicleId,
       position: lastPosition,
       locationId: unit.locationId,
-    });
+    }, actorId);
     this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${unit.serialNumber} (${item?.name}) scrapped`);
     this.save();
     liveSyncInventoryUnit(unit);
@@ -4688,17 +4821,18 @@ class ServerLocalDatabase {
   /** UN-SCRAP (2026-11-17) — bring a scrapped unit back to spare stock. The
    *  reverse of scrapping; a SOLD unit can never come back (no unscrap path
    *  once a unit carries a saleId). */
-  public unscrapInventoryUnit(id: string, data: any): InventoryUnit {
+  public unscrapInventoryUnit(id: string, data: any, actorId?: string): InventoryUnit {
     const unit = this.data.inventoryUnits?.find((u) => u.id === id);
     if (!unit) throw new Error('Unit not found.');
     if (unit.status !== 'scrapped') throw new Error(`Unit ${unit.serialNumber} cannot be unscrapped — it is not scrapped (current: ${unit.status.replace('_', ' ')}).`);
     unit.status = 'in_stock';
     unit.updatedAt = new Date().toISOString();
+    if (actorId) unit.updatedById = actorId;
     const item = this.findItemRaw(unit.itemId);
     this.postUnitEvent(unit, 'unscrapped', {
       notes: data?.notes?.trim() || `Unit ${unit.serialNumber} unscrapped — back to spare stock`,
       locationId: unit.locationId,
-    });
+    }, actorId);
     this.logAudit('UPDATE', 'INVENTORY_UNIT', id, `Unit ${unit.serialNumber} (${item?.name}) unscrapped`);
     this.save();
     liveSyncInventoryUnit(unit);
@@ -4732,7 +4866,7 @@ class ServerLocalDatabase {
    * unit gets a 'sold' event carrying the sale FK. `notes` is the caller's
    * narrative (e.g. "Sold against sale RST 00012").
    */
-  public markUnitsSold(unitIds: string[], saleId: string, notes?: string): InventoryUnit[] {
+  public markUnitsSold(unitIds: string[], saleId: string, notes?: string, actorId?: string): InventoryUnit[] {
     if (!Array.isArray(unitIds) || unitIds.length === 0) return [];
     const sale = this.data.sales?.find((s) => s.id === saleId);
     if (!sale) throw new Error('Sale not found — cannot book the unit sale.');
@@ -4758,7 +4892,8 @@ class ServerLocalDatabase {
       unit.status = 'sold';
       unit.saleId = saleId;
       unit.updatedAt = new Date().toISOString();
-      this.postUnitEvent(unit, 'sold', { notes: eventNotes, ...ctx, saleId });
+      if (actorId) unit.updatedById = actorId;
+      this.postUnitEvent(unit, 'sold', { notes: eventNotes, ...ctx, saleId }, actorId);
       this.logAudit('UPDATE', 'INVENTORY_UNIT', unit.id, `Unit ${unit.serialNumber} (${item?.name}) sold via ${sale.saleNumber}`);
       liveSyncInventoryUnit(unit);
       sold.push(unit);
@@ -4799,7 +4934,7 @@ class ServerLocalDatabase {
    *                   date, plantUnit, supervisorName, mixTemperatureCelsius,
    *                   notes) }
    */
-  public createProductionBatch(batchData: any): ProductionBatchRun {
+  public createProductionBatch(batchData: any, actorId?: string): ProductionBatchRun {
     const mixId = String(batchData.batchMixId || '').trim();
     const mix = this.data.batchMixes?.find((m) => m.id === mixId);
     if (!mix) throw new Error('Batch mix not found — pick the recipe this run is producing.');
@@ -4910,6 +5045,10 @@ class ServerLocalDatabase {
       directSale: directSale || undefined,
       notes: batchData.notes?.trim() || undefined,
       createdAt: new Date().toISOString(),
+      // DONE-BY AUDIT (2026-11-21): the session user who recorded the run
+      // (a sale-driven direct run carries the sale's acting user)
+      createdById: actorId || (batchData as any).createdById,
+      updatedById: actorId || (batchData as any).updatedById,
     };
 
     // Output placement (2026-11-13): the produced lot lands in a chosen stock
@@ -5047,7 +5186,7 @@ class ServerLocalDatabase {
     }));
   }
 
-  public createVehicle(data: Omit<Vehicle, 'id' | 'createdAt'>): Vehicle {
+  public createVehicle(data: Omit<Vehicle, 'id' | 'createdAt'>, actorId?: string): Vehicle {
     // documentIds ride the create payload like createEmployee's flow — staged
     // uploads (Pending/*) registered while the form was open; strip before
     // the vehicle spread (never persisted on the row) and link below.
@@ -5057,6 +5196,9 @@ class ServerLocalDatabase {
     // JOIN at read time; see getVehicles).
     delete (data as any).currentDriverName;
     const newVeh: Vehicle = { ...data, id: `veh-${Date.now()}`, createdAt: new Date().toISOString() };
+    // DONE-BY AUDIT (2026-11-21): the session user who registered the truck
+    newVeh.createdById = actorId || (data as any).createdById;
+    newVeh.updatedById = actorId || (data as any).updatedById;
     this.data.vehicles.unshift(newVeh);
     this.save();
     liveSyncVehicle(newVeh);
@@ -5064,15 +5206,20 @@ class ServerLocalDatabase {
     return newVeh;
   }
 
-  public updateVehicle(id: string, updates: Partial<Vehicle>): Vehicle {
+  public updateVehicle(id: string, updates: Partial<Vehicle>, actorId?: string): Vehicle {
     // Defensive strip: edit-mode uploads link immediately via the documents
     // endpoint — documentIds should never ride an update. The driver display
     // name is likewise never persisted (FK-only, JOINed at read time).
     delete (updates as any).documentIds;
     delete (updates as any).currentDriverName;
+    // DONE-BY AUDIT (2026-11-21): the booking user never changes on an edit
+    delete (updates as any).createdById;
+    delete (updates as any).updatedById;
+    delete (updates as any).createdByName;
+    delete (updates as any).updatedByName;
     const idx = this.data.vehicles.findIndex((v) => v.id === id);
     if (idx === -1) throw new Error(`Vehicle ${id} not found.`);
-    this.data.vehicles[idx] = { ...this.data.vehicles[idx], ...updates };
+    this.data.vehicles[idx] = { ...this.data.vehicles[idx], ...updates, ...(actorId ? { updatedById: actorId } : {}) };
     this.save();
     liveSyncVehicle(this.data.vehicles[idx]);
     return this.data.vehicles[idx];
@@ -5105,12 +5252,15 @@ class ServerLocalDatabase {
       .map((e) => this.hydrateVehicleEmiEntry(e));
   }
 
-  public addVehicleEmiEntry(data: Omit<VehicleEmiEntry, 'id' | 'createdAt'>): VehicleEmiEntry {
+  public addVehicleEmiEntry(data: Omit<VehicleEmiEntry, 'id' | 'createdAt'>, actorId?: string): VehicleEmiEntry {
     if (!this.data.vehicleEmiEntries) this.data.vehicleEmiEntries = [];
     const entry: VehicleEmiEntry = {
       ...data,
       id: `vem-${this.nextLedgerMs()}`,
       createdAt: new Date().toISOString(),
+      // DONE-BY AUDIT (2026-11-21): ONLY an operator's session stamps the row —
+      // the daily cron posts with no actor, so auto rows stay unstamped by design.
+      ...(actorId ? { createdById: actorId, updatedById: actorId } : {}),
     };
     this.data.vehicleEmiEntries.unshift(entry);
     // Debit the linked account (entry amount leaves the account's balance)
@@ -5121,11 +5271,17 @@ class ServerLocalDatabase {
     return entry;
   }
 
-  public updateVehicleEmiEntry(id: string, updates: Partial<VehicleEmiEntry>): VehicleEmiEntry {
+  public updateVehicleEmiEntry(id: string, updates: Partial<VehicleEmiEntry>, actorId?: string): VehicleEmiEntry {
     const idx = (this.data.vehicleEmiEntries || []).findIndex((e) => e.id === id);
     if (idx === -1) throw new Error(`Vehicle EMI entry ${id} not found.`);
     const prev = this.data.vehicleEmiEntries[idx];
-    const updated: VehicleEmiEntry = { ...prev, ...updates, createdAt: prev.createdAt };
+    const updated: VehicleEmiEntry = {
+      ...prev,
+      ...updates,
+      createdAt: prev.createdAt,
+      // auto rows never gain a human stamp from a bookkeeping rewrite
+      ...(actorId ? { updatedById: actorId } : {}),
+    };
     this.data.vehicleEmiEntries[idx] = updated;
     // Edit-by-delta: any amount/account change flows straight into the
     // balance streams on the next recalculation — the entry list is the truth.
@@ -5180,11 +5336,17 @@ class ServerLocalDatabase {
     return (this.data.appDefaults || []).find((d) => d.key === key)?.value;
   }
 
-  public upsertAppDefault(key: string, value: string): AppDefault {
+  public upsertAppDefault(key: string, value: string, actorId?: string): AppDefault {
     const k = String(key || '').trim();
     if (!k) throw new Error('A default needs a key.');
     const now = new Date().toISOString();
-    const entry: AppDefault = { key: k, value: String(value), updatedAt: now };
+    const entry: AppDefault = {
+      key: k,
+      value: String(value),
+      updatedAt: now,
+      // DONE-BY AUDIT (2026-11-21): the operator who last saved the default
+      updatedById: actorId || undefined,
+    };
     const idx = (this.data.appDefaults || []).findIndex((d) => d.key === k);
     if (idx > -1) {
       this.data.appDefaults[idx] = entry;
@@ -5303,7 +5465,7 @@ class ServerLocalDatabase {
     );
   }
 
-  public addVehicleExpenseEntry(data: Omit<VehicleExpenseEntry, 'id' | 'createdAt'>): VehicleExpenseEntry {
+  public addVehicleExpenseEntry(data: Omit<VehicleExpenseEntry, 'id' | 'createdAt'>, actorId?: string): VehicleExpenseEntry {
     if (!this.data.vehicleExpenseEntries) this.data.vehicleExpenseEntries = [];
     // documentIds ride the create payload (staged uploads on the NEW-expense
     // flow) — never persisted on the row; link below.
@@ -5337,6 +5499,9 @@ class ServerLocalDatabase {
           }
         : {}),
       createdAt: new Date().toISOString(),
+      // DONE-BY AUDIT (2026-11-21): the session user who recorded the entry
+      createdById: actorId || (data as any).createdById,
+      updatedById: actorId || (data as any).updatedById,
     };
     if (isDieselFill && dieselItem) {
       // Stock first (adjustItemStock saves + posts the ledger row) — a failed
@@ -5355,9 +5520,14 @@ class ServerLocalDatabase {
     return entry;
   }
 
-  public updateVehicleExpenseEntry(id: string, updates: Partial<VehicleExpenseEntry>): VehicleExpenseEntry {
+  public updateVehicleExpenseEntry(id: string, updates: Partial<VehicleExpenseEntry>, actorId?: string): VehicleExpenseEntry {
     const idx = (this.data.vehicleExpenseEntries || []).findIndex((e) => e.id === id);
     if (idx === -1) throw new Error(`Vehicle expense entry ${id} not found.`);
+    // DONE-BY AUDIT (2026-11-21): the booking user never changes on an edit
+    delete (updates as any).createdById;
+    delete (updates as any).updatedById;
+    delete (updates as any).createdByName;
+    delete (updates as any).updatedByName;
     const prev = this.data.vehicleExpenseEntries[idx];
     // edit-mode uploads link immediately; documentIds never persist on the row
     const editDocIds = this.extractDocumentIds(updates as any);
@@ -5427,6 +5597,7 @@ class ServerLocalDatabase {
           }
         : {}),
     };
+    if (actorId) updated.updatedById = actorId;
     this.data.vehicleExpenseEntries[idx] = updated;
 
     // Post the settled stock effects (guards already passed).
@@ -5723,13 +5894,16 @@ class ServerLocalDatabase {
     return this.data.employees;
   }
 
-  public createEmployee(data: Omit<Employee, 'id' | 'createdAt'>): Employee {
+  public createEmployee(data: Omit<Employee, 'id' | 'createdAt'>, actorId?: string): Employee {
     // documentIds ride the create payload like createParty's flow — staged
     // uploads (Pending/*) registered while the form was open; strip before
     // the employee spread (never persisted on the row) and link below.
     const createDocIds = this.extractDocumentIds(data);
     delete (data as any).documentIds;
     const newEmp: Employee = { ...data, id: `emp-${Date.now()}`, createdAt: new Date().toISOString() };
+    // DONE-BY AUDIT (2026-11-21): the session user who onboarded the employee
+    newEmp.createdById = actorId || (data as any).createdById;
+    newEmp.updatedById = actorId || (data as any).updatedById;
     this.data.employees.unshift(newEmp);
     this.logAudit('CREATE', 'EMPLOYEE', newEmp.id, `Created employee ${newEmp.name} (${newEmp.role})`);
     this.save();
@@ -5738,13 +5912,18 @@ class ServerLocalDatabase {
     return newEmp;
   }
 
-  public updateEmployee(id: string, updates: Partial<Employee>): Employee {
+  public updateEmployee(id: string, updates: Partial<Employee>, actorId?: string): Employee {
     const idx = this.data.employees.findIndex((e) => e.id === id);
     if (idx === -1) throw new Error(`Employee ${id} not found.`);
     // Defensive strip: edit-mode uploads link immediately via the documents
     // endpoint, so documentIds should never ride an update — never persist it.
     delete (updates as any).documentIds;
-    this.data.employees[idx] = { ...this.data.employees[idx], ...updates };
+    // DONE-BY AUDIT (2026-11-21): the booking user never changes on an edit
+    delete (updates as any).createdById;
+    delete (updates as any).updatedById;
+    delete (updates as any).createdByName;
+    delete (updates as any).updatedByName;
+    this.data.employees[idx] = { ...this.data.employees[idx], ...updates, ...(actorId ? { updatedById: actorId } : {}) };
     this.save();
     liveSyncEmployee(this.data.employees[idx]);
     return this.data.employees[idx];
@@ -5818,7 +5997,7 @@ class ServerLocalDatabase {
     return this.data.attendance;
   }
 
-  public recordAttendance(data: Omit<EmployeeAttendance, 'id'>): EmployeeAttendance {
+  public recordAttendance(data: Omit<EmployeeAttendance, 'id'>, actorId?: string): EmployeeAttendance {
     // UPSERT per (employee, date): the attendance sheet saves the whole day
     // repeatedly — a re-save must merge into the existing row, not mint a
     // duplicate that prefill/one-day reads would trip over. Only PROVIDED
@@ -5833,12 +6012,25 @@ class ServerLocalDatabase {
       Object.keys(payload).forEach((k) => {
         if (payload[k] !== undefined) (merged as any)[k] = payload[k];
       });
+      // DONE-BY AUDIT (2026-11-21): a re-save is also a human marking the day
+      // (client forgery stripped; the booking user never changes on an edit)
+      delete (payload as any).createdById;
+      delete (payload as any).updatedById;
+      if (actorId) {
+        merged.updatedById = actorId;
+        if (!merged.createdById) merged.createdById = actorId;
+      }
       this.data.attendance[idx] = merged;
       this.save();
       liveSyncAttendance(merged);
       return merged;
     }
-    const newAtt = { ...payload, id: `att-${Date.now()}` };
+    const newAtt = {
+      ...payload,
+      id: `att-${Date.now()}`,
+      createdById: actorId || (payload as any).createdById,
+      updatedById: actorId || (payload as any).updatedById,
+    };
     this.data.attendance.unshift(newAtt);
     this.save();
     liveSyncAttendance(newAtt);
@@ -5849,8 +6041,15 @@ class ServerLocalDatabase {
     return this.data.leaves;
   }
 
-  public createLeave(data: Omit<EmployeeLeave, 'id' | 'createdAt'>): EmployeeLeave {
-    const newLv = { ...data, id: `lv-${Date.now()}`, createdAt: new Date().toISOString() };
+  public createLeave(data: Omit<EmployeeLeave, 'id' | 'createdAt'>, actorId?: string): EmployeeLeave {
+    const newLv = {
+      ...data,
+      id: `lv-${Date.now()}`,
+      createdAt: new Date().toISOString(),
+      // DONE-BY AUDIT (2026-11-21): the session user who recorded the leave
+      createdById: actorId || (data as any).createdById,
+      updatedById: actorId || (data as any).updatedById,
+    };
     this.data.leaves.unshift(newLv);
     this.save();
     liveSyncLeave(newLv);
@@ -5953,7 +6152,7 @@ class ServerLocalDatabase {
     return (this.data.employeeLedgerTransactions || []).find((t) => t.id === id);
   }
 
-  public createEmployeeLedgerTransaction(data: Partial<EmployeeLedgerTransaction>): EmployeeLedgerTransaction {
+  public createEmployeeLedgerTransaction(data: Partial<EmployeeLedgerTransaction>, actorId?: string): EmployeeLedgerTransaction {
     if (!this.data.employeeLedgerTransactions) this.data.employeeLedgerTransactions = [];
     // A bank account on the row is meaningful for received (add_balance pays
     // INTO the account), reduce (pays OUT) and direct (either direction) —
@@ -5976,6 +6175,9 @@ class ServerLocalDatabase {
       direction: data.direction === 'money_in' || data.direction === 'money_out' ? data.direction : undefined,
       source: data.source || 'manual',
       createdAt: data.createdAt || new Date(this.nextLedgerMs()).toISOString(),
+      // DONE-BY AUDIT (2026-11-21): the accrual engine posts with no actor —
+      // manual payroll rows only carry the recording operator.
+      ...(actorId ? { createdById: actorId, updatedById: actorId } : {}),
     };
     if (!txn.employeeId || !txn.reason) {
       throw new Error('Employee ledger transaction needs an employee and a reason.');
@@ -5997,7 +6199,7 @@ class ServerLocalDatabase {
    * Edits a MANUAL ledger row. Wage accruals are engine-owned (locked) — the
    * employer re-states reality through attendance/status edits instead.
    */
-  public updateEmployeeLedgerTransaction(id: string, updates: Partial<EmployeeLedgerTransaction>): EmployeeLedgerTransaction {
+  public updateEmployeeLedgerTransaction(id: string, updates: Partial<EmployeeLedgerTransaction>, actorId?: string): EmployeeLedgerTransaction {
     const txn = this.getEmployeeLedgerRow(id);
     if (!txn) throw new Error(`Employee ledger transaction ${id} not found.`);
     if (txn.source === 'accrual_engine') throw new Error('Auto wage accruals are locked; attendance controls their amount.');
@@ -6008,6 +6210,8 @@ class ServerLocalDatabase {
       id: txn.id,
       createdAt: txn.createdAt,
       source: 'manual',
+      // DONE-BY AUDIT (2026-11-21): the editing actor (booking user never moves)
+      ...(actorId ? { updatedById: actorId } : {}),
     };
     this.data.employeeLedgerTransactions = this.data.employeeLedgerTransactions.map((t) => (t.id === id ? updated : t));
     this.save();
@@ -6783,7 +6987,7 @@ class ServerLocalDatabase {
     return (this.data.accounts || []).find((a) => a.id === id);
   }
 
-  public addAccount(accountData: Omit<CashBankAccount, 'id' | 'createdAt' | 'updatedAt' | 'currentBalance'>): CashBankAccount {
+  public addAccount(accountData: Omit<CashBankAccount, 'id' | 'createdAt' | 'updatedAt' | 'currentBalance'>, actorId?: string): CashBankAccount {
     if (!this.data.accounts) this.data.accounts = [];
     // Monotonic clock id: concurrent account creates must never share an id
     const newId = `acc-${this.nextLedgerMs()}`;
@@ -6798,6 +7002,9 @@ class ServerLocalDatabase {
       isActive: true,
       createdAt: now,
       updatedAt: now,
+      // DONE-BY AUDIT (2026-11-21)
+      createdById: actorId || (accountData as any).createdById,
+      updatedById: actorId || (accountData as any).updatedById,
     };
 
     this.data.accounts.push(newAccount);
@@ -6807,21 +7014,30 @@ class ServerLocalDatabase {
     return newAccount;
   }
 
-  public async addAccountAsync(accountData: Omit<CashBankAccount, 'id' | 'createdAt' | 'updatedAt' | 'currentBalance'>): Promise<CashBankAccount> {
-    const acc = this.addAccount(accountData);
+  public async addAccountAsync(accountData: Omit<CashBankAccount, 'id' | 'createdAt' | 'updatedAt' | 'currentBalance'>, actorId?: string): Promise<CashBankAccount> {
+    const acc = this.addAccount(accountData, actorId);
     await liveSyncAccount(acc);
     return acc;
   }
 
-  public updateAccount(id: string, updates: Partial<CashBankAccount>): CashBankAccount {
+  public updateAccount(id: string, updates: Partial<CashBankAccount>, actorId?: string): CashBankAccount {
     if (!this.data.accounts) this.data.accounts = [];
     const index = this.data.accounts.findIndex((a) => a.id === id);
     if (index === -1) throw new Error(`Account with id ${id} not found.`);
+    // DONE-BY AUDIT (2026-11-21): a master edit never rewrites the booking
+    // user (strip client forgery); updatedById moves only with a real actor.
+    // The internal balance rebalance (recalculateAccountBalance) calls this
+    // with NO actor — a bookkeeping rewrite must not claim a human edit.
+    delete (updates as any).createdById;
+    delete (updates as any).updatedById;
+    delete (updates as any).createdByName;
+    delete (updates as any).updatedByName;
 
     const updated: CashBankAccount = {
       ...this.data.accounts[index],
       ...updates,
       updatedAt: new Date().toISOString(),
+      ...(actorId ? { updatedById: actorId } : {}),
     };
 
     this.data.accounts[index] = updated;
@@ -6831,8 +7047,8 @@ class ServerLocalDatabase {
     return updated;
   }
 
-  public async updateAccountAsync(id: string, updates: Partial<CashBankAccount>): Promise<CashBankAccount> {
-    const acc = this.updateAccount(id, updates);
+  public async updateAccountAsync(id: string, updates: Partial<CashBankAccount>, actorId?: string): Promise<CashBankAccount> {
+    const acc = this.updateAccount(id, updates, actorId);
     await liveSyncAccount(acc);
     return acc;
   }
@@ -6972,7 +7188,7 @@ class ServerLocalDatabase {
     return (this.data.transfers || []).map((t) => this.hydrateTransfer(t));
   }
 
-  public addTransfer(transferData: Omit<InternalTransfer, 'id' | 'createdAt' | 'transferNumber'>): InternalTransfer {
+  public addTransfer(transferData: Omit<InternalTransfer, 'id' | 'createdAt' | 'transferNumber'>, actorId?: string): InternalTransfer {
     if (!this.data.transfers) this.data.transfers = [];
     const count = this.data.transfers.length + 1;
     const transferNumber = `TRF-26/${String(count).padStart(3, '0')}`;
@@ -6986,6 +7202,9 @@ class ServerLocalDatabase {
       // time and never stored on the voucher row (documentation §2).
       fromAccountName: undefined,
       toAccountName: undefined,
+      // DONE-BY AUDIT (2026-11-21)
+      createdById: actorId || (transferData as any).createdById,
+      updatedById: actorId || (transferData as any).updatedById,
     };
 
     this.data.transfers.unshift(newTransfer);
@@ -7000,8 +7219,8 @@ class ServerLocalDatabase {
     return newTransfer;
   }
 
-  public async addTransferAsync(transferData: Omit<InternalTransfer, 'id' | 'createdAt' | 'transferNumber'>): Promise<InternalTransfer> {
-    const trf = this.addTransfer(transferData);
+  public async addTransferAsync(transferData: Omit<InternalTransfer, 'id' | 'createdAt' | 'transferNumber'>, actorId?: string): Promise<InternalTransfer> {
+    const trf = this.addTransfer(transferData, actorId);
     await liveSyncTransfer(trf);
     return trf;
   }
@@ -7037,7 +7256,7 @@ class ServerLocalDatabase {
     return (this.data.adjustments || []).map((a) => this.hydrateAdjustment(a));
   }
 
-  public addAdjustment(adjData: Omit<AccountAdjustment, 'id' | 'createdAt' | 'adjustmentNumber' | 'previousBalance' | 'newBalance'>): AccountAdjustment {
+  public addAdjustment(adjData: Omit<AccountAdjustment, 'id' | 'createdAt' | 'adjustmentNumber' | 'previousBalance' | 'newBalance'>, actorId?: string): AccountAdjustment {
     if (!this.data.adjustments) this.data.adjustments = [];
     const account = this.getAccountById(adjData.accountId);
     const prevBal = account ? account.currentBalance : 0;
@@ -7059,6 +7278,9 @@ class ServerLocalDatabase {
       // time and never stored on the voucher row (documentation §2).
       accountName: undefined,
       accountType: undefined,
+      // DONE-BY AUDIT (2026-11-21)
+      createdById: actorId || (adjData as any).createdById,
+      updatedById: actorId || (adjData as any).updatedById,
     };
 
     this.data.adjustments.unshift(newAdj);
@@ -7071,8 +7293,8 @@ class ServerLocalDatabase {
     return newAdj;
   }
 
-  public async addAdjustmentAsync(adjData: Omit<AccountAdjustment, 'id' | 'createdAt' | 'adjustmentNumber' | 'previousBalance' | 'newBalance'>): Promise<AccountAdjustment> {
-    const adj = this.addAdjustment(adjData);
+  public async addAdjustmentAsync(adjData: Omit<AccountAdjustment, 'id' | 'createdAt' | 'adjustmentNumber' | 'previousBalance' | 'newBalance'>, actorId?: string): Promise<AccountAdjustment> {
+    const adj = this.addAdjustment(adjData, actorId);
     await liveSyncAdjustment(adj);
     return adj;
   }

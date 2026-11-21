@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { serverDb } from '../db';
-import { authenticateToken, requireEitherPermission, requirePermission } from '../middleware/auth';
+import { authenticateToken, requireEitherPermission, requirePermission, AuthenticatedRequest } from '../middleware/auth';
 import {
   fetchVehiclesDirect,
   createVehicleDirect,
@@ -16,6 +16,10 @@ export const logisticsRouter = Router();
 
 logisticsRouter.use(authenticateToken);
 
+// DONE-BY AUDIT (2026-11-21): the acting user comes from the verified
+// session; the request body is never trusted for the actor stamp.
+const actingUserId = (req: AuthenticatedRequest): string | undefined => req.user?.id;
+
 // --- VEHICLES ---
 logisticsRouter.get('/vehicles', async (req, res) => {
   try {
@@ -25,15 +29,15 @@ logisticsRouter.get('/vehicles', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-logisticsRouter.post('/vehicles', requirePermission('manage_fleet'), async (req, res) => {
+logisticsRouter.post('/vehicles', requirePermission('manage_fleet'), async (req: AuthenticatedRequest, res) => {
   try {
-    const data = await createVehicleDirect(req.body);
+    const data = await createVehicleDirect(req.body, actingUserId(req));
     res.status(201).json({ success: true, data });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-logisticsRouter.put('/vehicles/:id', requirePermission('manage_fleet'), (req, res) => res.json({ success: true, data: serverDb.updateVehicle(req.params.id, req.body) }));
+logisticsRouter.put('/vehicles/:id', requirePermission('manage_fleet'), (req: AuthenticatedRequest, res) => res.json({ success: true, data: serverDb.updateVehicle(req.params.id, req.body, actingUserId(req)) }));
 logisticsRouter.delete('/vehicles/:id', requirePermission('manage_fleet'), (req, res) => res.json({ success: serverDb.deleteVehicle(req.params.id) }));
 
 // --- DRIVERS ---
@@ -93,9 +97,9 @@ logisticsRouter.get('/expenses', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-logisticsRouter.post('/expenses', requirePermission('manage_fleet'), async (req, res) => {
+logisticsRouter.post('/expenses', requirePermission('manage_fleet'), async (req: AuthenticatedRequest, res) => {
   try {
-    const data = await createVehicleExpenseDirect(req.body);
+    const data = await createVehicleExpenseDirect(req.body, actingUserId(req));
     res.status(201).json({ success: true, data });
   } catch (err: any) {
     // Business-rule errors (missing diesel item/location, insufficient diesel
@@ -104,9 +108,9 @@ logisticsRouter.post('/expenses', requirePermission('manage_fleet'), async (req,
       .json({ success: false, error: err.message });
   }
 });
-logisticsRouter.put('/expenses/:id', requirePermission('manage_fleet'), async (req, res) => {
+logisticsRouter.put('/expenses/:id', requirePermission('manage_fleet'), async (req: AuthenticatedRequest, res) => {
   try {
-    const data = serverDb.updateVehicleExpenseEntry(req.params.id, req.body);
+    const data = serverDb.updateVehicleExpenseEntry(req.params.id, req.body, actingUserId(req));
     res.json({ success: true, data });
   } catch (err: any) {
     res.status(/required|not found|cannot|no diesel item|first\./i.test(err?.message || '') ? 400 : 500)
@@ -134,17 +138,17 @@ logisticsRouter.get('/emi-entries', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-logisticsRouter.post('/emi-entries', requirePermission('manage_fleet'), async (req, res) => {
+logisticsRouter.post('/emi-entries', requirePermission('manage_fleet'), async (req: AuthenticatedRequest, res) => {
   try {
-    const data = serverDb.addVehicleEmiEntry(req.body);
+    const data = serverDb.addVehicleEmiEntry(req.body, actingUserId(req));
     res.status(201).json({ success: true, data });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-logisticsRouter.put('/emi-entries/:id', requirePermission('manage_fleet'), async (req, res) => {
+logisticsRouter.put('/emi-entries/:id', requirePermission('manage_fleet'), async (req: AuthenticatedRequest, res) => {
   try {
-    const data = serverDb.updateVehicleEmiEntry(req.params.id, req.body);
+    const data = serverDb.updateVehicleEmiEntry(req.params.id, req.body, actingUserId(req));
     res.json({ success: true, data });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });

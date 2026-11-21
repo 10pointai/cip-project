@@ -22,6 +22,10 @@ inventoryUnitsRouter.use(authenticateToken);
 
 const PERM = 'manage_inventory';
 
+// DONE-BY AUDIT (2026-11-21): the acting user comes from the verified
+// session; the request body is never trusted for the actor stamp.
+const actingUserId = (req: AuthenticatedRequest): string | undefined => req.user?.id;
+
 // Business-rule errors (validation / lifecycle guards) are 400; everything
 // else is a 500.
 const bizStatus = (msg: string) =>
@@ -51,12 +55,12 @@ inventoryUnitsRouter.get('/events', async (req: Request, res: Response) => {
 });
 
 // POST /api/inventory-units — register ONE unit (manual entry / GRN capture)
-inventoryUnitsRouter.post('/', requirePermission(PERM), async (req: Request, res: Response) => {
+inventoryUnitsRouter.post('/', requirePermission(PERM), async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (!req.body.itemId || !String(req.body.serialNumber || '').trim()) {
       return res.status(400).json({ success: false, error: 'itemId and serialNumber are required' });
     }
-    const unit = await createInventoryUnitDirect(req.body);
+    const unit = await createInventoryUnitDirect(req.body, actingUserId(req));
     res.status(201).json({ success: true, message: 'Unit registered', data: unit });
   } catch (error: any) {
     res.status(bizStatus(error.message)).json({ success: false, error: error.message });
@@ -64,12 +68,12 @@ inventoryUnitsRouter.post('/', requirePermission(PERM), async (req: Request, res
 });
 
 // POST /api/inventory-units/bulk — register N units at once (GRN / backfill)
-inventoryUnitsRouter.post('/bulk', requirePermission(PERM), async (req: Request, res: Response) => {
+inventoryUnitsRouter.post('/bulk', requirePermission(PERM), async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (!Array.isArray(req.body.units) || req.body.units.length === 0) {
       return res.status(400).json({ success: false, error: 'units[] is required — at least one entry' });
     }
-    const units = await createInventoryUnitsBulkDirect(req.body.units);
+    const units = await createInventoryUnitsBulkDirect(req.body.units, actingUserId(req));
     res.status(201).json({ success: true, message: `${units.length} units registered`, data: units });
   } catch (error: any) {
     res.status(bizStatus(error.message)).json({ success: false, error: error.message });
@@ -78,9 +82,9 @@ inventoryUnitsRouter.post('/bulk', requirePermission(PERM), async (req: Request,
 
 // PUT /api/inventory-units/:id — edit procurement/condition facts
 // (lifecycle fields are rejected by the server — use the moves below)
-inventoryUnitsRouter.put('/:id', requirePermission(PERM), async (req: Request, res: Response) => {
+inventoryUnitsRouter.put('/:id', requirePermission(PERM), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const unit = await updateInventoryUnitDirect(req.params.id, req.body);
+    const unit = await updateInventoryUnitDirect(req.params.id, req.body, actingUserId(req));
     res.json({ success: true, message: 'Unit updated', data: unit });
   } catch (error: any) {
     res.status(bizStatus(error.message)).json({ success: false, error: error.message });
@@ -88,9 +92,9 @@ inventoryUnitsRouter.put('/:id', requirePermission(PERM), async (req: Request, r
 });
 
 // POST /api/inventory-units/:id/deploy — fit onto a fleet vehicle
-inventoryUnitsRouter.post('/:id/deploy', requirePermission(PERM), async (req: Request, res: Response) => {
+inventoryUnitsRouter.post('/:id/deploy', requirePermission(PERM), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const unit = await deployInventoryUnitDirect(req.params.id, req.body);
+    const unit = await deployInventoryUnitDirect(req.params.id, req.body, actingUserId(req));
     res.json({ success: true, message: 'Unit deployed', data: unit });
   } catch (error: any) {
     res.status(bizStatus(error.message)).json({ success: false, error: error.message });
@@ -98,9 +102,9 @@ inventoryUnitsRouter.post('/:id/deploy', requirePermission(PERM), async (req: Re
 });
 
 // POST /api/inventory-units/:id/return — remove from vehicle back to stock
-inventoryUnitsRouter.post('/:id/return', requirePermission(PERM), async (req: Request, res: Response) => {
+inventoryUnitsRouter.post('/:id/return', requirePermission(PERM), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const unit = await returnInventoryUnitDirect(req.params.id, req.body);
+    const unit = await returnInventoryUnitDirect(req.params.id, req.body, actingUserId(req));
     res.json({ success: true, message: 'Unit returned to stock', data: unit });
   } catch (error: any) {
     res.status(bizStatus(error.message)).json({ success: false, error: error.message });
@@ -108,9 +112,9 @@ inventoryUnitsRouter.post('/:id/return', requirePermission(PERM), async (req: Re
 });
 
 // POST /api/inventory-units/:id/maintenance — send for upkeep (retread etc.)
-inventoryUnitsRouter.post('/:id/maintenance', requirePermission(PERM), async (req: Request, res: Response) => {
+inventoryUnitsRouter.post('/:id/maintenance', requirePermission(PERM), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const unit = await maintainInventoryUnitDirect(req.params.id, req.body);
+    const unit = await maintainInventoryUnitDirect(req.params.id, req.body, actingUserId(req));
     res.json({ success: true, message: 'Unit sent for maintenance', data: unit });
   } catch (error: any) {
     res.status(bizStatus(error.message)).json({ success: false, error: error.message });
@@ -118,9 +122,9 @@ inventoryUnitsRouter.post('/:id/maintenance', requirePermission(PERM), async (re
 });
 
 // POST /api/inventory-units/:id/restore — bring a unit back from maintenance
-inventoryUnitsRouter.post('/:id/restore', requirePermission(PERM), async (req: Request, res: Response) => {
+inventoryUnitsRouter.post('/:id/restore', requirePermission(PERM), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const unit = await restoreInventoryUnitDirect(req.params.id, req.body);
+    const unit = await restoreInventoryUnitDirect(req.params.id, req.body, actingUserId(req));
     res.json({ success: true, message: 'Unit restored', data: unit });
   } catch (error: any) {
     res.status(bizStatus(error.message)).json({ success: false, error: error.message });
@@ -128,9 +132,9 @@ inventoryUnitsRouter.post('/:id/restore', requirePermission(PERM), async (req: R
 });
 
 // POST /api/inventory-units/:id/scrap — retire the unit
-inventoryUnitsRouter.post('/:id/scrap', requirePermission(PERM), async (req: Request, res: Response) => {
+inventoryUnitsRouter.post('/:id/scrap', requirePermission(PERM), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const unit = await scrapInventoryUnitDirect(req.params.id, req.body);
+    const unit = await scrapInventoryUnitDirect(req.params.id, req.body, actingUserId(req));
     res.json({ success: true, message: 'Unit scrapped', data: unit });
   } catch (error: any) {
     res.status(bizStatus(error.message)).json({ success: false, error: error.message });
@@ -139,9 +143,9 @@ inventoryUnitsRouter.post('/:id/scrap', requirePermission(PERM), async (req: Req
 
 // POST /api/inventory-units/:id/unscrap — bring a scrapped unit back to
 // spare stock (2026-11-17; a SOLD unit has no way back)
-inventoryUnitsRouter.post('/:id/unscrap', requirePermission(PERM), async (req: Request, res: Response) => {
+inventoryUnitsRouter.post('/:id/unscrap', requirePermission(PERM), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const unit = await unscrapInventoryUnitDirect(req.params.id, req.body);
+    const unit = await unscrapInventoryUnitDirect(req.params.id, req.body, actingUserId(req));
     res.json({ success: true, message: 'Unit unscrapped', data: unit });
   } catch (error: any) {
     res.status(bizStatus(error.message)).json({ success: false, error: error.message });
@@ -166,7 +170,7 @@ inventoryUnitsRouter.post('/link-sale', requirePermission('manage_sales'), async
     if (!Array.isArray(unitIds) || unitIds.length === 0 || !saleId) {
       return res.status(400).json({ success: false, error: 'unitIds[] and saleId are required' });
     }
-    const units = await markUnitsSoldDirect(unitIds, saleId, notes);
+    const units = await markUnitsSoldDirect(unitIds, saleId, notes, actingUserId(req));
     res.json({ success: true, message: `${units.length} unit(s) marked sold`, data: units });
   } catch (error: any) {
     res.status(bizStatus(error.message)).json({ success: false, error: error.message });

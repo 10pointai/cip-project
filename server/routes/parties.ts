@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { serverDb } from '../db';
-import { authenticateToken, requirePermission } from '../middleware/auth';
+import { authenticateToken, requirePermission, AuthenticatedRequest } from '../middleware/auth';
 import {
   fetchPartiesDirect,
   fetchPartyByIdDirect,
@@ -13,6 +13,10 @@ import {
 export const partiesRouter = Router();
 
 partiesRouter.use(authenticateToken);
+
+// DONE-BY AUDIT (2026-11-21): the acting user is taken from the verified
+// session (never from the request body, which a client could forge).
+const actingUserId = (req: AuthenticatedRequest): string | undefined => req.user?.id;
 
 // GET /api/parties
 partiesRouter.get('/', async (req: Request, res: Response) => {
@@ -44,13 +48,13 @@ partiesRouter.get('/:id', async (req: Request, res: Response) => {
 });
 
 // POST /api/parties
-partiesRouter.post('/', requirePermission('manage_parties'), async (req: Request, res: Response) => {
+partiesRouter.post('/', requirePermission('manage_parties'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const partyData = req.body;
     if (!partyData.name || !partyData.type || !partyData.category) {
       return res.status(400).json({ success: false, error: 'Name, Type, and Category are required' });
     }
-    const newParty = await createPartyDirect(partyData);
+    const newParty = await createPartyDirect(partyData, actingUserId(req));
     res.status(201).json({ success: true, message: 'Party created successfully', data: newParty });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -58,7 +62,7 @@ partiesRouter.post('/', requirePermission('manage_parties'), async (req: Request
 });
 
 // POST /api/parties/bulk
-partiesRouter.post('/bulk', requirePermission('manage_parties'), async (req: Request, res: Response) => {
+partiesRouter.post('/bulk', requirePermission('manage_parties'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { parties } = req.body;
     if (!Array.isArray(parties) || parties.length === 0) {
@@ -78,7 +82,7 @@ partiesRouter.post('/bulk', requirePermission('manage_parties'), async (req: Req
 
     const createdParties: any[] = [];
     for (const p of parties) {
-      const created = await createPartyDirect(p);
+      const created = await createPartyDirect(p, actingUserId(req));
       createdParties.push(created);
     }
 
@@ -94,9 +98,9 @@ partiesRouter.post('/bulk', requirePermission('manage_parties'), async (req: Req
 });
 
 // PUT /api/parties/:id
-partiesRouter.put('/:id', requirePermission('manage_parties'), async (req: Request, res: Response) => {
+partiesRouter.put('/:id', requirePermission('manage_parties'), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const updated = await updatePartyDirect(req.params.id, req.body);
+    const updated = await updatePartyDirect(req.params.id, req.body, actingUserId(req));
     res.json({ success: true, message: 'Party updated successfully', data: updated });
   } catch (error: any) {
     res.status(error.message.includes('not found') ? 404 : 500).json({ success: false, error: error.message });

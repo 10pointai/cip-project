@@ -330,6 +330,9 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
                 <th className="py-3 px-3">Supplier</th>
                 <th className="py-3 px-3">Purchase</th>
                 <th className="py-3 px-3">Cost</th>
+                {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
+                <th className="py-3 px-3">Added By</th>
+                <th className="py-3 px-3">Updated By</th>
                 {/* DYNAMIC ATTRIBUTE COLUMNS (2026-11-16): the item's declared
                     keys render as columns next to the fixed facts */}
                 {(attrDefs.map((def) => (
@@ -343,7 +346,8 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
             <tbody className="divide-y divide-[var(--color-outline-variant)]/60">
               {filteredUnits.length === 0 ? (
                 <tr>
-                  <td colSpan={(isTyre ? 7 : 5) + attrDefs.length} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                  <td colSpan={(isTyre ? 7 : 5) + attrDefs.length + 2} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                    {/* +2 = the DONE-BY AUDIT columns (2026-11-21) */}
                     <ScanBarcode className="w-8 h-8 mx-auto text-[var(--color-outline-variant)] mb-2" />
                     <p className="text-xs font-bold">{units.length === 0 ? 'No units registered yet' : 'No units match the filters'}</p>
                     <p className="text-[10px] mt-0.5">
@@ -388,6 +392,13 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
                       <td className="py-3 px-3 text-[var(--color-on-surface)] font-semibold">{u.supplierName || partyName(u.supplierId) || '—'}</td>
                       <td className="py-3 px-3 text-[var(--color-on-surface-variant)]">{fmtDate(u.purchaseDate)}</td>
                       <td className="py-3 px-3 font-bold text-[var(--color-on-surface)]">{fmtCost(u.purchaseCost)}</td>
+                      {/* DONE-BY AUDIT (2026-11-21) */}
+                      <td className="py-3 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                        {u.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
+                      </td>
+                      <td className="py-3 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                        {u.updatedByName || <span className="italic text-[var(--color-outline)]">—</span>}
+                      </td>
                       {(attrDefs.map((def) => {
                         const raw = u.attributes?.[def.key];
                         const display = raw === undefined || raw === '' ? '—'
@@ -791,6 +802,8 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
                               {ev.position && <span>· {ev.position}</span>}
                               {ev.odometer !== undefined && <span>· {Number(ev.odometer).toLocaleString('en-IN')} km</span>}
                               {location && <span>· {location}</span>}
+                              {/* DONE-BY AUDIT (2026-11-21): who performed the movement */}
+                              {ev.createdByName && <span>· by <strong className="text-[var(--color-tertiary)]">{ev.createdByName}</strong></span>}
                             </p>
                           </div>
                         </div>

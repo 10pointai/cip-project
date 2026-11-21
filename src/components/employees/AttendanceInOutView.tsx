@@ -46,6 +46,8 @@ export function AttendanceInOutView({
     notes: string;
     /** set from first edit until the save lands — protects the row from re-syncs */
     dirty: boolean;
+    // DONE-BY AUDIT (2026-11-21): who MARKED the day (from the saved record)
+    markedByName?: string;
   }
 
   const [dailySheetState, setDailySheetState] = useState<{ [empId: string]: DailyRowState }>({});
@@ -100,6 +102,7 @@ export function AttendanceInOutView({
             status: match.status,
             notes: match.notes || '',
             dirty: false,
+            markedByName: (match as any).updatedByName || (match as any).createdByName,
           };
         } else {
           newMap[emp.id] = {
@@ -316,12 +319,14 @@ export function AttendanceInOutView({
                 <th className="py-3 px-4 min-w-[140px]">Out Time</th>
                 <th className="py-3 px-4 min-w-[120px]">Net Hours</th>
                 <th className="py-3 px-4 min-w-[160px]">Remarks</th>
+                {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
+                <th className="py-3 px-4">Marked By</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--color-outline-variant)]/40 text-xs">
               {filteredEmployees.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                  <td colSpan={7} className="py-12 text-center text-[var(--color-on-surface-variant)]">
                     <Users className="w-8 h-8 mx-auto mb-2 opacity-40" />
                     <p className="font-bold">No employees matched your search</p>
                   </td>
@@ -451,6 +456,10 @@ export function AttendanceInOutView({
                           placeholder="Notes..."
                           className="w-full bg-[var(--color-surface-container)] text-[11px] text-[var(--color-on-surface)] px-2 py-1 rounded-lg border border-[var(--color-outline-variant)] outline-hidden placeholder:text-[var(--color-on-surface-variant)]"
                         />
+                      </td>
+                      {/* DONE-BY AUDIT (2026-11-21): who marked the day on the saved record */}
+                      <td className="py-3 px-4 text-[11px] font-medium text-[var(--color-on-surface)]">
+                        {row.markedByName || <span className="text-[var(--color-outline)]">Not marked yet</span>}
                       </td>
                     </tr>
                   );

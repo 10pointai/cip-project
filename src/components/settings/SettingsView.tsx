@@ -136,6 +136,13 @@ export function SettingsView({ settings, onUpdateSettings }: SettingsViewProps) 
               Legal Entity & Business Identification
             </h2>
 
+            {/* DONE-BY AUDIT (2026-11-21): who last saved the company profile */}
+            {settings.updatedByName && (
+              <p className="text-[10px] text-[var(--color-on-surface-variant)]">
+                Last saved by <strong className="text-[var(--color-on-surface)]">{settings.updatedByName}</strong>
+              </p>
+            )}
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
@@ -388,6 +395,8 @@ function AppDefaultRow({ def, onSave }: { def: AppDefault; onSave: (value: strin
           </p>
           <p className="text-[9px] font-mono font-semibold text-[var(--color-on-surface-variant)]">
             {def.key} · updated {def.updatedAt ? def.updatedAt.split('T')[0] : '—'}
+            {/* DONE-BY AUDIT (2026-11-21): who saved the default */}
+            {def.updatedByName ? <span> · by <strong className="text-[var(--color-on-surface)]">{def.updatedByName}</strong></span> : ''}
           </p>
         </div>
       </div>

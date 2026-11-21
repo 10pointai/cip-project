@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { authenticateToken, requirePermission } from '../middleware/auth';
+import { authenticateToken, requirePermission, AuthenticatedRequest } from '../middleware/auth';
 import {
   fetchPurchasesDirect,
   fetchPurchaseByIdDirect,
@@ -12,6 +12,10 @@ import {
 export const purchasesRouter = Router();
 
 purchasesRouter.use(authenticateToken);
+
+// DONE-BY AUDIT (2026-11-21): party-ledger vouchers minted by these flows
+// carry the acting user from the verified session — never the request body.
+const actingUserId = (req: AuthenticatedRequest): string | undefined => req.user?.id;
 
 // GET /api/purchases
 // Stage/cash business-rule errors are 400 (locked ladder, missing settlement
@@ -42,13 +46,13 @@ purchasesRouter.get('/:id', async (req: Request, res: Response) => {
 });
 
 // POST /api/purchases — create master + first stage (RFQ ingestion may have no vendor yet)
-purchasesRouter.post('/', requirePermission('manage_purchases'), async (req: Request, res: Response) => {
+purchasesRouter.post('/', requirePermission('manage_purchases'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const data = req.body;
     if (!Array.isArray(data.items) || data.items.length === 0) {
       return res.status(400).json({ success: false, error: 'items are required' });
     }
-    const purchase = await createPurchaseDirect(data);
+    const purchase = await createPurchaseDirect(data, actingUserId(req));
     res.status(201).json({ success: true, message: 'Purchase created successfully', data: purchase });
   } catch (error: any) {
     res.status(bizStatus(error.message)).json({ success: false, error: error.message });
@@ -56,9 +60,9 @@ purchasesRouter.post('/', requirePermission('manage_purchases'), async (req: Req
 });
 
 // PUT /api/purchases/:id — master-level updates (items replacement included)
-purchasesRouter.put('/:id', requirePermission('manage_purchases'), async (req: Request, res: Response) => {
+purchasesRouter.put('/:id', requirePermission('manage_purchases'), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const updated = await updatePurchaseDirect(req.params.id, req.body);
+    const updated = await updatePurchaseDirect(req.params.id, req.body, actingUserId(req));
     if (!updated) {
       return res.status(404).json({ success: false, error: 'Purchase not found' });
     }
@@ -70,13 +74,13 @@ purchasesRouter.put('/:id', requirePermission('manage_purchases'), async (req: R
 
 // POST /api/purchases/:id/stages — save a stage document (RFQ → PO → GRN);
 // goods-receipt saves may carry the received quantities in `items`.
-purchasesRouter.post('/:id/stages', requirePermission('manage_purchases'), async (req: Request, res: Response) => {
+purchasesRouter.post('/:id/stages', requirePermission('manage_purchases'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const stageInput = req.body;
     if (!stageInput.stageType) {
       return res.status(400).json({ success: false, error: 'stageType is required' });
     }
-    const purchase = await addPurchaseStageDirect(req.params.id, stageInput);
+    const purchase = await addPurchaseStageDirect(req.params.id, stageInput, actingUserId(req));
     if (!purchase) {
       return res.status(404).json({ success: false, error: 'Purchase not found' });
     }

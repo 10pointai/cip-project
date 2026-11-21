@@ -85,6 +85,9 @@ export interface OrderDisplay extends Order {
   purchaseStageDocs?: PurchaseStageDocDisplay[];
   /** Full stage documents with their OWN line values (quotation vs order...) */
   stageDocs?: StageDocDisplay[];
+  // DONE-BY AUDIT (2026-11-21): hydrated read-time view of the users master
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 /**
@@ -174,6 +177,9 @@ export function saleToDisplay(s: Sale): OrderDisplay {
     stageDocs,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
+    // DONE-BY AUDIT (2026-11-21)
+    createdByName: (s as any).createdByName,
+    updatedByName: (s as any).updatedByName,
   } as OrderDisplay;
 }
 
@@ -239,6 +245,9 @@ export function purchaseToDisplay(p: Purchase): OrderDisplay {
     })),
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
+    // DONE-BY AUDIT (2026-11-21)
+    createdByName: (p as any).createdByName,
+    updatedByName: (p as any).updatedByName,
   } as OrderDisplay;
 }
 

@@ -118,6 +118,13 @@ export function PartyDetailModal({
                   {party.address.street ? `${party.address.street}, ` : ''}
                   {party.address.city}, {party.address.state} - {party.address.pincode}
                 </p>
+                {/* DONE-BY AUDIT (2026-11-21): acting-user read-time views of the users master */}
+                <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-1">
+                  Added by <strong className="text-[var(--color-on-surface)]">{party.createdByName || 'Unknown'}</strong>
+                  {party.updatedByName && (
+                    <> · Updated by <strong className="text-[var(--color-on-surface)]">{party.updatedByName}</strong></>
+                  )}
+                </p>
               </div>
             </div>
 

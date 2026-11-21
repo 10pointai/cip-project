@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { serverDb } from '../db';
-import { authenticateToken, requirePermission, requireEitherPermission } from '../middleware/auth';
+import { authenticateToken, requirePermission, requireEitherPermission, AuthenticatedRequest } from '../middleware/auth';
 import {
   fetchAccountsDirect,
   fetchAccountByIdDirect,
@@ -15,6 +15,10 @@ export const adjustmentsRouter = Router();
 accountsRouter.use(authenticateToken);
 transfersRouter.use(authenticateToken);
 adjustmentsRouter.use(authenticateToken);
+
+// DONE-BY AUDIT (2026-11-21): the acting user comes from the verified
+// session; the request body is never trusted for the actor stamp.
+const actingUserId = (req: AuthenticatedRequest): string | undefined => req.user?.id;
 
 // ==========================================
 // CASH & BANK ACCOUNTS
@@ -44,7 +48,7 @@ accountsRouter.get('/:id', async (req: Request, res: Response) => {
 });
 
 // POST /api/accounts
-accountsRouter.post('/', requireEitherPermission('manage_cash_bank', 'record_payments'), async (req: Request, res: Response) => {
+accountsRouter.post('/', requireEitherPermission('manage_cash_bank', 'record_payments'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { name, type, openingBalance, asOfDate, accountNumber, ifscCode, bankName, notes, isDefault } = req.body;
     if (!name || !type) {
@@ -62,7 +66,7 @@ accountsRouter.post('/', requireEitherPermission('manage_cash_bank', 'record_pay
       notes,
       isDefault: Boolean(isDefault),
       isActive: true,
-    });
+    }, actingUserId(req));
 
     res.status(201).json({ success: true, message: 'Account created successfully', data: newAccount });
   } catch (error: any) {
@@ -71,9 +75,9 @@ accountsRouter.post('/', requireEitherPermission('manage_cash_bank', 'record_pay
 });
 
 // PUT /api/accounts/:id
-accountsRouter.put('/:id', requireEitherPermission('manage_cash_bank', 'record_payments'), async (req: Request, res: Response) => {
+accountsRouter.put('/:id', requireEitherPermission('manage_cash_bank', 'record_payments'), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const updated = await serverDb.updateAccountAsync(req.params.id, req.body);
+    const updated = await serverDb.updateAccountAsync(req.params.id, req.body, actingUserId(req));
     res.json({ success: true, message: 'Account updated successfully', data: updated });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -119,7 +123,7 @@ transfersRouter.get('/', async (req: Request, res: Response) => {
 });
 
 // POST /api/transfers
-transfersRouter.post('/', requireEitherPermission('record_payments', 'manage_cash_bank'), async (req: Request, res: Response) => {
+transfersRouter.post('/', requireEitherPermission('record_payments', 'manage_cash_bank'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     // Accounts are stored by FK ONLY (Golden Rule §2) — no name copies are
     // accepted or fabricated here. Display names are resolved with JOINs
@@ -141,7 +145,7 @@ transfersRouter.post('/', requireEitherPermission('record_payments', 'manage_cas
       amount: Number(amount) || 0,
       referenceNumber,
       notes,
-    });
+    }, actingUserId(req));
 
     // Respond with the read-model row (account names JOIN-resolved)
     const hydratedTransfer = (await fetchTransfersDirect()).find((t: any) => t.id === created.id);
@@ -179,7 +183,7 @@ adjustmentsRouter.get('/', async (req: Request, res: Response) => {
 });
 
 // POST /api/adjustments
-adjustmentsRouter.post('/', requirePermission('manage_cash_bank'), async (req: Request, res: Response) => {
+adjustmentsRouter.post('/', requirePermission('manage_cash_bank'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     // Account stored by FK ONLY (Golden Rule §2) — no name copies. The display
     // name/type are resolved with JOINs against cash_bank_accounts at read time.
@@ -196,7 +200,7 @@ adjustmentsRouter.post('/', requirePermission('manage_cash_bank'), async (req: R
       reason,
       referenceNumber,
       notes,
-    });
+    }, actingUserId(req));
 
     // Respond with the read-model row (account name/type JOIN-resolved)
     const hydratedAdjustment = (await fetchAdjustmentsDirect()).find((a: any) => a.id === created.id);

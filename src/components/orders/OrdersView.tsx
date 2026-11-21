@@ -1633,13 +1633,15 @@ export function OrdersView({
                     automatically at the money stages now */}
                 <th className="py-3.5 px-3">Materials Ordered</th>
                 <th className="py-3.5 px-3 text-right">Total Amount</th>
+                {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
+                <th className="py-3.5 px-3">Created By</th>
                 <th className="py-3.5 px-4 text-center">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--color-outline-variant)]/60">
               {filteredOrders.length === 0 ? (
                 <tr>
-                  <td colSpan={!fixedType ? 7 : 6} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                  <td colSpan={!fixedType ? 8 : 7} className="py-12 text-center text-[var(--color-on-surface-variant)]">
                     <FileText className="w-8 h-8 mx-auto text-[var(--color-outline-variant)] mb-2" />
                     <p className="text-xs font-bold">No Orders Found</p>
                     <p className="text-[10px] mt-0.5">Try widening search tags or filters.</p>
@@ -1834,6 +1836,11 @@ export function OrdersView({
                             </span>
                           </div>
                         )}
+                      </td>
+
+                      {/* DONE-BY AUDIT (2026-11-21) */}
+                      <td className="py-3.5 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                        {order.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
                       </td>
 
                       {/* Action buttons — ⋮ opens a portal popover (fixed above the page) */}

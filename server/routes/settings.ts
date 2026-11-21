@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { serverDb } from '../db';
-import { authenticateToken, requirePermission } from '../middleware/auth';
+import { authenticateToken, requirePermission, AuthenticatedRequest } from '../middleware/auth';
 import { fetchSettingsDirect, updateSettingsDirect } from '../mysql/personnelService';
 
 export const settingsRouter = Router();
@@ -22,9 +22,10 @@ settingsRouter.get('/', async (req: Request, res: Response) => {
 settingsRouter.use(authenticateToken);
 
 // PUT /api/settings
-settingsRouter.put('/', requirePermission('manage_settings'), async (req: Request, res: Response) => {
+// DONE-BY AUDIT (2026-11-21): the acting user comes from the verified session.
+settingsRouter.put('/', requirePermission('manage_settings'), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const updated = await updateSettingsDirect(req.body);
+    const updated = await updateSettingsDirect(req.body, req.user?.id);
     res.json({ success: true, message: 'Settings updated successfully', data: updated });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });

@@ -175,6 +175,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         isActive: Boolean(p.is_active),
         createdAt: p.created_at,
         updatedAt: p.updated_at,
+        // DONE-BY AUDIT (2026-11-21)
+        createdById: p.created_by_id || undefined,
+        updatedById: p.updated_by_id || undefined,
       }));
 
       // 4. Items — category NAME and unit STRING are LIVE VIEWS (Golden Rule §2):
@@ -221,6 +224,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
           : undefined,
         createdAt: it.created_at,
         updatedAt: it.updated_at,
+        // DONE-BY AUDIT (2026-11-21)
+        createdById: it.created_by_id || undefined,
+        updatedById: it.updated_by_id || undefined,
       }));
 
       // 4b. Load and attach normalized item location mappings
@@ -375,6 +381,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         status: t.status,
         dueDate: t.due_date || undefined,
         createdAt: t.created_at,
+        // DONE-BY AUDIT (2026-11-21)
+        createdById: t.created_by_id || undefined,
+        updatedById: t.updated_by_id || undefined,
       }));
 
       // 6. Categories, Units, Locations
@@ -386,6 +395,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         type: c.type || 'both',
         color: c.color || undefined,
         createdAt: c.created_at,
+        // DONE-BY AUDIT (2026-11-21)
+        createdById: c.created_by_id || undefined,
+        updatedById: c.updated_by_id || undefined,
       }));
 
       const [unitRows]: [any[], any] = await conn.query('SELECT * FROM item_units ORDER BY name ASC');
@@ -395,6 +407,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         name: u.name,
         allowDecimal: u.allow_decimal !== undefined ? Boolean(u.allow_decimal) : true,
         isStandard: Boolean(u.is_standard),
+        // DONE-BY AUDIT (2026-11-21)
+        createdById: u.created_by_id || undefined,
+        updatedById: u.updated_by_id || undefined,
       }));
 
       const [locRows]: [any[], any] = await conn.query('SELECT * FROM item_locations ORDER BY name ASC');
@@ -406,6 +421,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         type: l.type || 'yard',
         isStandard: Boolean(l.is_standard),
         createdAt: l.created_at,
+        // DONE-BY AUDIT (2026-11-21)
+        createdById: l.created_by_id || undefined,
+        updatedById: l.updated_by_id || undefined,
       }));
 
       // 6b. TRACKABLE INVENTORY — unit register + lifecycle log. FK-only rows;
@@ -444,6 +462,8 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
           saleId: e.sale_id || undefined,
           supplierId: e.party_id || undefined,
           createdAt: e.created_at,
+          // DONE-BY AUDIT (2026-11-21)
+          createdById: e.created_by_id || undefined,
         });
       }
       const inventoryUnits: InventoryUnit[] = trackableUnitRows.map((u) => ({
@@ -474,6 +494,8 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         })(),
         createdAt: u.created_at,
         updatedAt: u.updated_at || undefined,
+        createdById: u.created_by_id || undefined,
+        updatedById: u.updated_by_id || undefined,
         // Display copies (JOINs resolved; display-only, never authoritative)
         itemName: u.item_display || undefined,
         itemCode: u.item_code || undefined,
@@ -508,6 +530,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         mixTemperatureCelsius: b.mix_temperature_celsius ? parseNum(b.mix_temperature_celsius) : undefined,
         notes: b.notes || undefined,
         createdAt: b.created_at,
+        // DONE-BY AUDIT (2026-11-21)
+        createdById: b.created_by_id || undefined,
+        updatedById: b.updated_by_id || undefined,
       }));
 
       // 7a. BATCH MIXES (recipes) — ingredients JOINed per mix from their FKs
@@ -544,6 +569,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         notes: m.notes || undefined,
         isActive: Boolean(m.is_active),
         createdAt: m.created_at,
+        // DONE-BY AUDIT (2026-11-21)
+        createdById: m.created_by_id || undefined,
+        updatedById: m.updated_by_id || undefined,
       }));
 
       // 8. Orders
@@ -721,6 +749,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
             stages,
             createdAt: so.created_at,
             updatedAt: so.updated_at || so.created_at,
+            // DONE-BY AUDIT (2026-11-21)
+            createdById: so.created_by_id || undefined,
+            updatedById: so.updated_by_id || undefined,
           };
         });
 
@@ -818,6 +849,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
             items: sinvItemsByInvoice.get(si.id) || [],
             createdAt: si.created_at,
             updatedAt: si.updated_at || si.created_at,
+            // DONE-BY AUDIT (2026-11-21)
+            createdById: si.created_by_id || undefined,
+            updatedById: si.updated_by_id || undefined,
           }));
         } catch (sinvLoadErr: any) {
           console.warn('[Azure MySQL] Consolidated sales invoices load skipped:', sinvLoadErr.message);
@@ -937,6 +971,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
           stages: purStagesByMaster.get(po.id) || [],
           createdAt: po.created_at,
           updatedAt: po.updated_at || po.created_at,
+          // DONE-BY AUDIT (2026-11-21)
+          createdById: po.created_by_id || undefined,
+          updatedById: po.updated_by_id || undefined,
         }));
       } catch (spErr: any) {
         console.warn('[Azure MySQL] Notice loading sales/purchase relational tables:', spErr.message);
@@ -965,6 +1002,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         fitnessExpiry: v.fitness_expiry_date || undefined,
         notes: v.notes || undefined,
         createdAt: v.created_at || new Date().toISOString(),
+        // DONE-BY AUDIT (2026-11-21)
+        createdById: v.created_by_id || undefined,
+        updatedById: v.updated_by_id || undefined,
         // EMI/financing config — the daily cron deducts from these persisted
         // columns (emiDetails round-trips through the vehicles table now).
         emiDetails: {
@@ -1062,6 +1102,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         salaryBase: parseNum(e.base_salary) || parseNum(e.daily_wage_rate),
         salaryType: (e.salary_type as any) || 'monthly',
         status: (e.status as any) || 'active',
+        // DONE-BY AUDIT (2026-11-21)
+        createdById: e.created_by_id || undefined,
+        updatedById: e.updated_by_id || undefined,
         bankAccountNo: (parseJsonField(e.bank_details, {}) as any).accountNumber || undefined,
         bankIFSC: (parseJsonField(e.bank_details, {}) as any).ifscCode || undefined,
         upiAddress: e.upi_address || undefined,
@@ -1093,6 +1136,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         notes: a.notes || undefined,
         createdAt: a.created_at,
         updatedAt: a.updated_at,
+        // DONE-BY AUDIT (2026-11-21)
+        createdById: a.created_by_id || undefined,
+        updatedById: a.updated_by_id || undefined,
       }));
 
       const [leaveRows]: [any[], any] = await conn.query('SELECT * FROM leaves ORDER BY start_date DESC');
@@ -1107,6 +1153,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         reason: l.reason || '',
         status: (l.status as any) || 'approved',
         createdAt: l.created_at || new Date().toISOString(),
+        // DONE-BY AUDIT (2026-11-21)
+        createdById: l.created_by_id || undefined,
+        updatedById: l.updated_by_id || undefined,
       }));
 
       const [payRows]: [any[], any] = await conn.query(
@@ -1154,6 +1203,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         source: (t.source as any) || 'manual',
         notes: t.notes || undefined,
         createdAt: t.created_at,
+        // DONE-BY AUDIT (2026-11-21)
+        createdById: t.created_by_id || undefined,
+        updatedById: t.updated_by_id || undefined,
       }));
 
       // 12. Cash & Bank Management
@@ -1175,6 +1227,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
           isActive: Boolean(a.is_active),
           createdAt: a.created_at,
           updatedAt: a.updated_at || a.created_at,
+          // DONE-BY AUDIT (2026-11-21)
+          createdById: a.created_by_id || undefined,
+          updatedById: a.updated_by_id || undefined,
         }));
       } catch (accErr: any) {
         console.warn('[Azure MySQL] Notice querying cash_bank_accounts:', accErr.message);
@@ -1204,6 +1259,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
           referenceNumber: tr.reference_number || undefined,
           notes: tr.notes || undefined,
           createdAt: tr.created_at,
+          // DONE-BY AUDIT (2026-11-21)
+          createdById: tr.created_by_id || undefined,
+          updatedById: tr.updated_by_id || undefined,
         }));
       } catch (trfErr: any) {
         console.warn('[Azure MySQL] Notice querying internal_transfers:', trfErr.message);
@@ -1233,6 +1291,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
           referenceNumber: ad.reference_number || undefined,
           notes: ad.notes || undefined,
           createdAt: ad.created_at,
+          // DONE-BY AUDIT (2026-11-21)
+          createdById: ad.created_by_id || undefined,
+          updatedById: ad.updated_by_id || undefined,
         }));
       } catch (adjErr: any) {
         console.warn('[Azure MySQL] Notice querying account_adjustments:', adjErr.message);
@@ -1272,6 +1333,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
           referenceNumber: a.reference_number || undefined,
           notes: a.notes || undefined,
           createdAt: a.created_at,
+          // DONE-BY AUDIT (2026-11-21)
+          createdById: a.created_by_id || undefined,
+          updatedById: a.updated_by_id || undefined,
         }));
       } catch (isaErr: any) {
         console.warn('[Azure MySQL] Notice querying item_stock_adjustments:', isaErr.message);
@@ -1375,6 +1439,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         source: (e.source as any) || 'auto',
         notes: e.notes || undefined,
         createdAt: e.created_at || new Date().toISOString(),
+        // DONE-BY AUDIT (2026-11-21): manual rows carry the recording operator
+        createdById: e.created_by_id || undefined,
+        updatedById: e.updated_by_id || undefined,
       }));
 
       // 10a-v. Vehicle expense log — generic + diesel entries (FK-only; the
@@ -1396,6 +1463,9 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         dieselLocationId: e.diesel_location_id || undefined,
         notes: e.notes || undefined,
         createdAt: e.created_at || new Date().toISOString(),
+        // DONE-BY AUDIT (2026-11-21)
+        createdById: e.created_by_id || undefined,
+        updatedById: e.updated_by_id || undefined,
       }));
       const [expenseDocRows]: any[] = await conn.query(
         'SELECT * FROM vehicle_expense_documents ORDER BY created_at ASC'
@@ -1419,6 +1489,8 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
           key: d.app_key,
           value: d.app_value,
           updatedAt: d.updated_at || new Date().toISOString(),
+          // DONE-BY AUDIT (2026-11-21)
+          updatedById: d.updated_by_id || undefined,
         }));
       } catch (appDefErr: any) {
         console.warn('[Azure MySQL] app_defaults load skipped:', appDefErr.message);
@@ -1492,8 +1564,8 @@ export async function liveSyncParty(party: Party, isDelete = false) {
       await pool.query('DELETE FROM parties WHERE id = ?', [party.id]);
     } else {
       await pool.query(
-        `REPLACE INTO parties (id, name, trade_name, type, category, gstin, pan, contact_person, phone, email, address, payment_terms_days, credit_limit, opening_balance, opening_balance_type, current_balance, notes, is_active, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `REPLACE INTO parties (id, name, trade_name, type, category, gstin, pan, contact_person, phone, email, address, payment_terms_days, credit_limit, opening_balance, opening_balance_type, current_balance, notes, is_active, created_by_id, updated_by_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           party.id,
           party.name,
@@ -1513,6 +1585,8 @@ export async function liveSyncParty(party: Party, isDelete = false) {
           party.currentBalance || 0,
           party.notes || null,
           party.isActive ? 1 : 0,
+          (party as any).createdById || null,
+          (party as any).updatedById || null,
           party.createdAt || new Date().toISOString(),
           party.updatedAt || new Date().toISOString(),
         ]
@@ -1559,12 +1633,14 @@ export async function liveSyncItem(item: Item, isDelete = false) {
       // in item_location_mapping (written below with FKs + numeric stock).
       const unitId = await resolveUnitIdByCode(item.unit);
       await pool.query(
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
         `REPLACE INTO items (
           id, name, code, type, category_id, unit_id, hsn_sac_code,
           tax_rate_gst, sale_price, purchase_price, opening_stock, opening_stock_price,
           opening_stock_date, technical_specs, remarks, is_active, current_stock,
-          min_stock_level, max_capacity, last_stock_update, movements, attributes, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          min_stock_level, max_capacity, last_stock_update, movements, attributes,
+          created_by_id, updated_by_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           item.id,
           item.name,
@@ -1591,6 +1667,8 @@ export async function liveSyncItem(item: Item, isDelete = false) {
           // DYNAMIC ATTRIBUTES (serialized, 2026-11-16): the declared per-unit
           // key list (a trackable item's register schema)
           item.attributes && item.attributes.length > 0 ? JSON.stringify(item.attributes) : null,
+          (item as any).createdById || null,
+          (item as any).updatedById || null,
           item.createdAt || new Date().toISOString(),
           item.updatedAt || new Date().toISOString(),
         ]
@@ -1646,8 +1724,11 @@ export async function liveSyncTransaction(txn: Transaction, isDelete = false) {
     } else {
       await pool.query(
         // FKs only (Golden Rule §2): no party_name/account_name copies stored.
-        `REPLACE INTO transactions (id, voucher_number, date, account_id, type, party_id, amount, payment_mode, reference_number, material_or_service, quantity_tonnes, description, status, due_date, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row (created_by_id is
+        // untouched by a re-run — REPLACE overwrites it, but the id comes from
+        // the sandbox which preserves the original booking user).
+        `REPLACE INTO transactions (id, voucher_number, date, account_id, type, party_id, amount, payment_mode, reference_number, material_or_service, quantity_tonnes, description, status, due_date, created_by_id, updated_by_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           txn.id,
           txn.voucherNumber,
@@ -1663,6 +1744,8 @@ export async function liveSyncTransaction(txn: Transaction, isDelete = false) {
           txn.description,
           txn.status || 'paid',
           txn.dueDate || null,
+          (txn as any).createdById || null,
+          (txn as any).updatedById || null,
           txn.createdAt || new Date().toISOString(),
         ]
       );
@@ -1729,8 +1812,9 @@ export async function liveSyncSale(sale: Sale, isDelete = false) {
   if (!pool) return;
   try {
     await pool.query(
-      `REPLACE INTO sales_orders (id, sale_number, party_id, date, status, notes, vehicle_id, site_address, distance_km, weight_tonnes, vehicle_no, driver_name, transport_charges, freight_rate_per_tonne, freight_gst_rate, inventory_applied, cash_applied, is_invoiced, settlement_type, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+      `REPLACE INTO sales_orders (id, sale_number, party_id, date, status, notes, vehicle_id, site_address, distance_km, weight_tonnes, vehicle_no, driver_name, transport_charges, freight_rate_per_tonne, freight_gst_rate, inventory_applied, cash_applied, is_invoiced, settlement_type, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, created_by_id, updated_by_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sale.id,
         sale.saleNumber,
@@ -1757,6 +1841,8 @@ export async function liveSyncSale(sale: Sale, isDelete = false) {
         sale.settlementVoucherId || null,
         sale.settledAmount !== undefined && sale.settledAmount !== null ? sale.settledAmount : null,
         sale.settledDate || null,
+        (sale as any).createdById || null,
+        (sale as any).updatedById || null,
         sale.createdAt || new Date().toISOString(),
         sale.updatedAt || new Date().toISOString(),
       ]
@@ -1850,8 +1936,9 @@ export async function liveSyncSaleInvoice(invoice: SaleInvoice, isDelete = false
   if (!pool) return;
   try {
     await pool.query(
-      `REPLACE INTO sales_invoices (id, invoice_number, party_id, date, notes, subtotal, tax_amount, total_amount, transport_charges, settlement_type, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, cash_applied, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+      `REPLACE INTO sales_invoices (id, invoice_number, party_id, date, notes, subtotal, tax_amount, total_amount, transport_charges, settlement_type, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, cash_applied, created_by_id, updated_by_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         invoice.id,
         invoice.invoiceNumber,
@@ -1870,6 +1957,8 @@ export async function liveSyncSaleInvoice(invoice: SaleInvoice, isDelete = false
         invoice.settledAmount !== undefined && invoice.settledAmount !== null ? numOr(invoice.settledAmount) : null,
         invoice.settledDate || null,
         invoice.cashApplied ? 1 : 0,
+        (invoice as any).createdById || null,
+        (invoice as any).updatedById || null,
         invoice.createdAt || new Date().toISOString(),
         invoice.updatedAt || new Date().toISOString(),
       ]
@@ -1950,8 +2039,9 @@ export async function liveSyncPurchase(purchase: Purchase, isDelete = false) {
   if (!pool) return;
   try {
     await pool.query(
-      `REPLACE INTO purchase_orders (id, purchase_number, party_id, date, status, notes, inventory_applied, cash_applied, settlement_type, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+      `REPLACE INTO purchase_orders (id, purchase_number, party_id, date, status, notes, inventory_applied, cash_applied, settlement_type, settlement_account_id, payment_mode, invoice_voucher_id, settlement_voucher_id, settled_amount, settled_date, created_by_id, updated_by_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         purchase.id,
         purchase.purchaseNumber,
@@ -1968,6 +2058,8 @@ export async function liveSyncPurchase(purchase: Purchase, isDelete = false) {
         purchase.settlementVoucherId || null,
         purchase.settledAmount !== undefined && purchase.settledAmount !== null ? purchase.settledAmount : null,
         purchase.settledDate || null,
+        (purchase as any).createdById || null,
+        (purchase as any).updatedById || null,
         purchase.createdAt || new Date().toISOString(),
         purchase.updatedAt || new Date().toISOString(),
       ]
@@ -2067,8 +2159,9 @@ export async function liveSyncBatch(batch: ProductionBatchRun, isDelete = false)
       await pool.query('DELETE FROM production_batches WHERE id = ?', [batch.id]);
     } else {
       await pool.query(
-        `REPLACE INTO production_batches (id, batch_number, date, plant_unit, target_item_id, target_item_name, target_quantity, unit, raw_materials_consumed, batch_mix_id, output_rate, output_value, supervisor_name, mix_temperature_celsius, sale_id, sale_item_id, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+        `REPLACE INTO production_batches (id, batch_number, date, plant_unit, target_item_id, target_item_name, target_quantity, unit, raw_materials_consumed, batch_mix_id, output_rate, output_value, supervisor_name, mix_temperature_celsius, sale_id, sale_item_id, notes, created_by_id, updated_by_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           batch.id,
           batch.batchNumber,
@@ -2090,6 +2183,8 @@ export async function liveSyncBatch(batch: ProductionBatchRun, isDelete = false)
           batch.saleId || null,
           batch.saleItemId || null,
           batch.notes || null,
+          (batch as any).createdById || null,
+          (batch as any).updatedById || null,
           batch.createdAt || new Date().toISOString(),
         ]
       );
@@ -2115,8 +2210,9 @@ export async function liveSyncBatchMix(mix: BatchMix, isDelete = false) {
       return;
     }
     await pool.query(
-      `REPLACE INTO batch_mixes (id, mix_number, name, output_item_id, basis, reference_output_qty, notes, is_active, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+      `REPLACE INTO batch_mixes (id, mix_number, name, output_item_id, basis, reference_output_qty, notes, is_active, created_by_id, updated_by_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         mix.id,
         mix.mixNumber || null,
@@ -2132,6 +2228,8 @@ export async function liveSyncBatchMix(mix: BatchMix, isDelete = false) {
         mix.referenceOutputQty ?? null,
         mix.notes || null,
         mix.isActive === false ? 0 : 1,
+        (mix as any).createdById || null,
+        (mix as any).updatedById || null,
         mix.createdAt,
       ]
     );
@@ -2171,11 +2269,12 @@ export async function liveSyncInventoryUnit(unit: InventoryUnit, isDelete = fals
       return;
     }
     await pool.query(
+      // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
       `REPLACE INTO inventory_units (
         id, item_id, serial_number, status, location_id, vehicle_id, position,
         fit_odometer, party_id, purchase_date, purchase_cost, warranty_expiry,
-        sale_id, purchase_id, unit_condition, notes, attributes, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        sale_id, purchase_id, unit_condition, notes, attributes, created_by_id, updated_by_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         unit.id,
         unit.itemId,
@@ -2197,6 +2296,8 @@ export async function liveSyncInventoryUnit(unit: InventoryUnit, isDelete = fals
         // DYNAMIC ATTRIBUTES (serialized, 2026-11-16): values keyed by the
         // owning item's declared keys
         unit.attributes && Object.keys(unit.attributes).length > 0 ? JSON.stringify(unit.attributes) : null,
+        (unit as any).createdById || null,
+        (unit as any).updatedById || null,
         unit.createdAt,
         unit.updatedAt || unit.createdAt,
       ]
@@ -2215,10 +2316,11 @@ export async function liveSyncInventoryUnitEvent(event: InventoryUnitEvent, isDe
       return;
     }
     await pool.query(
+      // DONE-BY AUDIT (2026-11-21): the movement's acting user rides the row.
       `REPLACE INTO inventory_unit_events (
         id, unit_id, date, type, notes, vehicle_id, position, odometer,
-        location_id, sale_id, party_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        location_id, sale_id, party_id, created_by_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         event.id,
         event.unitId,
@@ -2231,6 +2333,7 @@ export async function liveSyncInventoryUnitEvent(event: InventoryUnitEvent, isDe
         event.locationId || null,
         event.saleId || null,
         event.supplierId || null,
+        (event as any).createdById || null,
         event.createdAt,
       ]
     );
@@ -2279,9 +2382,10 @@ export async function liveSyncVehicle(v: Vehicle, isDelete = false) {
       await pool.query('DELETE FROM vehicles WHERE id = ?', [v.id]);
     } else {
       await pool.query(
-        `REPLACE INTO vehicles (id, registration_number, type, capacity_tonnes, tare_weight_kg, status, assigned_driver_id, current_odometer, fuel_capacity_litres, fitness_expiry_date, insurance_expiry_date, insurance_monthly_amount, puc_expiry_date, notes, is_active, created_at, updated_at,
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+        `REPLACE INTO vehicles (id, registration_number, type, capacity_tonnes, tare_weight_kg, status, assigned_driver_id, current_odometer, fuel_capacity_litres, fitness_expiry_date, insurance_expiry_date, insurance_monthly_amount, puc_expiry_date, notes, is_active, created_by_id, updated_by_id, created_at, updated_at,
           emi_has_emi, emi_financier_name, emi_loan_account_number, emi_amount, emi_due_day, emi_loan_start_date, emi_loan_end_date, emi_total_loan_amount, emi_interest_rate, emi_tenure_months, emi_paid_count, emi_account_id, emi_auto_debit_account, emi_status, emi_last_payment_date, emi_notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           v.id,
           v.vehicleNo,
@@ -2298,6 +2402,8 @@ export async function liveSyncVehicle(v: Vehicle, isDelete = false) {
           null,
           v.notes || null,
           1,
+          (v as any).createdById || null,
+          (v as any).updatedById || null,
           v.createdAt || new Date().toISOString(),
           new Date().toISOString(),
           // EMI config (the emiDetails object persists with the vehicle row)
@@ -2333,8 +2439,9 @@ export async function liveSyncVehicleEmiEntry(entry: VehicleEmiEntry, isDelete =
       await pool.query('DELETE FROM vehicle_emi_entries WHERE id = ?', [entry.id]);
     } else {
       await pool.query(
-        `REPLACE INTO vehicle_emi_entries (id, vehicle_id, account_id, date, amount, source, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [entry.id, entry.vehicleId, entry.accountId, entry.date, entry.amount || 0, entry.source || 'auto', entry.notes || null, entry.createdAt || new Date().toISOString()]
+        // DONE-BY AUDIT (2026-11-21): manual rows carry the operator; auto rows null.
+        `REPLACE INTO vehicle_emi_entries (id, vehicle_id, account_id, date, amount, source, notes, created_by_id, updated_by_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [entry.id, entry.vehicleId, entry.accountId, entry.date, entry.amount || 0, entry.source || 'auto', entry.notes || null, (entry as any).createdById || null, (entry as any).updatedById || null, entry.createdAt || new Date().toISOString()]
       );
     }
   } catch (e: any) {
@@ -2350,7 +2457,8 @@ export async function liveSyncVehicleExpenseEntry(e: VehicleExpenseEntry, isDele
       await pool.query('DELETE FROM vehicle_expense_entries WHERE id = ?', [e.id]);
     } else {
       await pool.query(
-        `REPLACE INTO vehicle_expense_entries (id, entry_type, vehicle_id, account_id, date, expense_type, litres, rate_per_litre, amount, diesel_item_id, diesel_location_id, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+        `REPLACE INTO vehicle_expense_entries (id, entry_type, vehicle_id, account_id, date, expense_type, litres, rate_per_litre, amount, diesel_item_id, diesel_location_id, notes, created_by_id, updated_by_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           e.id,
           e.entryType || 'expense',
@@ -2364,6 +2472,8 @@ export async function liveSyncVehicleExpenseEntry(e: VehicleExpenseEntry, isDele
           e.dieselItemId || null,
           e.dieselLocationId || null,
           e.notes || null,
+          (e as any).createdById || null,
+          (e as any).updatedById || null,
           e.createdAt || new Date().toISOString(),
         ]
       );
@@ -2494,8 +2604,9 @@ export async function liveSyncEmployee(emp: Employee, isDelete = false) {
       await pool.query('DELETE FROM employees WHERE id = ?', [emp.id]);
     } else {
       await pool.query(
-        `REPLACE INTO employees (id, employee_code, name, designation, department, phone, email, date_of_joining, salary_type, base_salary, daily_wage_rate, opening_balance, bank_details, upi_address, name_on_account, default_in_time, default_out_time, aadhar_number, pan_number, status, emergency_contact, notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+        `REPLACE INTO employees (id, employee_code, name, designation, department, phone, email, date_of_joining, salary_type, base_salary, daily_wage_rate, opening_balance, bank_details, upi_address, name_on_account, default_in_time, default_out_time, aadhar_number, pan_number, status, created_by_id, updated_by_id, emergency_contact, notes, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           emp.id,
           emp.id,
@@ -2517,6 +2628,8 @@ export async function liveSyncEmployee(emp: Employee, isDelete = false) {
           emp.aadhaarNo || null,
           emp.panNo || null,
           emp.status || 'active',
+          (emp as any).createdById || null,
+          (emp as any).updatedById || null,
           null,
           null,
           emp.createdAt || new Date().toISOString(),
@@ -2537,8 +2650,9 @@ export async function liveSyncAttendance(att: EmployeeAttendance, isDelete = fal
       await pool.query('DELETE FROM attendance WHERE id = ?', [att.id]);
     } else {
       await pool.query(
-        `REPLACE INTO attendance (id, employee_id, date, status, in_time, out_time, work_hours, overtime_hours, notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+        `REPLACE INTO attendance (id, employee_id, date, status, in_time, out_time, work_hours, overtime_hours, notes, created_by_id, updated_by_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           att.id,
           att.employeeId,
@@ -2549,6 +2663,8 @@ export async function liveSyncAttendance(att: EmployeeAttendance, isDelete = fal
           att.totalHoursWorked || 0,
           0,
           att.notes || null,
+          (att as any).createdById || null,
+          (att as any).updatedById || null,
           att.createdAt || new Date().toISOString(),
           att.updatedAt || new Date().toISOString(),
         ]
@@ -2567,8 +2683,9 @@ export async function liveSyncLeave(lv: EmployeeLeave, isDelete = false) {
       await pool.query('DELETE FROM leaves WHERE id = ?', [lv.id]);
     } else {
       await pool.query(
-        `REPLACE INTO leaves (id, employee_id, employee_name, leave_type, start_date, end_date, total_days, reason, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row.
+        `REPLACE INTO leaves (id, employee_id, employee_name, leave_type, start_date, end_date, total_days, reason, status, created_by_id, updated_by_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           lv.id,
           lv.employeeId,
@@ -2579,6 +2696,8 @@ export async function liveSyncLeave(lv: EmployeeLeave, isDelete = false) {
           lv.totalDays || 1,
           lv.reason || null,
           lv.status || 'approved',
+          (lv as any).createdById || null,
+          (lv as any).updatedById || null,
           lv.createdAt || new Date().toISOString(),
         ]
       );
@@ -2630,8 +2749,9 @@ export async function liveSyncEmployeeLedgerTransaction(t: EmployeeLedgerTransac
       await pool.query('DELETE FROM employee_ledger_transactions WHERE id = ?', [t.id]);
     } else {
       await pool.query(
-        `REPLACE INTO employee_ledger_transactions (id, employee_id, date, type, amount, reason, account_id, direction, intent, source, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        // DONE-BY AUDIT (2026-11-21): manual payroll rows carry the operator.
+        `REPLACE INTO employee_ledger_transactions (id, employee_id, date, type, amount, reason, account_id, direction, intent, source, created_by_id, updated_by_id, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           t.id,
           t.employeeId,
@@ -2643,6 +2763,8 @@ export async function liveSyncEmployeeLedgerTransaction(t: EmployeeLedgerTransac
           t.direction || null,
           (t as any).intent || null,
           t.source || 'manual',
+          (t as any).createdById || null,
+          (t as any).updatedById || null,
           t.notes || null,
           t.createdAt || new Date().toISOString(),
         ]
@@ -2663,11 +2785,12 @@ export async function liveSyncSettings(s: CompanySettings) {
     // nondeterministic; hydration now consolidates stray older rows.
     // tagline is written here too — omitting it REPLACE-deleted the value.
     await pool.query(
+      // DONE-BY AUDIT (2026-11-21): the last saver's actor id rides the row.
       `REPLACE INTO company_settings (
         id, company_name, tagline, trade_name, gstin, pan, cin, email, phone, website,
         address_street, address_city, address_state, address_state_code, address_pincode,
-        invoice_notes, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        invoice_notes, updated_by_id, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         'default_settings',
         s.companyName,
@@ -2685,6 +2808,8 @@ export async function liveSyncSettings(s: CompanySettings) {
         s.registeredAddress?.stateCode || null,
         s.registeredAddress?.pincode || null,
         s.invoiceNotes || '',
+        // DONE-BY AUDIT (2026-11-21): the last saver's actor id
+        (s as any).updatedById || null,
         new Date().toISOString(),
       ]
     );
@@ -2731,8 +2856,9 @@ export async function liveSyncAppDefault(d: AppDefault) {
   if (!pool) return;
   try {
     await pool.query(
-      `REPLACE INTO app_defaults (app_key, app_value, updated_at) VALUES (?, ?, ?)`,
-      [d.key, d.value, d.updatedAt || new Date().toISOString()]
+      // DONE-BY AUDIT (2026-11-21): the saver's actor id rides the row.
+      `REPLACE INTO app_defaults (app_key, app_value, updated_by_id, updated_at) VALUES (?, ?, ?, ?)`,
+      [d.key, d.value, (d as any).updatedById || null, d.updatedAt || new Date().toISOString()]
     );
   } catch (e: any) {
     console.error('[Azure MySQL LiveSync] Failed to sync app default:', e.message);
@@ -2879,8 +3005,9 @@ export async function liveSyncCategory(cat: ItemCategory, isDelete = false) {
       await pool.query('DELETE FROM item_categories WHERE id = ?', [cat.id]);
     } else {
       await pool.query(
-        `REPLACE INTO item_categories (id, name, description, type, color, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-        [cat.id, cat.name, cat.description || null, cat.type || 'both', cat.color || null, cat.createdAt || new Date().toISOString()]
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+        `REPLACE INTO item_categories (id, name, description, type, color, created_by_id, updated_by_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [cat.id, cat.name, cat.description || null, cat.type || 'both', cat.color || null, (cat as any).createdById || null, (cat as any).updatedById || null, cat.createdAt || new Date().toISOString()]
       );
     }
   } catch (e: any) {
@@ -2896,8 +3023,9 @@ export async function liveSyncUnit(unit: ItemUnit, isDelete = false) {
       await pool.query('DELETE FROM item_units WHERE id = ?', [unit.id]);
     } else {
       await pool.query(
-        `REPLACE INTO item_units (id, code, name, allow_decimal, is_standard) VALUES (?, ?, ?, ?, ?)`,
-        [unit.id, unit.code, unit.name, unit.allowDecimal ? 1 : 0, unit.isStandard ? 1 : 0]
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+        `REPLACE INTO item_units (id, code, name, allow_decimal, is_standard, created_by_id, updated_by_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [unit.id, unit.code, unit.name, unit.allowDecimal ? 1 : 0, unit.isStandard ? 1 : 0, (unit as any).createdById || null, (unit as any).updatedById || null]
       );
     }
   } catch (e: any) {
@@ -2913,8 +3041,9 @@ export async function liveSyncLocation(loc: ItemLocation, isDelete = false) {
       await pool.query('DELETE FROM item_locations WHERE id = ?', [loc.id]);
     } else {
       await pool.query(
-        `REPLACE INTO item_locations (id, name, code, description, capacity, type, is_standard, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [loc.id, loc.name, loc.code || null, loc.description || null, loc.capacity || '0', loc.type || 'yard', loc.isStandard ? 1 : 0, loc.createdAt || new Date().toISOString()]
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+        `REPLACE INTO item_locations (id, name, code, description, capacity, type, is_standard, created_by_id, updated_by_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [loc.id, loc.name, loc.code || null, loc.description || null, loc.capacity || '0', loc.type || 'yard', loc.isStandard ? 1 : 0, (loc as any).createdById || null, (loc as any).updatedById || null, loc.createdAt || new Date().toISOString()]
       );
     }
   } catch (e: any) {
@@ -2930,8 +3059,10 @@ export async function liveSyncAccount(acc: CashBankAccount, isDelete = false) {
       await pool.query('DELETE FROM cash_bank_accounts WHERE id = ?', [acc.id]);
     } else {
       await pool.query(
-        `REPLACE INTO cash_bank_accounts (id, name, type, account_number, ifsc_code, bank_name, opening_balance, current_balance, as_of_date, notes, is_default, is_active, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row; display names
+        // JOIN from users at read time (Golden Rule §2).
+        `REPLACE INTO cash_bank_accounts (id, name, type, account_number, ifsc_code, bank_name, opening_balance, current_balance, as_of_date, notes, is_default, is_active, created_by_id, updated_by_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           acc.id,
           acc.name,
@@ -2945,6 +3076,8 @@ export async function liveSyncAccount(acc: CashBankAccount, isDelete = false) {
           acc.notes || null,
           acc.isDefault ? 1 : 0,
           acc.isActive ?? true ? 1 : 0,
+          (acc as any).createdById || null,
+          (acc as any).updatedById || null,
           acc.createdAt || new Date().toISOString(),
           acc.updatedAt || new Date().toISOString(),
         ]
@@ -2965,8 +3098,9 @@ export async function liveSyncTransfer(trf: InternalTransfer, isDelete = false) 
       // Stores account FKs only (Golden Rule, documentation §2); from/to account
       // display names are resolved with JOINs at read time so renames propagate.
       await pool.query(
-        `REPLACE INTO internal_transfers (id, transfer_number, date, from_account_id, to_account_id, transfer_type, amount, reference_number, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+        `REPLACE INTO internal_transfers (id, transfer_number, date, from_account_id, to_account_id, transfer_type, amount, reference_number, notes, created_by_id, updated_by_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           trf.id,
           trf.transferNumber,
@@ -2977,6 +3111,8 @@ export async function liveSyncTransfer(trf: InternalTransfer, isDelete = false) 
           trf.amount || 0,
           trf.referenceNumber || null,
           trf.notes || null,
+          (trf as any).createdById || null,
+          (trf as any).updatedById || null,
           trf.createdAt || new Date().toISOString(),
         ]
       );
@@ -2996,8 +3132,9 @@ export async function liveSyncAdjustment(adj: AccountAdjustment, isDelete = fals
       // Stores the account FK only (Golden Rule, documentation §2); account
       // display name/type are resolved with JOINs at read time so renames propagate.
       await pool.query(
-        `REPLACE INTO account_adjustments (id, adjustment_number, account_id, date, type, amount, previous_balance, new_balance, reason, reference_number, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+        `REPLACE INTO account_adjustments (id, adjustment_number, account_id, date, type, amount, previous_balance, new_balance, reason, reference_number, notes, created_by_id, updated_by_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           adj.id,
           adj.adjustmentNumber,
@@ -3010,6 +3147,8 @@ export async function liveSyncAdjustment(adj: AccountAdjustment, isDelete = fals
           adj.reason,
           adj.referenceNumber || null,
           adj.notes || null,
+          (adj as any).createdById || null,
+          (adj as any).updatedById || null,
           adj.createdAt || new Date().toISOString(),
         ]
       );
@@ -3030,8 +3169,9 @@ export async function liveSyncStockAdjustment(adj: ItemStockAdjustment, isDelete
       // Stores FKs only (item_id, location_id); item name/code/unit and location
       // display name are resolved with JOINs at read time so renames propagate.
       await pool.query(
-        `REPLACE INTO item_stock_adjustments (id, adjustment_number, item_id, location_id, from_location_id, to_location_id, adjustment_date, adjustment_type, quantity, rate, total_value, previous_stock, new_stock, reason, reference_number, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        // DONE-BY AUDIT (2026-11-21): actor ids ride the row (§2 — names at read).
+        `REPLACE INTO item_stock_adjustments (id, adjustment_number, item_id, location_id, from_location_id, to_location_id, adjustment_date, adjustment_type, quantity, rate, total_value, previous_stock, new_stock, reason, reference_number, notes, created_by_id, updated_by_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           adj.id,
           adj.adjustmentNumber,
@@ -3049,6 +3189,8 @@ export async function liveSyncStockAdjustment(adj: ItemStockAdjustment, isDelete
           adj.reason || null,
           adj.referenceNumber || null,
           adj.notes || null,
+          (adj as any).createdById || null,
+          (adj as any).updatedById || null,
           adj.createdAt || new Date().toISOString(),
         ]
       );

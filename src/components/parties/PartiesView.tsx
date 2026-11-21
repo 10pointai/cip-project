@@ -477,6 +477,13 @@ export function PartiesView({
                       <span className="text-[var(--color-on-surface-variant)]">Terms:</span>
                       <span className="text-[var(--color-on-surface)] font-medium">{party.paymentTermsDays} Days</span>
                     </div>
+                    {/* DONE-BY AUDIT (2026-11-21) */}
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-[var(--color-on-surface-variant)]">Added by:</span>
+                      <span className="text-[var(--color-on-surface)] font-medium truncate max-w-[150px]">
+                        {party.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
+                      </span>
+                    </div>
                   </div>
 
                   {/* Balance Display */}
@@ -557,6 +564,9 @@ export function PartiesView({
                   <th className="py-3 px-3">Contact & City</th>
                   <th className="py-3 px-3">Credit Terms</th>
                   <th className="py-3 px-4 text-right">Outstanding Balance</th>
+                  {/* DONE-BY AUDIT (2026-11-21): acting user, resolved live from the users master */}
+                  <th className="py-3 px-3">Created By</th>
+                  <th className="py-3 px-3">Updated By</th>
                   <th className="py-3 px-4 text-center">Actions</th>
                 </tr>
               </thead>
@@ -606,6 +616,12 @@ export function PartiesView({
                       >
                         {formatCurrency(Math.abs(party.currentBalance), settings.currency.symbol)}{' '}
                         <span className="text-[10px] uppercase">{isReceivable ? '(Dr)' : isPayable ? '(Cr)' : ''}</span>
+                      </td>
+                      <td className="py-3.5 px-3 text-[11px] text-[var(--color-on-surface)] font-medium">
+                        {party.createdByName || <span className="text-[var(--color-outline)] italic">Unknown</span>}
+                      </td>
+                      <td className="py-3.5 px-3 text-[11px] text-[var(--color-on-surface)] font-medium">
+                        {party.updatedByName || <span className="text-[var(--color-outline)] italic">—</span>}
                       </td>
                       <td className="py-3.5 px-4 text-center">
                         <div className="flex items-center justify-center gap-1.5">                          {canManageParties && (

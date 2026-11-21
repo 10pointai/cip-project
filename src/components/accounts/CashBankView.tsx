@@ -258,6 +258,7 @@ export function CashBankView({
       moneyOut: number;
       createdAt: string;
       runningBalance: number;
+      recordedBy?: string;
     }> = [];
 
     // 1. Transactions (Payment in / out / sale / purchase)
@@ -275,6 +276,7 @@ export function CashBankView({
           moneyIn: isCredit ? Number(t.amount) : 0,
           moneyOut: !isCredit ? Number(t.amount) : 0,
           createdAt: t.createdAt,
+          recordedBy: t.createdByName,
         });
       });
 
@@ -291,6 +293,7 @@ export function CashBankView({
           moneyIn: Number(trf.amount),
           moneyOut: 0,
           createdAt: trf.createdAt,
+          recordedBy: trf.createdByName,
         });
       } else if (trf.fromAccountId === selectedAccountId) {
         list.push({
@@ -303,6 +306,7 @@ export function CashBankView({
           moneyIn: 0,
           moneyOut: Number(trf.amount),
           createdAt: trf.createdAt,
+          recordedBy: trf.createdByName,
         });
       }
     });
@@ -322,6 +326,7 @@ export function CashBankView({
           moneyIn: isInc ? Number(adj.amount) : 0,
           moneyOut: !isInc ? Number(adj.amount) : 0,
           createdAt: adj.createdAt,
+          recordedBy: adj.createdByName,
         });
       });
 
@@ -884,12 +889,14 @@ export function CashBankView({
                   <th className="py-3.5 px-4">To Account</th>
                   <th className="py-3.5 px-4">Ref / Cheque No.</th>
                   <th className="py-3.5 px-4 text-right">Amount</th>
+                  {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
+                  <th className="py-3.5 px-4">Recorded By</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--color-outline-variant)]">
                 {transfers.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-8 text-center text-xs text-[var(--color-on-surface-variant)]">
+                    <td colSpan={7} className="py-8 text-center text-xs text-[var(--color-on-surface-variant)]">
                       No internal transfer vouchers recorded yet.
                     </td>
                   </tr>
@@ -913,6 +920,9 @@ export function CashBankView({
                       </td>
                       <td className="py-3 px-4 text-right font-bold text-sm text-[var(--color-on-surface)]">
                         {formatCurrency(trf.amount, currencySymbol)}
+                      </td>
+                      <td className="py-3 px-4 text-[11px] font-medium text-[var(--color-on-surface)]">
+                        {trf.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
                       </td>
                     </tr>
                   ))
@@ -951,12 +961,14 @@ export function CashBankView({
                   <th className="py-3.5 px-4">Reason</th>
                   <th className="py-3.5 px-4 text-right">Adj Amount</th>
                   <th className="py-3.5 px-4 text-right">New Balance</th>
+                  {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
+                  <th className="py-3.5 px-4">Recorded By</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--color-outline-variant)]">
                 {adjustments.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-8 text-center text-xs text-[var(--color-on-surface-variant)]">
+                    <td colSpan={8} className="py-8 text-center text-xs text-[var(--color-on-surface-variant)]">
                       No adjustments logged yet.
                     </td>
                   </tr>
@@ -995,6 +1007,9 @@ export function CashBankView({
                       </td>
                       <td className="py-3 px-4 text-right font-mono font-bold text-[var(--color-on-surface)]">
                         {formatCurrency(adj.newBalance, currencySymbol)}
+                      </td>
+                      <td className="py-3 px-4 text-[11px] font-medium text-[var(--color-on-surface)]">
+                        {adj.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
                       </td>
                     </tr>
                   ))
@@ -1043,7 +1058,7 @@ export function CashBankView({
           /* TABULAR LIST VIEW (HORIZONTALLY SCROLLABLE LIKE INVENTORY) */
           <div className="bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs min-w-[950px]">
+              <table className="w-full text-left border-collapse text-xs min-w-[1080px]">
                 <thead>
                   <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
                     <th className="py-3.5 px-4">Account Name & Category</th>
@@ -1052,6 +1067,8 @@ export function CashBankView({
                     <th className="py-3.5 px-3">IFSC / Branch</th>
                     <th className="py-3.5 px-3 text-right">Opening Balance</th>
                     <th className="py-3.5 px-3 text-right">Current Balance</th>
+                    {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
+                    <th className="py-3.5 px-3">Created By</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--color-outline-variant)]">
@@ -1153,6 +1170,11 @@ export function CashBankView({
                           <div className="text-[9px] font-semibold text-[var(--color-primary)]">
                             Available Liquid
                           </div>
+                        </td>
+
+                        {/* DONE-BY AUDIT (2026-11-21) */}
+                        <td className="py-3 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                          {acc.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
                         </td>
 
                       </tr>
@@ -1358,12 +1380,14 @@ export function CashBankView({
 
           {/* Account Statement Table */}
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs min-w-[820px]">
+            <table className="w-full text-left text-xs min-w-[940px]">
               <thead className="bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] uppercase tracking-wider text-[10px] font-bold border-b border-[var(--color-outline-variant)]">
                 <tr>
                   <th className="py-3 px-4">Date</th>
                   <th className="py-3 px-4">Transaction / Party</th>
                   <th className="py-3 px-4">Ref / Voucher</th>
+                  {/* DONE-BY AUDIT (2026-11-21): acting user on vouchers/transfers/adjustments */}
+                  <th className="py-3 px-4">Recorded By</th>
                   <th className="py-3 px-4 text-right">Amount (In/Out)</th>
                   <th className="py-3 px-4 text-right">Running Balance</th>
                 </tr>
@@ -1371,7 +1395,7 @@ export function CashBankView({
               <tbody className="divide-y divide-[var(--color-outline-variant)]">
                 {accountLedger.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="py-8 text-center text-xs text-[var(--color-on-surface-variant)]">
+                    <td colSpan={6} className="py-8 text-center text-xs text-[var(--color-on-surface-variant)]">
                       No transactions or transfers linked to this account yet.
                     </td>
                   </tr>
@@ -1389,6 +1413,9 @@ export function CashBankView({
                       </td>
                       <td className="py-3 px-4 font-mono text-[var(--color-on-surface-variant)]">
                         {item.referenceNumber || '—'}
+                      </td>
+                      <td className="py-3 px-4 text-[11px] font-medium text-[var(--color-on-surface)]">
+                        {item.recordedBy || <span className="italic text-[var(--color-outline)]">—</span>}
                       </td>
                       <td
                         className={`py-3 px-4 text-right font-bold text-sm ${
@@ -1424,6 +1451,7 @@ export function CashBankView({
                     Initial balance registered ({selectedAccount.type === 'bank' ? 'Bank' : 'Cash'} account)
                   </td>
                   <td className="py-3 px-4 font-mono text-[var(--color-outline)]">—</td>
+                  <td className="py-3 px-4 text-[11px] italic text-[var(--color-outline)]">—</td>
                   <td className="py-3 px-4 text-right font-mono text-[var(--color-surface-container-highest)]">—</td>
                   <td className="py-3 px-4 text-right font-mono font-bold text-[var(--color-success)]">
                     {formatCurrency(selectedAccount.openingBalance, currencySymbol)}{' '}

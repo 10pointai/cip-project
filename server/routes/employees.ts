@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { serverDb } from '../db';
-import { authenticateToken, requireEitherPermission, requirePermission } from '../middleware/auth';
+import { authenticateToken, requireEitherPermission, requirePermission, AuthenticatedRequest } from '../middleware/auth';
 import {
   fetchEmployeesDirect,
   createEmployeeDirect,
@@ -24,6 +24,10 @@ export const employeesRouter = Router();
 
 employeesRouter.use(authenticateToken);
 
+// DONE-BY AUDIT (2026-11-21): the acting user comes from the verified
+// session; the request body is never trusted for the actor stamp.
+const actingUserId = (req: AuthenticatedRequest): string | undefined => req.user?.id;
+
 // --- EMPLOYEES ---
 employeesRouter.get('/staff', async (req, res) => {
   try {
@@ -33,17 +37,17 @@ employeesRouter.get('/staff', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-employeesRouter.post('/staff', requirePermission('manage_employees'), async (req, res) => {
+employeesRouter.post('/staff', requirePermission('manage_employees'), async (req: AuthenticatedRequest, res) => {
   try {
-    const data = await createEmployeeDirect(req.body);
+    const data = await createEmployeeDirect(req.body, actingUserId(req));
     res.status(201).json({ success: true, data });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-employeesRouter.put('/staff/:id', requirePermission('manage_employees'), async (req, res) => {
+employeesRouter.put('/staff/:id', requirePermission('manage_employees'), async (req: AuthenticatedRequest, res) => {
   try {
-    const data = await updateEmployeeDirect(req.params.id, req.body);
+    const data = await updateEmployeeDirect(req.params.id, req.body, actingUserId(req));
     res.json({ success: true, data });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -95,9 +99,9 @@ employeesRouter.get('/attendance', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-employeesRouter.post('/attendance', requirePermission('manage_employees'), async (req, res) => {
+employeesRouter.post('/attendance', requirePermission('manage_employees'), async (req: AuthenticatedRequest, res) => {
   try {
-    const data = await updateAttendanceDirect(req.body);
+    const data = await updateAttendanceDirect(req.body, actingUserId(req));
     res.status(201).json({ success: true, data });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -113,9 +117,9 @@ employeesRouter.get('/leaves', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-employeesRouter.post('/leaves', requirePermission('manage_employees'), async (req, res) => {
+employeesRouter.post('/leaves', requirePermission('manage_employees'), async (req: AuthenticatedRequest, res) => {
   try {
-    const data = await createLeaveDirect(req.body);
+    const data = await createLeaveDirect(req.body, actingUserId(req));
     res.status(201).json({ success: true, data });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -172,17 +176,17 @@ employeesRouter.get('/ledger', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-employeesRouter.post('/ledger', requireEitherPermission('process_payroll', 'manage_employees'), async (req, res) => {
+employeesRouter.post('/ledger', requireEitherPermission('process_payroll', 'manage_employees'), async (req: AuthenticatedRequest, res) => {
   try {
-    const data = await createEmployeeLedgerTransactionDirect(req.body);
+    const data = await createEmployeeLedgerTransactionDirect(req.body, actingUserId(req));
     res.status(201).json({ success: true, data });
   } catch (err: any) {
     res.status(400).json({ success: false, error: err.message });
   }
 });
-employeesRouter.put('/ledger/:id', requireEitherPermission('process_payroll', 'manage_employees'), async (req, res) => {
+employeesRouter.put('/ledger/:id', requireEitherPermission('process_payroll', 'manage_employees'), async (req: AuthenticatedRequest, res) => {
   try {
-    const data = await updateEmployeeLedgerTransactionDirect(req.params.id, req.body);
+    const data = await updateEmployeeLedgerTransactionDirect(req.params.id, req.body, actingUserId(req));
     res.json({ success: true, data });
   } catch (err: any) {
     res.status(400).json({ success: false, error: err.message });

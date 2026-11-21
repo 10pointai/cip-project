@@ -261,6 +261,8 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           upi_id VARCHAR(128),
           financial_year VARCHAR(32),
           invoice_notes TEXT,
+          -- DONE-BY AUDIT (2026-11-21): the last operator to save the profile.
+          updated_by_id VARCHAR(64),
           updated_at VARCHAR(64)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
@@ -336,6 +338,10 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           current_balance DECIMAL(15,2) DEFAULT 0.00,
           notes TEXT,
           is_active BOOLEAN DEFAULT TRUE,
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (Golden Rule §2 —
+          -- display names JOIN from users at read time, stored nowhere).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64) NOT NULL,
           updated_at VARCHAR(64),
           INDEX idx_party_type (type),
@@ -343,6 +349,23 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           INDEX idx_party_name (name)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
+
+      // DONE-BY AUDIT (2026-11-21): add the actor columns to parties tables
+      // created before this migration shipped.
+      try {
+        const [partyCols]: any = await conn.query('SHOW COLUMNS FROM parties');
+        const partyColNames = (partyCols || []).map((c: any) => c.Field);
+        if (!partyColNames.includes('created_by_id')) {
+          await conn.query('ALTER TABLE parties ADD COLUMN created_by_id VARCHAR(64) NULL AFTER is_active');
+          console.log('[MySQL Migration] Added created_by_id column to parties table.');
+        }
+        if (!partyColNames.includes('updated_by_id')) {
+          await conn.query('ALTER TABLE parties ADD COLUMN updated_by_id VARCHAR(64) NULL AFTER created_by_id');
+          console.log('[MySQL Migration] Added updated_by_id column to parties table.');
+        }
+      } catch (alterErr: any) {
+        console.warn('[MySQL Migration] Parties actor columns alter check notice:', alterErr.message);
+      }
 
       // 4. Categories, Units, Locations
       await conn.query(`
@@ -352,6 +375,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           description TEXT,
           type VARCHAR(32) DEFAULT 'both',
           color VARCHAR(32),
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (§2 — names JOIN at read).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
@@ -362,7 +388,10 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           code VARCHAR(32) NOT NULL UNIQUE,
           name VARCHAR(128) NOT NULL,
           allow_decimal BOOLEAN DEFAULT TRUE,
-          is_standard BOOLEAN DEFAULT FALSE
+          is_standard BOOLEAN DEFAULT FALSE,
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (§2 — names JOIN at read).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
@@ -375,6 +404,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           capacity VARCHAR(64),
           type VARCHAR(32) DEFAULT 'yard',
           is_standard BOOLEAN DEFAULT FALSE,
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (§2 — names JOIN at read).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
@@ -403,6 +435,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           max_capacity DECIMAL(15,3) DEFAULT 0.000 COMMENT 'Item-level aggregate; per-location capacity lives in item_location_mapping',
           last_stock_update VARCHAR(64),
           movements JSON COMMENT 'LEGACY-ONLY (NULL going forward; ledger is authoritative)',
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (§2 — names JOIN at read).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64) NOT NULL,
           updated_at VARCHAR(64),
           INDEX idx_item_code (code),
@@ -438,6 +473,75 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         }
       } catch (itemAlterErr: any) {
         console.warn('[MySQL Migration] Items column alter check notice:', itemAlterErr.message);
+      }
+
+      // DONE-BY AUDIT (2026-11-21): add the actor columns to items-family
+      // tables created before this migration shipped.
+      try {
+        const actorAlters: Array<[string, string]> = [
+          ['items', 'created_by_id VARCHAR(64) NULL AFTER movements'],
+          ['item_categories', 'created_by_id VARCHAR(64) NULL AFTER color'],
+          ['item_units', 'created_by_id VARCHAR(64) NULL AFTER is_standard'],
+          ['item_locations', 'created_by_id VARCHAR(64) NULL AFTER is_standard'],
+          ['item_stock_adjustments', 'created_by_id VARCHAR(64) NULL AFTER notes'],
+          ['inventory_units', 'created_by_id VARCHAR(64) NULL AFTER attributes'],
+          ['sales_orders', 'created_by_id VARCHAR(64) NULL AFTER settled_date'],
+          ['purchase_orders', 'created_by_id VARCHAR(64) NULL AFTER settled_date'],
+          ['sales_invoices', 'created_by_id VARCHAR(64) NULL AFTER cash_applied'],
+          ['production_batches', 'created_by_id VARCHAR(64) NULL AFTER notes'],
+          ['batch_mixes', 'created_by_id VARCHAR(64) NULL AFTER is_active'],
+          ['vehicles', 'created_by_id VARCHAR(64) NULL AFTER is_active'],
+          ['vehicle_expense_entries', 'created_by_id VARCHAR(64) NULL AFTER notes'],
+          ['vehicle_emi_entries', 'created_by_id VARCHAR(64) NULL AFTER notes'],
+          ['employees', 'created_by_id VARCHAR(64) NULL AFTER status'],
+          ['employee_ledger_transactions', 'created_by_id VARCHAR(64) NULL AFTER source'],
+          ['inventory_unit_events', 'created_by_id VARCHAR(64) NULL AFTER party_id'],
+          ['attendance', 'created_by_id VARCHAR(64) NULL AFTER notes'],
+          ['leaves', 'created_by_id VARCHAR(64) NULL AFTER status'],
+          ['app_defaults', 'updated_by_id VARCHAR(64) NULL'],
+          ['company_settings', 'updated_by_id VARCHAR(64) NULL AFTER invoice_notes'],
+        ];
+        // Settings tables (last pass): ONLY updated_by_id — a settings row is
+        // a shared record with no booking user.
+        for (const settingsTable of ['app_defaults', 'company_settings']) {
+          if (!actorAlters.some(([t]) => t === settingsTable)) continue;
+          try {
+            const [cols]: any = await conn.query(`SHOW COLUMNS FROM ${settingsTable}`);
+            const names = (cols || []).map((c: any) => c.Field);
+            if (names.length === 0) continue;
+            if (!names.includes('updated_by_id')) {
+              await conn.query(`ALTER TABLE ${settingsTable} ADD COLUMN updated_by_id VARCHAR(64) NULL`);
+              console.log(`[MySQL Migration] Added updated_by_id to ${settingsTable}.`);
+            }
+          } catch (sErr: any) {
+            console.warn(`[MySQL Migration] Actor columns alter check notice (${settingsTable}):`, sErr.message);
+          }
+        }
+        for (const [table, addFirst] of actorAlters) {
+          if (['app_defaults', 'company_settings'].includes(table)) continue; // handled above — updated_by_id only
+          try {
+            const [cols]: any = await conn.query(`SHOW COLUMNS FROM ${table}`);
+            const names = (cols || []).map((c: any) => c.Field);
+            if (names.length === 0) continue; // table does not exist yet — its fresh CREATE already has the columns
+            if (!names.includes('created_by_id')) {
+              await conn.query(`ALTER TABLE ${table} ADD COLUMN ${addFirst}`);
+              console.log(`[MySQL Migration] Added created_by_id to ${table}.`);
+            }
+            if (!names.includes('updated_by_id')) {
+              // item_units has no trailing timestamp — append at end for it
+              if (table === 'item_units') {
+                await conn.query(`ALTER TABLE ${table} ADD COLUMN updated_by_id VARCHAR(64) NULL`);
+              } else {
+                await conn.query(`ALTER TABLE ${table} ADD COLUMN updated_by_id VARCHAR(64) NULL AFTER created_by_id`);
+              }
+              console.log(`[MySQL Migration] Added updated_by_id to ${table}.`);
+            }
+          } catch (tErr: any) {
+            console.warn(`[MySQL Migration] Actor columns alter check notice (${table}):`, tErr.message);
+          }
+        }
+      } catch (actorAlterErr: any) {
+        console.warn('[MySQL Migration] Items actor columns alter check notice:', actorAlterErr.message);
       }
 
       // 5b. Item Location Mapping Table (Normalized Relational Inventory Allocation)
@@ -516,6 +620,10 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           description TEXT NOT NULL,
           status VARCHAR(32) DEFAULT 'paid',
           due_date VARCHAR(32),
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (Golden Rule §2 —
+          -- display names JOIN from users at read time, stored nowhere).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64) NOT NULL,
           INDEX idx_tx_party (party_id),
           INDEX idx_tx_date (date),
@@ -523,6 +631,23 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           INDEX idx_tx_voucher (voucher_number)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
+
+      // DONE-BY AUDIT (2026-11-21): add the actor columns to transactions
+      // tables created before this migration shipped.
+      try {
+        const [txCols]: any = await conn.query('SHOW COLUMNS FROM transactions');
+        const txColNames = (txCols || []).map((c: any) => c.Field);
+        if (!txColNames.includes('created_by_id')) {
+          await conn.query('ALTER TABLE transactions ADD COLUMN created_by_id VARCHAR(64) NULL AFTER due_date');
+          console.log('[MySQL Migration] Added created_by_id column to transactions table.');
+        }
+        if (!txColNames.includes('updated_by_id')) {
+          await conn.query('ALTER TABLE transactions ADD COLUMN updated_by_id VARCHAR(64) NULL AFTER created_by_id');
+          console.log('[MySQL Migration] Added updated_by_id column to transactions table.');
+        }
+      } catch (alterErr: any) {
+        console.warn('[MySQL Migration] Transactions actor columns alter check notice:', alterErr.message);
+      }
 
       // Purge any orphaned transactions whose party was deleted
       try {
@@ -548,6 +673,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           sale_id VARCHAR(64) COMMENT 'FK sales_orders — direct-to-sale run (output skips stock)',
           sale_item_id VARCHAR(64) COMMENT 'FK sales_order_items — the sale line this run produced for',
           notes TEXT,
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (§2 — names JOIN at read).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64) NOT NULL,
           INDEX idx_batch_date (date),
           INDEX idx_batch_number (batch_number),
@@ -568,6 +696,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           reference_output_qty DECIMAL(15,3) NULL,
           notes TEXT,
           is_active TINYINT(1) DEFAULT 1,
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs.
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64) NOT NULL,
           INDEX idx_mix_number (mix_number),
           INDEX idx_mix_output_item (output_item_id)
@@ -642,6 +773,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           notes TEXT,
           purchase_id VARCHAR(64) NULL COMMENT 'FK purchase_order — the purchase that received this unit (2026-11-16)',
           attributes JSON COMMENT 'user-defined attribute values keyed by the declared keys (2026-11-16)',
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (§2 — names JOIN at read).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64) NOT NULL,
           updated_at VARCHAR(64),
           UNIQUE KEY uq_unit_serial_per_item (item_id, serial_number),
@@ -714,6 +848,8 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           location_id VARCHAR(64) NULL,
           sale_id VARCHAR(64) NULL,
           party_id VARCHAR(64) NULL,
+          -- DONE-BY AUDIT (2026-11-21): the operator who performed the movement.
+          created_by_id VARCHAR(64),
           created_at VARCHAR(64) NOT NULL,
           INDEX idx_ue_unit (unit_id),
           INDEX idx_ue_date (date)
@@ -794,6 +930,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           puc_expiry_date VARCHAR(32),
           notes TEXT,
           is_active BOOLEAN DEFAULT TRUE,
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (§2 — names JOIN at read).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64),
           updated_at VARCHAR(64)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -814,6 +953,10 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
             amount DECIMAL(14,2) NOT NULL DEFAULT 0,
             source VARCHAR(16) DEFAULT 'auto',
             notes TEXT,
+            -- DONE-BY AUDIT (2026-11-21): manual EMI rows carry the recording
+            -- operator; auto/cron rows stay unstamped by design.
+            created_by_id VARCHAR(64),
+            updated_by_id VARCHAR(64),
             created_at VARCHAR(64),
             INDEX idx_vem_vehicle (vehicle_id),
             INDEX idx_vem_account (account_id),
@@ -837,6 +980,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
             rate_per_litre DECIMAL(12,2) NULL,
             amount DECIMAL(14,2) NOT NULL DEFAULT 0,
             notes TEXT,
+            -- DONE-BY AUDIT (2026-11-21): acting user FKs (§2 — names JOIN at read).
+            created_by_id VARCHAR(64),
+            updated_by_id VARCHAR(64),
             created_at VARCHAR(64),
             INDEX idx_vxe_vehicle (vehicle_id),
             INDEX idx_vxe_account (account_id),
@@ -1119,6 +1265,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           aadhar_number VARCHAR(32),
           pan_number VARCHAR(32),
           status VARCHAR(32) DEFAULT 'active',
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (§2 — names JOIN at read).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           emergency_contact VARCHAR(64),
           notes TEXT,
           created_at VARCHAR(64) NOT NULL,
@@ -1174,6 +1323,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           work_hours DECIMAL(5,2) DEFAULT 0.00,
           overtime_hours DECIMAL(5,2) DEFAULT 0.00,
           notes TEXT,
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (§2 — names JOIN at read).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64),
           updated_at VARCHAR(64),
           INDEX idx_att_date (date),
@@ -1216,6 +1368,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           total_days DECIMAL(5,1) DEFAULT 1.0,
           reason TEXT,
           status VARCHAR(32) DEFAULT 'approved',
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs.
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
@@ -1270,6 +1425,10 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           intent VARCHAR(16),
           source VARCHAR(32) DEFAULT 'manual',
           notes TEXT,
+          -- DONE-BY AUDIT (2026-11-21): manual payroll rows carry the recording
+          -- operator; engine wage accruals stay unstamped by design.
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64) NOT NULL,
           INDEX idx_elt_emp (employee_id, date),
           INDEX idx_elt_account (account_id)
@@ -1359,12 +1518,33 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           notes TEXT,
           is_default BOOLEAN DEFAULT FALSE,
           is_active BOOLEAN DEFAULT TRUE,
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (Golden Rule §2 —
+          -- display names JOIN from users at read time, stored nowhere).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64) NOT NULL,
           updated_at VARCHAR(64),
           INDEX idx_acc_type (type),
           INDEX idx_acc_name (name)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
+
+      // DONE-BY AUDIT (2026-11-21): add the actor columns to cash_bank_accounts
+      // created before this migration shipped.
+      try {
+        const [cbCols]: any = await conn.query('SHOW COLUMNS FROM cash_bank_accounts');
+        const cbColNames = (cbCols || []).map((c: any) => c.Field);
+        if (!cbColNames.includes('created_by_id')) {
+          await conn.query('ALTER TABLE cash_bank_accounts ADD COLUMN created_by_id VARCHAR(64) NULL AFTER is_active');
+          console.log('[MySQL Migration] Added created_by_id column to cash_bank_accounts table.');
+        }
+        if (!cbColNames.includes('updated_by_id')) {
+          await conn.query('ALTER TABLE cash_bank_accounts ADD COLUMN updated_by_id VARCHAR(64) NULL AFTER created_by_id');
+          console.log('[MySQL Migration] Added updated_by_id column to cash_bank_accounts table.');
+        }
+      } catch (alterErr: any) {
+        console.warn('[MySQL Migration] Accounts actor columns alter check notice:', alterErr.message);
+      }
 
       await conn.query(`
         CREATE TABLE IF NOT EXISTS internal_transfers (
@@ -1377,6 +1557,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           amount DECIMAL(15,2) NOT NULL,
           reference_number VARCHAR(128),
           notes TEXT,
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs.
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64) NOT NULL,
           INDEX idx_trf_date (date),
           INDEX idx_trf_from (from_account_id),
@@ -1397,11 +1580,42 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           reason TEXT NOT NULL,
           reference_number VARCHAR(128),
           notes TEXT,
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs.
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64) NOT NULL,
           INDEX idx_adj_date (date),
           INDEX idx_adj_account (account_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
+
+      // DONE-BY AUDIT (2026-11-21): add the actor columns to transfers +
+      // adjustments created before this migration shipped.
+      try {
+        const [trfCols]: any = await conn.query('SHOW COLUMNS FROM internal_transfers');
+        const trfColNames = (trfCols || []).map((c: any) => c.Field);
+        if (trfColNames.length > 0) {
+          if (!trfColNames.includes('created_by_id')) {
+            await conn.query('ALTER TABLE internal_transfers ADD COLUMN created_by_id VARCHAR(64) NULL AFTER notes');
+          }
+          if (!trfColNames.includes('updated_by_id')) {
+            await conn.query('ALTER TABLE internal_transfers ADD COLUMN updated_by_id VARCHAR(64) NULL AFTER created_by_id');
+          }
+        }
+        const [adjCols]: any = await conn.query('SHOW COLUMNS FROM account_adjustments');
+        const adjColNames = (adjCols || []).map((c: any) => c.Field);
+        if (adjColNames.length > 0) {
+          if (!adjColNames.includes('created_by_id')) {
+            await conn.query('ALTER TABLE account_adjustments ADD COLUMN created_by_id VARCHAR(64) NULL AFTER notes');
+          }
+          if (!adjColNames.includes('updated_by_id')) {
+            await conn.query('ALTER TABLE account_adjustments ADD COLUMN updated_by_id VARCHAR(64) NULL AFTER created_by_id');
+          }
+        }
+        console.log('[MySQL Migration] Actor columns verified on internal_transfers / account_adjustments.');
+      } catch (alterErr: any) {
+        console.warn('[MySQL Migration] Transfers/adjustments actor columns alter check notice:', alterErr.message);
+      }
 
       // Cash & Bank FK normalization: transfers/adjustments referenced accounts
       // by name copies. Backfill any missing account ids from the copies via the
@@ -1532,6 +1746,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           reason VARCHAR(255),
           reference_number VARCHAR(64),
           notes TEXT,
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (§2 — names JOIN at read).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64) NOT NULL,
           INDEX idx_isa_item (item_id),
           INDEX idx_isa_number (adjustment_number),
@@ -1814,6 +2031,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           settlement_voucher_id VARCHAR(64) COMMENT 'FK transactions — the payment_in receipt voucher',
           settled_amount DECIMAL(15,2) COMMENT 'statutory snapshot of the settled total',
           settled_date VARCHAR(32) COMMENT 'date of the settlement stage',
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (§2 — names JOIN at read).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64) NOT NULL,
           updated_at VARCHAR(64),
           INDEX idx_sales_number (sale_number),
@@ -2361,6 +2581,9 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           settled_amount DECIMAL(15,2) COMMENT 'statutory snapshot of the settled total',
           settled_date VARCHAR(32),
           cash_applied BOOLEAN DEFAULT FALSE,
+          -- DONE-BY AUDIT (2026-11-21): acting user FKs (§2 — names JOIN at read).
+          created_by_id VARCHAR(64),
+          updated_by_id VARCHAR(64),
           created_at VARCHAR(64) NOT NULL,
           updated_at VARCHAR(64),
           INDEX idx_sinv_number (invoice_number),
@@ -2435,6 +2658,8 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         CREATE TABLE IF NOT EXISTS app_defaults (
           app_key VARCHAR(64) PRIMARY KEY,
           app_value TEXT NOT NULL,
+          -- DONE-BY AUDIT (2026-11-21): the operator who last saved the default.
+          updated_by_id VARCHAR(64),
           updated_at VARCHAR(64) NOT NULL,
           INDEX idx_ad_updated (updated_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -321,6 +321,24 @@ export function PartyDetailView({
               <span className="font-mono font-bold text-[var(--color-on-surface)]">{party.gstin}</span>
             </div>
           )}
+
+          {/* DONE-BY AUDIT (2026-11-21): acting-user read-time views of the users master */}
+          <div className="flex items-center gap-1 text-[var(--color-on-surface-variant)] px-2">
+            <User className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
+            <span>
+              Added by: <strong className="text-[var(--color-on-surface)]">{party.createdByName || 'Unknown'}</strong>
+              <span className="text-[10px]"> ({formatDate(party.createdAt)})</span>
+            </span>
+          </div>
+          {party.updatedByName && (
+            <div className="flex items-center gap-1 text-[var(--color-on-surface-variant)] px-2">
+              <User className="w-3.5 h-3.5 text-[var(--color-outline)] shrink-0" />
+              <span>
+                Updated by: <strong className="text-[var(--color-on-surface)]">{party.updatedByName}</strong>
+                {party.updatedAt && <span className="text-[10px]"> ({formatDate(party.updatedAt)})</span>}
+              </span>
+            </div>
+          )}
         </div>
       </div>
 

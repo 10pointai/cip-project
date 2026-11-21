@@ -416,6 +416,9 @@ export const TyreManagementView: React.FC = () => {
                       <th className="py-3.5 px-3">Supplier</th>
                       <th className="py-3.5 px-3">Purchase</th>
                       <th className="py-3.5 px-3">Cost</th>
+                      {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
+                      <th className="py-3.5 px-3">Added By</th>
+                      <th className="py-3.5 px-3">Updated By</th>
                       {tyreAttrColumns.map((def) => (
                         <th key={def.key} className="py-3.5 px-3 whitespace-nowrap">
                           {def.label.toUpperCase()}
@@ -493,6 +496,14 @@ export const TyreManagementView: React.FC = () => {
                           {/* Purchase date + Cost — numeric snapshots per row */}
                           <td className="py-3.5 px-3 text-[11px] font-medium text-[var(--color-on-surface-variant)]">{u.purchaseDate ? u.purchaseDate.split('T')[0] : '—'}</td>
                           <td className="py-3.5 px-3 text-[11px] font-black text-[var(--color-on-surface)]">{u.purchaseCost ? formatCurrency(u.purchaseCost) : '—'}</td>
+
+                          {/* DONE-BY AUDIT (2026-11-21) */}
+                          <td className="py-3.5 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                            {u.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
+                          </td>
+                          <td className="py-3.5 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                            {u.updatedByName || <span className="italic text-[var(--color-outline)]">—</span>}
+                          </td>
 
                           {/* Declared per-unit attribute columns */}
                           {tyreAttrColumns.map((def) => {
@@ -598,6 +609,8 @@ export const TyreManagementView: React.FC = () => {
                       <th className="py-3.5 px-3">Odometer</th>
                       <th className="py-3.5 px-3">Location</th>
                       <th className="py-3.5 px-4">Notes</th>
+                      {/* DONE-BY AUDIT (2026-11-21): the operator who performed the movement */}
+                      <th className="py-3.5 px-3">Movement By</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--color-outline-variant)]">
@@ -646,6 +659,10 @@ export const TyreManagementView: React.FC = () => {
                           </td>
                           <td className="py-3.5 px-3 text-[11px] font-semibold text-[var(--color-on-surface-variant)] whitespace-nowrap">{evLocation || '—'}</td>
                           <td className="py-3.5 px-4 text-[11px] font-medium text-[var(--color-on-surface-variant)] max-w-[240px] break-words">{ev.notes || '—'}</td>
+                          {/* DONE-BY AUDIT (2026-11-21) */}
+                          <td className="py-3.5 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                            {ev.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
+                          </td>
                         </tr>
                       );
                     })}

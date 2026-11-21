@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { authenticateToken, requirePermission } from '../middleware/auth';
+import { authenticateToken, requirePermission, AuthenticatedRequest } from '../middleware/auth';
 import {
   fetchSalesDirect,
   fetchSaleByIdDirect,
@@ -17,6 +17,10 @@ import {
 export const salesRouter = Router();
 
 salesRouter.use(authenticateToken);
+
+// DONE-BY AUDIT (2026-11-21): party-ledger vouchers minted by these flows
+// carry the acting user from the verified session — never the request body.
+const actingUserId = (req: AuthenticatedRequest): string | undefined => req.user?.id;
 
 // Stage-ladder business-rule errors (locked / invalid transition / cannot /
 // missing settlement account for a "Settle Payment Now" save) are 400;
@@ -59,7 +63,7 @@ salesRouter.get('/:id', async (req: Request, res: Response) => {
 });
 
 // POST /api/sales — create master + first stage
-salesRouter.post('/', requirePermission('manage_sales'), async (req: Request, res: Response) => {
+salesRouter.post('/', requirePermission('manage_sales'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const data = req.body;
     if (!data.partyId || !Array.isArray(data.items) || data.items.length === 0) {
@@ -83,7 +87,7 @@ salesRouter.post('/', requirePermission('manage_sales'), async (req: Request, re
     if (data.stage?.updateInventory && !data.stage.stageNumber && !data.saleNumber) {
       return res.status(400).json({ success: false, error: 'stageNumber or saleNumber is required to update inventory' });
     }
-    const sale = await createSaleDirect(data);
+    const sale = await createSaleDirect(data, actingUserId(req));
     res.status(201).json({ success: true, message: 'Sale created successfully', data: sale });
   } catch (error: any) {
     res.status(bizStatus(error.message)).json({ success: false, error: error.message });
@@ -91,9 +95,9 @@ salesRouter.post('/', requirePermission('manage_sales'), async (req: Request, re
 });
 
 // PUT /api/sales/:id — master-level updates (items replacement included)
-salesRouter.put('/:id', requirePermission('manage_sales'), async (req: Request, res: Response) => {
+salesRouter.put('/:id', requirePermission('manage_sales'), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const updated = await updateSaleDirect(req.params.id, req.body);
+    const updated = await updateSaleDirect(req.params.id, req.body, actingUserId(req));
     if (!updated) {
       return res.status(404).json({ success: false, error: 'Sale not found' });
     }
@@ -104,7 +108,7 @@ salesRouter.put('/:id', requirePermission('manage_sales'), async (req: Request, 
 });
 
 // POST /api/sales/:id/stages — issue the next stage document per the sale ladder
-salesRouter.post('/:id/stages', requirePermission('manage_sales'), async (req: Request, res: Response) => {
+salesRouter.post('/:id/stages', requirePermission('manage_sales'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const stageInput = req.body;
     if (!stageInput.stageType) {
@@ -117,7 +121,7 @@ salesRouter.post('/:id/stages', requirePermission('manage_sales'), async (req: R
     if (stageInput.updateInventory && !stageInput.stageNumber) {
       return res.status(400).json({ success: false, error: 'stageNumber is required to update inventory' });
     }
-    const sale = await addSaleStageDirect(req.params.id, stageInput);
+    const sale = await addSaleStageDirect(req.params.id, stageInput, actingUserId(req));
     if (!sale) {
       return res.status(404).json({ success: false, error: 'Sale not found' });
     }
@@ -163,7 +167,7 @@ saleInvoicesRouter.get('/:id', async (req: Request, res: Response) => {
 });
 
 // POST /api/sales-invoices — fold N selected sales orders into one invoice
-saleInvoicesRouter.post('/', requirePermission(INV_PERMISSION), async (req: Request, res: Response) => {
+saleInvoicesRouter.post('/', requirePermission(INV_PERMISSION), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const data = req.body;
     if (!data.partyId) {
@@ -172,7 +176,7 @@ saleInvoicesRouter.post('/', requirePermission(INV_PERMISSION), async (req: Requ
     if (!Array.isArray(data.saleIds) || data.saleIds.length === 0) {
       return res.status(400).json({ success: false, error: 'Select at least one sales order to invoice.' });
     }
-    const invoice = await createSaleInvoiceDirect(data);
+    const invoice = await createSaleInvoiceDirect(data, actingUserId(req));
     res.status(201).json({ success: true, message: 'Invoice created successfully', data: invoice });
   } catch (error: any) {
     res.status(bizStatus(error.message)).json({ success: false, error: error.message });

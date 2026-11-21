@@ -1,5 +1,6 @@
 import { executeMysqlQuery, executeMysqlOne } from './queryClient';
 import { isMysqlConfigured } from './connection';
+import { resolveActorNames } from './financeService';
 import {
   Employee,
   EmployeeAttendance,
@@ -34,10 +35,10 @@ function parseNum(val: any, fallback = 0): number {
 
 export async function fetchEmployeesDirect(): Promise<Employee[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getEmployees();
+    return resolveActorNames(serverDb.getEmployees());
   }
   const rows = await executeMysqlQuery('SELECT * FROM employees ORDER BY name ASC');
-  return rows.map((emp: any) => ({
+  return resolveActorNames(rows.map((emp: any) => ({
     id: emp.id,
     name: emp.name,
     role: (emp.designation || emp.role || 'operator') as any,
@@ -60,7 +61,10 @@ export async function fetchEmployeesDirect(): Promise<Employee[]> {
     defaultOutTime: emp.default_out_time || undefined,
     openingBalance: parseNum(emp.opening_balance),
     createdAt: emp.created_at || new Date().toISOString(),
-  }));
+    // DONE-BY AUDIT (2026-11-21)
+    createdById: emp.created_by_id || undefined,
+    updatedById: emp.updated_by_id || undefined,
+  })));
 }
 
 export async function fetchAttendanceDirect(filters?: {
@@ -98,13 +102,13 @@ export async function fetchAttendanceDirect(filters?: {
     if (filters?.employeeId) rows = rows.filter((a) => a.employeeId === filters.employeeId);
     if (filters?.from) rows = rows.filter((a) => a.date >= (filters.from as string));
     if (filters?.to) rows = rows.filter((a) => a.date <= (filters.to as string));
-    return rows;
+    return resolveActorNames(rows);
   }
   // employee_name is resolved live from the employees table (NOT stored on
   // attendance rows — see the dropped-column note in migrations.ts)
   const sql = `SELECT a.*, e.name AS employee_name FROM attendance a LEFT JOIN employees e ON e.id = a.employee_id${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY a.date DESC, a.created_at DESC`;
   const rows = await executeMysqlQuery(sql, params);
-  return rows.map((att: any) => ({
+  const mapped = rows.map((att: any) => ({
     id: att.id,
     employeeId: att.employee_id,
     employeeName: att.employee_name || '',
@@ -118,15 +122,19 @@ export async function fetchAttendanceDirect(filters?: {
     notes: att.notes || undefined,
     createdAt: att.created_at,
     updatedAt: att.updated_at,
+    // DONE-BY AUDIT (2026-11-21)
+    createdById: att.created_by_id || undefined,
+    updatedById: att.updated_by_id || undefined,
   }));
+  return resolveActorNames(mapped);
 }
 
 export async function fetchLeavesDirect(): Promise<EmployeeLeave[]> {
   if (!isMysqlConfigured()) {
-    return serverDb.getLeaves();
+    return resolveActorNames(serverDb.getLeaves());
   }
   const rows = await executeMysqlQuery('SELECT * FROM leaves ORDER BY start_date DESC');
-  return rows.map((lv: any) => ({
+  return resolveActorNames(rows.map((lv: any) => ({
     id: lv.id,
     employeeId: lv.employee_id,
     employeeName: lv.employee_name,
@@ -137,7 +145,10 @@ export async function fetchLeavesDirect(): Promise<EmployeeLeave[]> {
     reason: lv.reason || undefined,
     status: lv.status || 'approved',
     createdAt: lv.created_at,
-  }));
+    // DONE-BY AUDIT (2026-11-21)
+    createdById: lv.created_by_id || undefined,
+    updatedById: lv.updated_by_id || undefined,
+  })));
 }
 
 export async function fetchEmployeePaymentsDirect(): Promise<EmployeePayment[]> {
@@ -174,13 +185,15 @@ export async function fetchEmployeePaymentsDirect(): Promise<EmployeePayment[]> 
 
 export async function fetchSettingsDirect(): Promise<CompanySettings> {
   if (!isMysqlConfigured()) {
-    return serverDb.getSettings();
+    // DONE-BY AUDIT (2026-11-21): the last editor's name resolves at read time
+    const [resolved] = await resolveActorNames([serverDb.getSettings()]);
+    return resolved;
   }
   const s = await executeMysqlOne('SELECT * FROM company_settings LIMIT 1');
   if (!s) return serverDb.getSettings();
 
   const current = serverDb.getSettings();
-  return {
+  const withActor = {
     ...current,
     companyName: s.company_name || current.companyName,
     tagline: s.tagline || current.tagline,
@@ -199,21 +212,26 @@ export async function fetchSettingsDirect(): Promise<CompanySettings> {
       pincode: s.address_pincode || current.registeredAddress.pincode,
     },
     invoiceNotes: s.invoice_notes || current.invoiceNotes,
+    // DONE-BY AUDIT (2026-11-21): the saver's id from the row; name resolved below
+    updatedById: s.updated_by_id || current.updatedById,
   };
+  const [resolved] = await resolveActorNames([withActor]);
+  return resolved;
 }
 
-export async function updateSettingsDirect(settingsData: Partial<CompanySettings>): Promise<CompanySettings> {
-  const updated = serverDb.updateSettings(settingsData);
+export async function updateSettingsDirect(settingsData: Partial<CompanySettings>, actorId?: string): Promise<CompanySettings> {
+  const updated = serverDb.updateSettings(settingsData, actorId);
   if (!isMysqlConfigured()) {
     return updated;
   }
 
   await executeMysqlQuery(
+    // DONE-BY AUDIT (2026-11-21): the last saver's actor id
     `REPLACE INTO company_settings (
       id, company_name, tagline, trade_name, gstin, pan, cin, email, phone, website,
       address_street, address_city, address_state, address_state_code, address_pincode,
-      invoice_notes, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      invoice_notes, updated_by_id, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       'default_settings',
       updated.companyName,
@@ -231,6 +249,7 @@ export async function updateSettingsDirect(settingsData: Partial<CompanySettings
       updated.registeredAddress?.stateCode || null,
       updated.registeredAddress?.pincode || null,
       updated.invoiceNotes || null,
+      (updated as any).updatedById || null,
       new Date().toISOString(),
     ]
   );
@@ -292,8 +311,8 @@ export async function fetchEvidenceFilesDirect(): Promise<EvidenceFile[]> {
 // DIRECT MUTATIONS FOR PERSONNEL & HR
 // ==========================================
 
-export async function createEmployeeDirect(empData: any): Promise<Employee> {
-  const emp = serverDb.createEmployee(empData);
+export async function createEmployeeDirect(empData: any, actorId?: string): Promise<Employee> {
+  const emp = serverDb.createEmployee(empData, actorId);
   if (!isMysqlConfigured()) return emp;
 
   // Full REPLACE (mirrors liveSyncEmployee): employees.department and
@@ -303,9 +322,9 @@ export async function createEmployeeDirect(empData: any): Promise<Employee> {
     `REPLACE INTO employees (
       id, employee_code, name, designation, department, phone, email,
       aadhar_number, pan_number, date_of_joining, base_salary, salary_type,
-      status, license_number, bank_details, upi_address, name_on_account,
+      status, created_by_id, updated_by_id, license_number, bank_details, upi_address, name_on_account,
       default_in_time, default_out_time, opening_balance, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       emp.id,
       emp.id,
@@ -320,6 +339,8 @@ export async function createEmployeeDirect(empData: any): Promise<Employee> {
       emp.salaryBase || 0,
       emp.salaryType || 'monthly',
       emp.status || 'active',
+      (emp as any).createdById || null,
+      (emp as any).updatedById || null,
       emp.licenseNo || null,
       JSON.stringify({ accountNumber: emp.bankAccountNo || '', ifscCode: emp.bankIFSC || '' }),
       emp.upiAddress || null,
@@ -333,8 +354,8 @@ export async function createEmployeeDirect(empData: any): Promise<Employee> {
   return emp;
 }
 
-export async function updateEmployeeDirect(id: string, updates: any): Promise<Employee | null> {
-  const emp = serverDb.updateEmployee(id, updates);
+export async function updateEmployeeDirect(id: string, updates: any, actorId?: string): Promise<Employee | null> {
+  const emp = serverDb.updateEmployee(id, updates, actorId);
   if (!emp || !isMysqlConfigured()) return emp;
 
   await executeMysqlQuery(
@@ -355,7 +376,8 @@ export async function updateEmployeeDirect(id: string, updates: any): Promise<Em
       name_on_account = COALESCE(?, name_on_account),
       default_in_time = COALESCE(?, default_in_time),
       default_out_time = COALESCE(?, default_out_time),
-      opening_balance = COALESCE(?, opening_balance)
+      opening_balance = COALESCE(?, opening_balance),
+      updated_by_id = COALESCE(?, updated_by_id)
     WHERE id = ?`,
     [
       updates.name || null,
@@ -377,6 +399,7 @@ export async function updateEmployeeDirect(id: string, updates: any): Promise<Em
       updates.defaultInTime || null,
       updates.defaultOutTime || null,
       updates.openingBalance !== undefined ? updates.openingBalance : null,
+      actorId || null,
       id,
     ]
   );
@@ -424,21 +447,21 @@ function isStaleNameColumnError(err: any): boolean {
     String(err?.message || '').includes("doesn't have a default value");
 }
 
-export async function updateAttendanceDirect(attData: any): Promise<EmployeeAttendance> {
-  const att = serverDb.recordAttendance(attData);
+export async function updateAttendanceDirect(attData: any, actorId?: string): Promise<EmployeeAttendance> {
+  const att = serverDb.recordAttendance(attData, actorId);
   if (!isMysqlConfigured()) return att;
 
   // Proactive schema heal BEFORE the first write of this server process
   await ensureAttendanceSchemaHealthy();
 
   try {
-    await persistAttendanceRow(att);
+    await persistAttendanceRow(att, actorId);
   } catch (err: any) {
     if (isStaleNameColumnError(err)) {
       // Reactive safety net (e.g. the process started before the live check)
       attendanceSchemaChecked = false;
       await ensureAttendanceSchemaHealthy();
-      await persistAttendanceRow(att);
+      await persistAttendanceRow(att, actorId);
     } else {
       throw err;
     }
@@ -447,7 +470,7 @@ export async function updateAttendanceDirect(attData: any): Promise<EmployeeAtte
 }
 
 /** MySQL upsert per (employee_id, date) — update existing, else idempotent insert. */
-async function persistAttendanceRow(att: EmployeeAttendance): Promise<void> {
+async function persistAttendanceRow(att: EmployeeAttendance, actorId?: string): Promise<void> {
   // Correct TABLE (`attendance` — the old code wrote `employee_attendance`,
   // which does not exist, so every attendance POST failed with MySQL on) and
   // CORRECT columns (`in_time/out_time/work_hours` per the schema). UPSERT per
@@ -461,7 +484,10 @@ async function persistAttendanceRow(att: EmployeeAttendance): Promise<void> {
     await executeMysqlQuery(
       `UPDATE attendance SET
         status = ?, in_time = ?, out_time = ?, work_hours = ?, overtime_hours = ?,
-        notes = ?, updated_at = ?
+        notes = ?,
+        updated_by_id = COALESCE(?, updated_by_id),
+        created_by_id = COALESCE(created_by_id, ?),
+        updated_at = ?
       WHERE id = ?`,
       [
         att.status,
@@ -470,6 +496,8 @@ async function persistAttendanceRow(att: EmployeeAttendance): Promise<void> {
         att.totalHoursWorked || 0,
         0,
         att.notes || null,
+        actorId || null,
+        actorId || null,
         new Date().toISOString(),
         existing.id,
       ]
@@ -481,13 +509,16 @@ async function persistAttendanceRow(att: EmployeeAttendance): Promise<void> {
     await executeMysqlQuery(
       `INSERT INTO attendance (
         id, employee_id, date, status, in_time, out_time,
-        work_hours, overtime_hours, notes, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        work_hours, overtime_hours, notes, created_by_id, updated_by_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE
         status=VALUES(status),
         in_time=VALUES(in_time), out_time=VALUES(out_time),
         work_hours=VALUES(work_hours), overtime_hours=VALUES(overtime_hours),
-        notes=VALUES(notes), updated_at=VALUES(updated_at)`,
+        notes=VALUES(notes),
+        created_by_id=COALESCE(created_by_id, VALUES(created_by_id)),
+        updated_by_id=COALESCE(VALUES(updated_by_id), updated_by_id),
+        updated_at=VALUES(updated_at)`,
       [
         att.id,
         att.employeeId,
@@ -498,6 +529,8 @@ async function persistAttendanceRow(att: EmployeeAttendance): Promise<void> {
         att.totalHoursWorked || 0,
         0,
         att.notes || null,
+        (att as any).createdById || null,
+        (att as any).updatedById || null,
         att.createdAt || new Date().toISOString(),
         new Date().toISOString(),
       ]
@@ -505,17 +538,19 @@ async function persistAttendanceRow(att: EmployeeAttendance): Promise<void> {
   }
 }
 
-export async function createLeaveDirect(leaveData: any): Promise<EmployeeLeave> {
-  const leave = serverDb.createLeave(leaveData);
+export async function createLeaveDirect(leaveData: any, actorId?: string): Promise<EmployeeLeave> {
+  const leave = serverDb.createLeave(leaveData, actorId);
   if (!isMysqlConfigured()) return leave;
 
   await executeMysqlQuery(
     `INSERT INTO employee_leaves (
       id, employee_id, employee_name, leave_type, from_date, to_date,
-      total_days, reason, status, approved_by, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      total_days, reason, status, approved_by, created_by_id, updated_by_id, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
-      status=VALUES(status)`,
+      status=VALUES(status),
+      created_by_id=COALESCE(created_by_id, VALUES(created_by_id)),
+      updated_by_id=COALESCE(VALUES(updated_by_id), updated_by_id)`,
     [
       leave.id,
       leave.employeeId,
@@ -527,6 +562,8 @@ export async function createLeaveDirect(leaveData: any): Promise<EmployeeLeave> 
       leave.reason,
       leave.status || 'pending',
       null,
+      (leave as any).createdById || null,
+      (leave as any).updatedById || null,
       leave.createdAt || new Date().toISOString(),
     ]
   );
@@ -630,7 +667,7 @@ export async function fetchEmployeeLedgerTransactionsDirect(filters?: {
   if (!isMysqlConfigured()) {
     let rows = serverDb.getEmployeeLedgerTransactions();
     if (filters?.employeeId) rows = rows.filter((t) => t.employeeId === filters.employeeId);
-    return rows;
+    return resolveActorNames(rows);
   }
   const rows = await executeMysqlQuery(
     `SELECT t.*, e.name AS employee_name, a.name AS account_name
@@ -641,7 +678,7 @@ export async function fetchEmployeeLedgerTransactionsDirect(filters?: {
      ORDER BY t.created_at DESC, t.date DESC`,
     filters?.employeeId ? [filters.employeeId] : []
   );
-  return rows.map((t: any) => ({
+  const mapped = rows.map((t: any) => ({
     id: t.id,
     employeeId: t.employee_id,
     employeeName: t.employee_name,
@@ -656,7 +693,11 @@ export async function fetchEmployeeLedgerTransactionsDirect(filters?: {
     source: t.source || 'manual',
     notes: t.notes || undefined,
     createdAt: t.created_at,
+    // DONE-BY AUDIT (2026-11-21); names filled by resolveActorNames
+    createdById: t.created_by_id || undefined,
+    updatedById: t.updated_by_id || undefined,
   }));
+  return resolveActorNames(mapped);
 }
 
 /**
@@ -664,11 +705,11 @@ export async function fetchEmployeeLedgerTransactionsDirect(filters?: {
  * validates + reconciles the linked Cash/Bank account; a lock here also
  * stops the employer from hand-posting engine-owned wage accruals.
  */
-export async function createEmployeeLedgerTransactionDirect(data: any): Promise<EmployeeLedgerTransaction> {
+export async function createEmployeeLedgerTransactionDirect(data: any, actorId?: string): Promise<EmployeeLedgerTransaction> {
   if (data.type === 'wage_accrual') {
     throw new Error('Wage accruals are generated automatically; record a salary settlement as a Reduce balance instead.');
   }
-  const txn = serverDb.createEmployeeLedgerTransaction(data);
+  const txn = serverDb.createEmployeeLedgerTransaction(data, actorId);
   if (!isMysqlConfigured()) return txn;
 
   // Idempotent insert — liveSyncEmployeeLedgerTransaction writes the same id
@@ -676,12 +717,14 @@ export async function createEmployeeLedgerTransactionDirect(data: any): Promise<
   // Names never persist (FK-only rows, Golden Rule §2).
   await executeMysqlQuery(
     `INSERT INTO employee_ledger_transactions (
-      id, employee_id, date, type, amount, reason, account_id, direction, intent, source, notes, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, employee_id, date, type, amount, reason, account_id, direction, intent, source, created_by_id, updated_by_id, notes, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       date=VALUES(date), type=VALUES(type), amount=VALUES(amount), reason=VALUES(reason),
       account_id=VALUES(account_id), direction=VALUES(direction), intent=VALUES(intent),
-      source=VALUES(source), notes=VALUES(notes)`,
+      source=VALUES(source),
+      updated_by_id=COALESCE(VALUES(updated_by_id), updated_by_id),
+      notes=VALUES(notes)`,
     [
       txn.id,
       txn.employeeId,
@@ -693,6 +736,8 @@ export async function createEmployeeLedgerTransactionDirect(data: any): Promise<
       (txn as any).direction || null,
       (txn as any).intent || null,
       txn.source || 'manual',
+      (txn as any).createdById || null,
+      (txn as any).updatedById || null,
       txn.notes || null,
       txn.createdAt || new Date().toISOString(),
     ]
@@ -700,8 +745,8 @@ export async function createEmployeeLedgerTransactionDirect(data: any): Promise<
   return txn;
 }
 
-export async function updateEmployeeLedgerTransactionDirect(id: string, updates: any): Promise<EmployeeLedgerTransaction> {
-  const txn = serverDb.updateEmployeeLedgerTransaction(id, updates);
+export async function updateEmployeeLedgerTransactionDirect(id: string, updates: any, actorId?: string): Promise<EmployeeLedgerTransaction> {
+  const txn = serverDb.updateEmployeeLedgerTransaction(id, updates, actorId);
   if (!isMysqlConfigured()) return txn;
 
   await executeMysqlQuery(
@@ -711,7 +756,8 @@ export async function updateEmployeeLedgerTransactionDirect(id: string, updates:
       reason = ?,
       account_id = ?,
       direction = ?,
-      notes = ?
+      notes = ?,
+      updated_by_id = COALESCE(?, updated_by_id)
     WHERE id = ?`,
     [
       txn.date,
@@ -720,6 +766,7 @@ export async function updateEmployeeLedgerTransactionDirect(id: string, updates:
       txn.accountId || null,
       txn.direction || null,
       txn.notes || null,
+      actorId || null,
       txn.id,
     ]
   );

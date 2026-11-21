@@ -645,6 +645,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
                         </span>
                       </div>
                     </div>
+                    {/* DONE-BY AUDIT (2026-11-21) */}
+                    <div className="text-[10px] text-[var(--color-on-surface-variant)]">
+                      Added by <strong className="text-[var(--color-on-surface)]">{mix.createdByName || 'Unknown'}</strong>
+                    </div>
                   </div>
 
                   <div className="flex items-center justify-between pt-2 border-t border-[var(--color-outline-variant)] mt-1">
@@ -704,6 +708,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
                   <th className="py-3.5 px-3">Batch Mix</th>
                   <th className="py-3.5 px-3">Plant Unit</th>
                   <th className="py-3.5 px-4 text-right">Batch Output</th>
+                  {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
+                  <th className="py-3.5 px-3">Created By</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--color-outline-variant)]/60">
@@ -739,6 +745,9 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
                       </td>
                       <td className="py-3.5 px-4 text-right font-black text-[var(--color-on-surface)]">
                         {fmtNum(batch.targetQuantity)} {batch.unit}
+                      </td>
+                      <td className="py-3.5 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                        {batch.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
                       </td>
                     </tr>
                   );

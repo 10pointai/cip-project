@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { serverDb } from '../db';
-import { authenticateToken, requirePermission } from '../middleware/auth';
+import { authenticateToken, requirePermission, AuthenticatedRequest } from '../middleware/auth';
 import { writeProductionBatchACID } from '../mysql/azureTransactions';
 import {
   fetchBatchesDirect,
@@ -14,6 +14,10 @@ import {
 export const productionRouter = Router();
 
 productionRouter.use(authenticateToken);
+
+// DONE-BY AUDIT (2026-11-21): the acting user comes from the verified
+// session; the request body is never trusted for the actor stamp.
+const actingUserId = (req: AuthenticatedRequest): string | undefined => req.user?.id;
 
 // GET /api/batches
 productionRouter.get('/', async (req: Request, res: Response) => {
@@ -31,7 +35,7 @@ productionRouter.get('/', async (req: Request, res: Response) => {
 // the server resolves every ingredient quantity and posts the FIFO ledger
 // movements (inputs out at blended cost, output lot valued at exactly what
 // the run consumed).
-productionRouter.post('/', requirePermission('manage_production'), async (req: Request, res: Response) => {
+productionRouter.post('/', requirePermission('manage_production'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { batchMixId, targetQuantity } = req.body;
     if (!batchMixId) {
@@ -41,7 +45,7 @@ productionRouter.post('/', requirePermission('manage_production'), async (req: R
     if (!Number.isFinite(qty) || qty <= 0) {
       return res.status(400).json({ success: false, error: 'targetQuantity (produced quantity) is required and must be positive' });
     }
-    const result = await writeProductionBatchACID(req.body);
+    const result = await writeProductionBatchACID(req.body, actingUserId(req));
     res.status(201).json({
       success: true,
       message: result.message,
@@ -113,9 +117,9 @@ batchMixesRouter.get('/:id', async (req: Request, res: Response) => {
 });
 
 // POST /api/batch-mixes
-batchMixesRouter.post('/', requirePermission('manage_production'), async (req: Request, res: Response) => {
+batchMixesRouter.post('/', requirePermission('manage_production'), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const mix = createBatchMixDirect(req.body);
+    const mix = createBatchMixDirect(req.body, actingUserId(req));
     res.status(201).json({ success: true, message: 'Batch mix created successfully', data: mix });
   } catch (error: any) {
     res.status(400).json({ success: false, error: error.message });
@@ -123,9 +127,9 @@ batchMixesRouter.post('/', requirePermission('manage_production'), async (req: R
 });
 
 // PUT /api/batch-mixes/:id
-batchMixesRouter.put('/:id', requirePermission('manage_production'), async (req: Request, res: Response) => {
+batchMixesRouter.put('/:id', requirePermission('manage_production'), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const mix = updateBatchMixDirect(req.params.id, req.body);
+    const mix = updateBatchMixDirect(req.params.id, req.body, actingUserId(req));
     if (!mix) {
       return res.status(404).json({ success: false, error: 'Batch mix not found' });
     }

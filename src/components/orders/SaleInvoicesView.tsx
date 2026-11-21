@@ -77,12 +77,14 @@ export function SaleInvoicesView({ invoices, sales, parties, settings }: SaleInv
                 <th className="py-3.5 px-3">Party</th>
                 <th className="py-3.5 px-3">Sales Orders</th>
                 <th className="py-3.5 px-4 text-right">Total Amount</th>
+                {/* DONE-BY AUDIT (2026-11-21): the user who consolidated the invoice */}
+                <th className="py-3.5 px-3">Created By</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--color-outline-variant)]/60">
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={4} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                  <td colSpan={5} className="py-12 text-center text-[var(--color-on-surface-variant)]">
                     <FileCheck className="w-8 h-8 mx-auto text-[var(--color-outline-variant)] mb-2" />
                     <p className="text-xs font-bold">{invoices.length === 0 ? 'No consolidated invoices yet' : 'No invoices match the search'}</p>
                     <p className="text-[10px] mt-0.5">
@@ -116,6 +118,9 @@ export function SaleInvoicesView({ invoices, sales, parties, settings }: SaleInv
                       </p>
                     </td>
                     <td className="py-3.5 px-4 text-right font-black text-[var(--color-on-surface)]">{formatCurrency(inv.totalAmount)}</td>
+                    <td className="py-3.5 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                      {inv.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
+                    </td>
                   </tr>
                 ))
               )}

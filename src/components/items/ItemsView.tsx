@@ -397,6 +397,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
         'Technical Specs',
         'Remarks',
         'Status',
+        'Created By',
       ];
 
       const rows = filteredItems.map((i) => [
@@ -414,6 +415,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
         `"${(i.technicalSpecs || '').replace(/"/g, '""')}"`,
         `"${(i.remarks || '').replace(/"/g, '""')}"`,
         i.isActive ? 'Active' : 'Inactive',
+        `"${i.createdByName || ''}"`,
       ]);
 
       const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
@@ -818,6 +820,8 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                       <th className="py-3.5 px-3 text-right">Selling Rate</th>
                       <th className="py-3.5 px-3 text-right">Opening / Cost Rate</th>
                       <th className="py-3.5 px-3 text-center">GST Slab</th>
+                      {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
+                      <th className="py-3.5 px-3">Created By</th>
                       <th className="py-3.5 px-4 text-center">Actions</th>
                     </tr>
                   </thead>
@@ -979,6 +983,11 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                             </span>
                           </td>
 
+                          {/* DONE-BY AUDIT (2026-11-21) */}
+                          <td className="py-3 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                            {item.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
+                          </td>
+
                           {/* Actions */}
                           <td className="py-3 px-4 text-center" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center justify-center gap-1">
@@ -1108,6 +1117,11 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                         ))}
                       </div>
                     )}
+
+                    {/* DONE-BY AUDIT (2026-11-21) */}
+                    <div className="text-[10px] text-[var(--color-on-surface-variant)]">
+                      Added by <strong className="text-[var(--color-on-surface)]">{item.createdByName || 'Unknown'}</strong>
+                    </div>
 
                     {/* Card Mid: Rates & HSN */}
                     <div className="pt-2 border-t border-[var(--color-outline-variant)] grid grid-cols-2 gap-2 text-xs">
@@ -1522,6 +1536,8 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                       <th className="py-3.5 px-3 text-right">Rate & Valuation</th>
                       <th className="py-3.5 px-3 text-center">Stock Progression</th>
                       <th className="py-3.5 px-3">Reason & Reference</th>
+                      {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
+                      <th className="py-3.5 px-3">Recorded By</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--color-outline-variant)]">
@@ -1661,6 +1677,11 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                             </div>
                           </td>
 
+                          {/* DONE-BY AUDIT (2026-11-21) */}
+                          <td className="py-3 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                            {adj.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
+                          </td>
+
                         </tr>
 
                         {/* STOCK TRANSFER — the paired DESTINATION leg rendered
@@ -1721,6 +1742,9 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                               <div className="font-semibold text-[var(--color-on-surface-variant)] max-w-xs truncate text-[11px]">
                                 Stock landed here from {adj.fromLocationName || adj.location || 'the source'}
                               </div>
+                            </td>
+                            <td className="py-2.5 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                              {adj.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
                             </td>
                           </tr>
                         )}

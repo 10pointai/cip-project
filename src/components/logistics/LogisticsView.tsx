@@ -1198,13 +1198,15 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                   <th className="py-3.5 px-3">Tenure / Repayment</th>
                   <th className="py-3.5 px-3">Auto-Debit Account</th>
                   <th className="py-3.5 px-3">Loan Status</th>
+                  {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
+                  <th className="py-3.5 px-3">Created By</th>
                   <th className="py-3.5 px-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--color-outline-variant)]">
                 {filteredVehicles.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                    <td colSpan={11} className="py-12 text-center text-[var(--color-on-surface-variant)]">
                       <Truck className="h-8 w-8 text-[var(--color-outline)] mx-auto mb-2" />
                       <p className="text-xs font-bold uppercase">No vehicles registered</p>
                     </td>
@@ -1378,6 +1380,10 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                             <span className="text-[var(--color-on-surface-variant)] font-semibold">—</span>
                           )}
                         </td>
+                        {/* DONE-BY AUDIT (2026-11-21) */}
+                        <td className="py-3.5 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                          {vehicle.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
+                        </td>
                         <td className="py-3.5 px-4 text-right">
                           <div className="flex items-center justify-end gap-1.5">
                             <div className="relative" ref={vehicleMoreMenu?.id === vehicle.id ? moreVehicleMenuRef : undefined}>
@@ -1482,13 +1488,15 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                       <th className="py-3.5 px-3 text-right">Amount (₹)</th>
                       <th className="py-3.5 px-3">Account / Diesel From</th>
                       <th className="py-3.5 px-3">Remarks</th>
+                      {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
+                      <th className="py-3.5 px-3">Recorded By</th>
                       <th className="py-3.5 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--color-outline-variant)]">
                     {filteredExpenses.length === 0 ? (
                       <tr>
-                        <td colSpan={9} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                        <td colSpan={10} className="py-12 text-center text-[var(--color-on-surface-variant)]">
                           <Receipt className="h-8 w-8 text-[var(--color-outline)] mx-auto mb-2" />
                           <p className="text-xs font-bold uppercase">No expense entries found matching filters</p>
                           <p className="text-[11px] mt-1 text-[var(--color-on-surface-variant)]">
@@ -1543,6 +1551,10 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                               <span className="text-[10px] font-semibold text-[var(--color-on-surface-variant)] truncate block max-w-[200px]" title={entry.notes}>
                                 {entry.notes || '—'}
                               </span>
+                            </td>
+                            {/* DONE-BY AUDIT (2026-11-21) */}
+                            <td className="py-3.5 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                              {entry.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
                             </td>
                             <td className="py-3.5 px-4 text-right">
                               <div className="flex items-center justify-end gap-1.5">
@@ -1604,13 +1616,15 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                     <th className="py-3.5 px-3">From Account</th>
                     <th className="py-3.5 px-3">Source</th>
                     <th className="py-3.5 px-3">Notes</th>
+                    {/* DONE-BY AUDIT (2026-11-21): manual rows only — auto/cron rows show — */}
+                    <th className="py-3.5 px-3">Recorded By</th>
                     <th className="py-3.5 px-4 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--color-outline-variant)]">
                   {emiEntries.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="py-12 text-center text-[var(--color-on-surface-variant)]">
+                      <td colSpan={8} className="py-12 text-center text-[var(--color-on-surface-variant)]">
                         <Landmark className="h-8 w-8 text-[var(--color-outline)] mx-auto mb-2" />
                         <p className="text-xs font-bold uppercase">No EMI entries yet</p>
                         <p className="text-[11px] mt-1 text-[var(--color-on-surface-variant)]">
@@ -1647,6 +1661,12 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                           <span className="text-[10px] text-[var(--color-on-surface-variant)] truncate block max-w-[220px]" title={entry.notes}>
                             {entry.notes || '—'}
                           </span>
+                        </td>
+                        {/* DONE-BY AUDIT (2026-11-21): only manual entries carry a recorder */}
+                        <td className="py-3 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                          {entry.source !== 'auto'
+                            ? (entry.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>)
+                            : <span className="text-[var(--color-outline)]">—</span>}
                         </td>
                         <td className="py-3 px-4 text-right">
                           <div className="flex items-center justify-end gap-1.5">

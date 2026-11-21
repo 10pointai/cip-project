@@ -41,6 +41,15 @@ export interface Party {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+  // DONE-BY AUDIT (2026-11-21): FKs only (Golden Rule §2) — the acting user's
+  // id, stamped server-side from the session (clients cannot fake it). The
+  // display name (createdByName/updatedByName) is resolved live from the
+  // users master at read time; blank when the user is later deleted.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export type VoucherType = 
@@ -107,6 +116,13 @@ export interface InventoryUnit {
   notes?: string;
   createdAt: string;
   updatedAt?: string;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById (server-stamped
+  // session id); name resolved live from the users master at read time.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 
   // Display copies — JOIN-resolved at read time, display-only, never
   // authoritative (Golden Rule §2: renames propagate on every read).
@@ -177,9 +193,27 @@ export interface InventoryUnitEvent {
   saleId?: string;
   supplierId?: string;
   createdAt: string;
+  // DONE-BY AUDIT (2026-11-21): the operator who performed the movement
+  // (server-stamped session id); name resolves live from the users master.
+  createdById?: string;
+  // Hydrated read-time view field (never persisted)
+  createdByName?: string;
 }
 
-export interface ItemCategory {
+/**
+ * DONE-BY AUDIT (2026-11-21): the acting user stamped server-side on every
+ * created/edited row (FK only — Golden Rule §2; the display name resolves
+ * live from the users master at read time; blank if the user is deleted).
+ */
+export interface DoneByAudit {
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
+}
+
+export interface ItemCategory extends DoneByAudit {
   id: string;
   name: string;
   description?: string;
@@ -188,7 +222,7 @@ export interface ItemCategory {
   createdAt: string;
 }
 
-export interface ItemUnit {
+export interface ItemUnit extends DoneByAudit {
   id: string;
   code: string;
   name: string;
@@ -196,7 +230,7 @@ export interface ItemUnit {
   isStandard?: boolean;
 }
 
-export interface ItemLocation {
+export interface ItemLocation extends DoneByAudit {
   id: string;
   name: string;
   code?: string;
@@ -285,6 +319,12 @@ export interface Item {
 
   createdAt: string;
   updatedAt: string;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export type StockAdjustmentType = 'increase' | 'decrease' | /** Stock Transfer (2026-11-17): move stock BETWEEN two locations of the same item — one doc, From → To */ 'transfer';
@@ -415,6 +455,12 @@ export interface ItemStockAdjustment {
   referenceNumber?: string;
   notes?: string;
   createdAt: string;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 // ============================================================================
@@ -452,6 +498,13 @@ export interface BatchMix {
   notes?: string;
   isActive?: boolean; // inactive mixes: kept, hidden from the Run picker
   createdAt: string;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById (server-stamped
+  // session id); name resolved live from the users master at read time.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export interface ProductionBatchRun {
@@ -490,6 +543,13 @@ export interface ProductionBatchRun {
   mixTemperatureCelsius?: number; // e.g. 165°C
   notes?: string;
   createdAt: string;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById (server-stamped
+  // session id); name resolved live from the users master at read time.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export type OrderType = 'sales' | 'purchase';
@@ -614,6 +674,13 @@ export interface Transaction {
   dueDate?: string;
   attachments?: EvidenceFile[];
   createdAt: string;
+  // DONE-BY AUDIT (2026-11-21): acting user's server-stamped session id (mirrors
+  // Party.createdById); name resolved live from the users master at read time.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export type AccountType = 'bank' | 'cash';
@@ -633,6 +700,15 @@ export interface CashBankAccount {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+  // DONE-BY AUDIT (2026-11-21): FKs only (Golden Rule §2) — the acting user's
+  // id, stamped server-side from the session (clients cannot fake it). The
+  // display name (createdByName/updatedByName) is resolved live from the
+  // users master at read time; blank when the user is later deleted.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export type TransferType = 'bank_to_bank' | 'cash_to_bank' | 'bank_to_cash' | 'cash_to_cash';
@@ -654,6 +730,12 @@ export interface InternalTransfer {
   // Hydrated read-time fields (never persisted)
   fromAccountName?: string;
   toAccountName?: string;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById (server-stamped
+  // session id); name resolved live from the users master at read time.
+  createdById?: string;
+  updatedById?: string;
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export type AdjustmentType = 'increase' | 'decrease';
@@ -676,6 +758,12 @@ export interface AccountAdjustment {
   // Hydrated read-time fields (never persisted)
   accountName?: string;
   accountType?: AccountType;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById (server-stamped
+  // session id); name resolved live from the users master at read time.
+  createdById?: string;
+  updatedById?: string;
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export interface BankDetails {
@@ -715,6 +803,11 @@ export interface CompanySettings {
   authorizedSignatoryName: string;
   authorizedSignatoryDesignation: string;
   invoiceNotes: string;
+  // DONE-BY AUDIT (2026-11-21): the last operator to save the company profile
+  // (server-stamped session id; name resolved live from the users master)
+  updatedById?: string;
+  // Hydrated read-time view field (never persisted on the client)
+  updatedByName?: string;
 }
 
 export type VehicleType = 'tipper' | 'tanker' | 'mixer' | 'loader' | 'other';
@@ -760,6 +853,13 @@ export interface Vehicle {
   emiDetails?: VehicleEmiDetails;
   notes?: string;
   createdAt: string;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById (server-stamped
+  // session id); name resolved live from the users master at read time.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export interface Driver {
@@ -830,8 +930,14 @@ export interface VehicleEmiEntry {
   source: 'auto' | 'manual';
   notes?: string;
   createdAt: string;
+  // DONE-BY AUDIT (2026-11-21): manual rows carry the recording operator
+  // (server-stamped session id); auto/cron rows carry none by design.
+  createdById?: string;
+  updatedById?: string;
   // Hydrated read-time view fields (never persisted)
   vehicleNo?: string;
+  createdByName?: string;
+  updatedByName?: string;
   accountName?: string;
 }
 
@@ -873,6 +979,13 @@ export interface VehicleExpenseEntry {
   vehicleNo?: string;
   accountName?: string;
   dieselLocationName?: string;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById (server-stamped
+  // session id); name resolved live from the users master at read time.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export interface Employee {
@@ -906,6 +1019,13 @@ export interface Employee {
    */
   openingBalance?: number;
   createdAt: string;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById (server-stamped
+  // session id); name resolved live from the users master at read time.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export interface AttendancePunchLog {
@@ -930,6 +1050,13 @@ export interface EmployeeAttendance {
   notes?: string;
   createdAt?: string;
   updatedAt?: string;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById (server-stamped
+  // session id); name resolved live from the users master at read time.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export interface EmployeeLeave {
@@ -943,6 +1070,13 @@ export interface EmployeeLeave {
   reason: string;
   status: 'pending' | 'approved' | 'rejected';
   createdAt: string;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById (server-stamped
+  // session id); name resolved live from the users master at read time.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export interface EmployeePayment {
@@ -1011,6 +1145,13 @@ export interface EmployeeLedgerTransaction {
   /** Hydrated read-time display field (never persisted on the row) */
   accountName?: string;
   createdAt: string;
+  // DONE-BY AUDIT (2026-11-21): manual payroll rows carry the recording
+  // operator; engine-generated wage accruals stay unstamped by design.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export interface EvidenceFolder {
@@ -1238,6 +1379,13 @@ export interface Sale {
   stages: SalesOrderStage[]; // chronological (oldest first)
   createdAt: string;
   updatedAt: string;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById (server-stamped
+  // session id); name resolved live from the users master at read time.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 // ==========================================
@@ -1250,6 +1398,10 @@ export interface AppDefault {
   key: string;
   value: string;
   updatedAt: string;
+  // DONE-BY AUDIT (2026-11-21): the operator who last saved the default
+  updatedById?: string;
+  // Hydrated read-time view field (never persisted on the client)
+  updatedByName?: string;
 }
 
 // ==========================================
@@ -1332,6 +1484,13 @@ export interface SaleInvoice {
   items?: SaleInvoiceItem[];
   createdAt: string;
   updatedAt: string;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById (server-stamped
+  // session id); name resolved live from the users master at read time.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 export interface PurchaseOrderItem {
@@ -1408,6 +1567,13 @@ export interface Purchase {
   stages: PurchaseOrderStage[]; // chronological (oldest first)
   createdAt: string;
   updatedAt: string;
+  // DONE-BY AUDIT (2026-11-21): mirrors Party.createdById (server-stamped
+  // session id); name resolved live from the users master at read time.
+  createdById?: string;
+  updatedById?: string;
+  // Hydrated read-time view fields (never persisted)
+  createdByName?: string;
+  updatedByName?: string;
 }
 
 /** Stage-save request payloads — `updateInventory` is the user's per-stage
