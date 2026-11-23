@@ -211,8 +211,9 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
         if (sortBy === 'stock_desc') {
           return (b.currentStock || 0) - (a.currentStock || 0);
         }
-        // Recent
-        return new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime();
+        // Recent — by CREATION (not last edit): the newest item sits on top
+        // even when an older item was edited recently (user directive).
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
       });
   }, [items, searchQuery, typeFilter, categoryFilter, locationFilter, statusFilter, sortBy]);
 
@@ -1260,14 +1261,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                   </button>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => handleOpenAdjustmentModal()}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-[var(--color-primary)] hover:opacity-95 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-xs transition-all"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  New Adjustment
-                </button>
+               
               </div>
             </div>
 

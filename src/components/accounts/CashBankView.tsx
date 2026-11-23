@@ -1323,40 +1323,7 @@ export function CashBankView({
                 Edit
               </button>
 
-              <button
-                onClick={() => {
-                  setAdjustmentFormData({
-                    accountId: selectedAccount.id,
-                    type: 'increase',
-                    amount: '',
-                    date: new Date().toISOString().split('T')[0],
-                    reason: '',
-                    referenceNumber: '',
-                    notes: '',
-                  });
-                  setIsAdjustmentModalOpen(true);
-                }}
-                className="px-3.5 py-2 bg-[var(--color-surface-container)] hover:bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] rounded-full text-xs font-bold border border-[var(--color-outline-variant)]"
-              >
-                Adjust
-              </button>
-
-              <button
-                onClick={() => {
-                  setTransferFormData({
-                    fromAccountId: selectedAccount.id,
-                    toAccountId: '',
-                    amount: '',
-                    date: new Date().toISOString().split('T')[0],
-                    referenceNumber: '',
-                    notes: '',
-                  });
-                  setIsTransferModalOpen(true);
-                }}
-                className="px-3.5 py-2 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold shadow-xs"
-              >
-                Transfer
-              </button>
+            
             </div>
           </div>
 

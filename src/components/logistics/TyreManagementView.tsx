@@ -591,15 +591,14 @@ export const TyreManagementView: React.FC = () => {
             </div>
           ) : (
             <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-[28px] overflow-clip shadow-2xs">
-              {/* STICKY HEADER (matches the orders table): the page scrolls and
-                  the header rides sticky beneath the app header (h-16) —
-                  overflow-clip keeps the rounded corners while letting the
-                  sticky thead anchor to the viewport (an overflow-x-auto /
-                  hidden ancestor would turn it into its own scroll
-                  container). */}
-              <div>
-                <table className="w-full text-left border-collapse">
-                  <thead className="sticky top-16 z-20">
+              {/* HORIZONTALLY SCROLLABLE (user directive): the table wraps in
+                  overflow-x-auto (the same pattern as the inventory catalog /
+                  adjustments tables). A scroll container can't host a
+                  viewport-sticky thead, so the header row scrolls away with
+                  the page instead of pinning. */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse min-w-[1080px]">
+                  <thead>
                     <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
                       <th className="py-3.5 px-4">Date & Time</th>
                       <th className="py-3.5 px-3">Serial Number</th>

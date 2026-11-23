@@ -550,8 +550,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
                   <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
                     <th className="py-3.5 px-4 min-w-[150px]">Batch Mix</th>
                     <th className="py-3.5 px-3 min-w-[170px]">Output Item</th>
-                    <th className="py-3.5 px-3">Recipe (Per Mix)</th>
                     <th className="py-3.5 px-3 text-center min-w-[110px]">Yield / Mix</th>
+                    <th className="py-3.5 px-3">Recipe (Per Mix)</th>
                     <th className="py-3.5 px-3 text-center min-w-[90px]">Usage</th>
                     {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
                     <th className="py-3.5 px-3 min-w-[110px]">Created By</th>
@@ -590,7 +590,15 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
                           )}
                         </td>
 
-                        {/* Recipe — per-ingredient qty AND % (user directive) */}
+                        {/* Yield / Mix — one mix's output (directly after the item it produces) */}
+                        <td className="py-3 px-3 text-center">
+                          <span className={`text-xs font-black ${inactive ? 'text-[var(--color-on-surface-variant)]' : 'text-[var(--color-success)]'}`}>
+                            {qtyBasis && refQty > 0 ? `${fmtNum(refQty)} ${out?.unit || ''}` : 'Per run'}
+                          </span>
+                        </td>
+
+                        {/* Recipe — qty rows show ONLY their qty, % rows ONLY
+                            their percent (each row's own basis, no cross-derive) */}
                         <td className="py-3 px-3">
                           {ings.length === 0 ? (
                             <span className="text-xs text-[var(--color-outline)]">—</span>
@@ -598,32 +606,21 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
                             <div className="space-y-1">
                               {ings.map((ing) => {
                                 const isQtyBasis = (ing.basis || 'quantity') === 'quantity';
-                                const ingQty = isQtyBasis ? (Number(ing.quantity) || 0) : (refQty > 0 ? ((Number(ing.percentage) || 0) / 100) * refQty : undefined);
-                                const ingPct = isQtyBasis
-                                  ? (refQty > 0 ? ((Number(ing.quantity) || 0) / refQty) * 100 : undefined)
-                                  : Number(ing.percentage) || 0;
                                 return (
                                   <div key={ing.itemId} className="flex items-center justify-between gap-3 max-w-[320px]">
                                     <span className="font-semibold text-[var(--color-on-surface)] truncate">
                                       {itemById.get(ing.itemId)?.name || ing.itemId}
                                     </span>
                                     <span className="font-mono text-[10px] text-[var(--color-on-surface-variant)] whitespace-nowrap">
-                                      {ingQty !== undefined && ingQty !== null ? `${fmtNum(ingQty)} ${resolvedConsumedUnit(ing)}` : ''}
-                                      {ingQty !== undefined && ingPct !== undefined ? ' · ' : ''}
-                                      {ingPct !== undefined ? `${fmtNum(ingPct, 1)}%` : ''}
+                                      {isQtyBasis
+                                        ? `${fmtNum(Number(ing.quantity) || 0)} ${resolvedConsumedUnit(ing)}`
+                                        : `${fmtNum(Number(ing.percentage) || 0, 1)}%`}
                                     </span>
                                   </div>
                                 );
                               })}
                             </div>
                           )}
-                        </td>
-
-                        {/* Yield / Mix */}
-                        <td className="py-3 px-3 text-center">
-                          <span className={`text-xs font-black ${inactive ? 'text-[var(--color-on-surface-variant)]' : 'text-[var(--color-success)]'}`}>
-                            {qtyBasis && refQty > 0 ? `${fmtNum(refQty)} ${out?.unit || ''}` : 'Per run'}
-                          </span>
                         </td>
 
                         {/* Usage */}
@@ -695,6 +692,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
                   <th className="py-3.5 px-4">Batch #</th>
                   <th className="py-3.5 px-3">Output Item</th>
                   <th className="py-3.5 px-3">Batch Mix</th>
+                  <th className="py-3.5 px-3">Items Used (Qty)</th>
                   <th className="py-3.5 px-3">Output Location</th>
                   <th className="py-3.5 px-4 text-right">Batch Output</th>
                   {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
@@ -727,6 +725,28 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
                         </span>
                         <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">{mix?.mixNumber || ''}</p>
                       </td>
+                      {/* Items Used — each consumed qty at its actual recorded amount */}
+                      {(batch.rawMaterialsConsumed || []).length === 0 ? (
+                        <td className="py-3.5 px-3"><span className="text-xs text-[var(--color-outline)]">—</span></td>
+                      ) : (
+                        <td className="py-3.5 px-3">
+                          <div className="space-y-1">
+                            {batch.rawMaterialsConsumed.map((line, li) => {
+                              const lineItem = itemById.get(line.itemId);
+                              return (
+                                <div key={`${line.itemId}-${li}`} className="flex items-center justify-between gap-3 max-w-[320px]">
+                                  <span className="font-semibold text-[var(--color-on-surface)] truncate">
+                                    {lineItem?.name || line.itemName || line.itemId}
+                                  </span>
+                                  <span className="font-mono text-[10px] text-[var(--color-on-surface-variant)] whitespace-nowrap">
+                                    {fmtNum(line.quantity)} {lineItem?.unit || line.unit || ''}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </td>
+                      )}
                       <td className="py-3.5 px-3">
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] truncate max-w-[200px]">
                           <Building2 className="w-3 h-3 shrink-0 text-[var(--color-on-surface-variant)]" />

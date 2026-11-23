@@ -92,6 +92,11 @@ export function ItemDetailPage({ item, category, currencySymbol, onBack, onEdit 
     : 0;
   const stockValue2 = Math.round(stockValue * 100) / 100;
   const valuationRate = Number(item.valuationRate) || 0;
+  // The bifurcation card's rows: every location bucket currently carrying
+  // stock (negatives allowed by the ledger; zero buckets are skipped).
+  const stockBuckets = (item.locations || []).filter(
+    (l) => l.locationName && Number(l.currentStock) !== 0,
+  );
 
   const movements = item.movements || [];
 
@@ -205,13 +210,41 @@ export function ItemDetailPage({ item, category, currencySymbol, onBack, onEdit 
           sub={isProduct && item.openingStock ? `opening ${(item.openingStock || 0).toLocaleString('en-IN')} ${item.unit}` : isProduct ? 'no opening stock' : 'not stock-tracked'}
           tone="bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)]"
         />
-        <KpiCard
-          icon={Layers}
-          label="Stock Value"
-          value={isProduct ? fmtVal(stockValue2) : '—'}
-          sub={isProduct && valuationRate > 0 ? `FIFO rate ${fmtVal(valuationRate)}/unit` : isProduct ? 'no FIFO lots valued' : '—'}
-          tone="bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]"
-        />
+        {/* LOCATION BIFURCATION — replaces the Stock Value card (user directive):
+            how much of the item sits at each storage location right now */}
+        <div className="rounded-2xl border border-[var(--color-outline-variant)] bg-[var(--color-surface-container-lowest)] p-4 flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-[var(--color-secondary-container)] text-[var(--color-on-secondary-container)]">
+            <Warehouse className="w-4.5 h-4.5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-[9px] font-black uppercase tracking-wider text-[var(--color-on-surface-variant)]">
+              Location Bifurcation
+            </p>
+            {isProduct && stockBuckets.length > 0 ? (
+              <div className="mt-1 space-y-0.5">
+                {stockBuckets.slice(0, 3).map((l, lIdx) => (
+                  <div key={lIdx} className="flex items-center justify-between gap-2 text-[11px]">
+                    <span className="font-bold text-[var(--color-on-surface)] truncate" title={l.locationName}>
+                      {l.locationName}
+                    </span>
+                    <span className="font-mono text-[10px] text-[var(--color-on-surface-variant)] whitespace-nowrap">
+                      {(Number(l.currentStock) || 0).toLocaleString('en-IN')} {item.unit}
+                    </span>
+                  </div>
+                ))}
+                {stockBuckets.length > 3 && (
+                  <p className="text-[9px] font-semibold text-[var(--color-on-surface-variant)]">
+                    +{stockBuckets.length - 3} more location{stockBuckets.length - 3 === 1 ? '' : 's'}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-1">
+                {isProduct ? 'No stock at any location' : '—'}
+              </p>
+            )}
+          </div>
+        </div>
         <KpiCard
           icon={IndianRupee}
           label="Selling Rate"
@@ -417,13 +450,33 @@ export function ItemDetailPage({ item, category, currencySymbol, onBack, onEdit 
                           </td>
                           {/* Location — where the qty left/landed; the ledger
                               row resolves the name server-side by JOIN
-                              (falls back to the item's breakdown by FK). */}
+                              (falls back to the item's breakdown by FK).
+                              OPENING STOCK: the seeded entry spans the WHOLE
+                              item, so this row shows every location bucket
+                              with how much opening stock each one carried. */}
                           <td className="py-2.5 px-3">
-                            <span className="font-semibold text-[var(--color-on-surface)] block max-w-[160px] truncate" title={mov.locationName}>
-                              {mov.locationName
-                                || (item.locations || []).find((l) => l.locationId && l.locationId === mov.locationId)?.locationName
-                                || '—'}
-                            </span>
+                            {mov.type === 'opening' && (item.locations || []).some((l) => (Number(l.openingStock) || 0) > 0) ? (
+                              <div className="space-y-1">
+                                {(item.locations || [])
+                                  .filter((l) => (Number(l.openingStock) || 0) > 0)
+                                  .map((l, lIdx) => (
+                                    <div key={lIdx} className="flex items-center justify-between gap-2 max-w-[180px]">
+                                      <span className="font-semibold text-[var(--color-on-surface)] truncate" title={l.locationName}>
+                                        {l.locationName}
+                                      </span>
+                                      <span className="font-mono text-[10px] text-[var(--color-on-surface-variant)] whitespace-nowrap">
+                                        {(Number(l.openingStock) || 0).toLocaleString('en-IN')}
+                                      </span>
+                                    </div>
+                                  ))}
+                              </div>
+                            ) : (
+                              <span className="font-semibold text-[var(--color-on-surface)] block max-w-[160px] truncate" title={mov.locationName}>
+                                {mov.locationName
+                                  || (item.locations || []).find((l) => l.locationId && l.locationId === mov.locationId)?.locationName
+                                  || '—'}
+                              </span>
+                            )}
                           </td>
                           <td className="py-2.5 px-3 text-right font-bold">
                             <span className={isAddition ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]'}>
