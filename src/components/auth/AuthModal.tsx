@@ -150,7 +150,10 @@ export function AuthModal({ isOpen, onClose, isMandatory = false }: AuthModalPro
 
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-sm animate-in fade-in duration-200">
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget && !isMandatory) onClose?.(); }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-sm animate-in fade-in duration-200"
+    >
       <div
         className="w-full max-w-md bg-[var(--color-surface)] text-[var(--color-on-surface)] rounded-3xl border border-[var(--color-outline-variant)] shadow-2xl overflow-hidden flex flex-col"
         onClick={(e) => e.stopPropagation()}

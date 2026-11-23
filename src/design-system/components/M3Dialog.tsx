@@ -53,7 +53,10 @@ export const M3Dialog: React.FC<M3DialogProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#001d34]/60 backdrop-blur-xs animate-in fade-in duration-200">
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#001d34]/60 backdrop-blur-xs animate-in fade-in duration-200"
+    >
       <div
         className={`bg-white w-full ${maxWidthClasses[maxWidth]} rounded-[28px] shadow-2xl border border-[#e1e2ec] overflow-hidden flex flex-col max-h-[90vh] transition-all`}
         onClick={(e) => e.stopPropagation()}

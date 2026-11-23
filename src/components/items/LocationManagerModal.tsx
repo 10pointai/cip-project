@@ -101,8 +101,98 @@ export const LocationManagerModal: React.FC<LocationManagerModalProps> = ({
     }
   };
 
+  // Shared field markup — the create form (top) and the INLINE edit row use
+  // the same inputs, so an edit morphs the row in place (save/cancel restores
+  // the normal container).
+  const locationFields = (
+    <>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
+            Location Name *
+          </label>
+          <input
+            type="text"
+            placeholder="e.g. Silo Tower C or Yard Bay 3"
+            value={name}
+            onChange={(e) => {
+              setName(e.target.value);
+              setError('');
+            }}
+            className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+            required
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
+            Code / Identifier
+          </label>
+          <input
+            type="text"
+            placeholder="e.g. SILO-C"
+            value={code}
+            onChange={(e) => {
+              setCode(e.target.value);
+              setError('');
+            }}
+            className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
+            Storage Type
+          </label>
+          <select
+            value={type}
+            onChange={(e: any) => setType(e.target.value)}
+            className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+          >
+            <option value="silo">Silo (Hot Mix / Binder)</option>
+            <option value="tank">Tank (Liquid Bitumen / Fuel)</option>
+            <option value="stockpile">Stockpile (Aggregate / Sand)</option>
+            <option value="warehouse">Warehouse (Spares / Additives)</option>
+            <option value="bin">Feeder Bin</option>
+            <option value="yard">Open Yard</option>
+            <option value="other">Other Facility</option>
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
+            Capacity Limit (e.g. 250 MT / 50 KL)
+          </label>
+          <input
+            type="text"
+            placeholder="e.g. 250 MT"
+            value={capacity}
+            onChange={(e) => setCapacity(e.target.value)}
+            className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+          />
+        </div>
+      </div>
+
+      <div>
+        <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
+          Description & Specifications
+        </label>
+        <input
+          type="text"
+          placeholder="e.g. Insulated temperature-controlled hot mix discharge silo"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+        />
+      </div>
+    </>
+  );
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
       <div className="bg-[var(--color-surface-container-lowest)] w-full max-w-2xl rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
@@ -132,13 +222,14 @@ export const LocationManagerModal: React.FC<LocationManagerModalProps> = ({
             </div>
           )}
 
-          {/* Form when adding or editing */}
-          {(isAddingNew || editingId) && (
+          {/* CREATE form (stays at the top) — only for creation. EDIT opens
+              INLINE: the edited location's row morphs into the form in place. */}
+          {isAddingNew && (
             <form onSubmit={handleSave} className="p-4 bg-[var(--color-surface-container)] rounded-2xl border border-[var(--color-outline-variant)] space-y-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-2">
                   <MapPin className="w-4 h-4 text-[var(--color-primary)]" />
-                  {isAddingNew ? 'Add New Storage Location' : 'Edit Location'}
+                  Add New Storage Location
                 </h3>
                 <button
                   type="button"
@@ -153,92 +244,14 @@ export const LocationManagerModal: React.FC<LocationManagerModalProps> = ({
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                    Location Name *
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Silo Tower C or Yard Bay 3"
-                    value={name}
-                    onChange={(e) => {
-                      setName(e.target.value);
-                      setError('');
-                    }}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                    required
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                    Code / Identifier
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. SILO-C"
-                    value={code}
-                    onChange={(e) => {
-                      setCode(e.target.value);
-                      setError('');
-                    }}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                    Storage Type
-                  </label>
-                  <select
-                    value={type}
-                    onChange={(e: any) => setType(e.target.value)}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                  >
-                    <option value="silo">Silo (Hot Mix / Binder)</option>
-                    <option value="tank">Tank (Liquid Bitumen / Fuel)</option>
-                    <option value="stockpile">Stockpile (Aggregate / Sand)</option>
-                    <option value="warehouse">Warehouse (Spares / Additives)</option>
-                    <option value="bin">Feeder Bin</option>
-                    <option value="yard">Open Yard</option>
-                    <option value="other">Other Facility</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                    Capacity Limit (e.g. 250 MT / 50 KL)
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. 250 MT"
-                    value={capacity}
-                    onChange={(e) => setCapacity(e.target.value)}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                  Description & Specifications
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. Insulated temperature-controlled hot mix discharge silo"
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                />
-              </div>
+              {locationFields}
 
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="submit"
                   className="px-5 py-2 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold hover:opacity-95 transition-colors shadow-sm"
                 >
-                  {isAddingNew ? 'Save Location' : 'Update Location'}
+                  Save Location
                 </button>
               </div>
             </form>
@@ -249,7 +262,7 @@ export const LocationManagerModal: React.FC<LocationManagerModalProps> = ({
             <h3 className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
               Active Plant Locations ({locations.length})
             </h3>
-            {!isAddingNew && !editingId && (
+            {!isAddingNew && (
               <button
                 type="button"
                 onClick={startAdd}
@@ -267,6 +280,44 @@ export const LocationManagerModal: React.FC<LocationManagerModalProps> = ({
               const linkedCount = items.filter(
                 (i) => i.stockLocation && i.stockLocation.toLowerCase() === loc.name.toLowerCase()
               ).length;
+
+              // INLINE EDIT — the edited location's container IS the form:
+              // save/cancel re-renders the normal row container here.
+              if (editingId === loc.id) {
+                return (
+                  <form
+                    key={loc.id}
+                    onSubmit={handleSave}
+                    className="p-4 bg-[var(--color-surface-container)] rounded-2xl border border-[var(--color-primary)]/40 space-y-3 animate-in fade-in duration-150"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-2 min-w-0">
+                        <MapPin className="w-3.5 h-3.5 text-[var(--color-primary)] shrink-0" />
+                        <span className="truncate">Edit — {loc.name}</span>
+                      </h3>
+                    </div>
+                    {locationFields}
+                    <div className="flex justify-end gap-4 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingId(null);
+                          setError('');
+                        }}
+                        className="px-5 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)] font-medium text-xs rounded-full transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        className="px-5 py-2 bg-[var(--color-primary)] text-[var(--color-on-primary)] rounded-full text-xs font-bold hover:opacity-95 transition-colors shadow-xs"
+                      >
+                        Save Changes
+                      </button>
+                    </div>
+                  </form>
+                );
+              }
 
               return (
                 <div

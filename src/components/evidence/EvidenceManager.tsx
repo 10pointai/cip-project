@@ -610,7 +610,10 @@ export function EvidenceManager({
 
       {/* MODAL: New Folder */}
       {isNewFolderOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setIsNewFolderOpen(false); }}
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+        >
           <div className="bg-[var(--color-surface)] border border-[var(--color-outline-variant)] rounded-2xl max-w-md w-full p-5 sm:p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-[var(--color-outline-variant)]">
               <div className="flex items-center gap-2">
@@ -697,7 +700,10 @@ export function EvidenceManager({
 
       {/* MODAL: Upload Files */}
       {isUploadOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) handleUploadModalClose(); }}
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+        >
           <div className="bg-[var(--color-surface)] border border-[var(--color-outline-variant)] rounded-2xl max-w-lg w-full p-5 sm:p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-[var(--color-outline-variant)]">
               <div className="flex items-center gap-2">
@@ -857,7 +863,10 @@ export function EvidenceManager({
 
       {/* MODAL: File Preview & Inspector */}
       {selectedFileForPreview && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setSelectedFileForPreview(null); }}
+          className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4"
+        >
           <div className="bg-[var(--color-surface)] border border-[var(--color-outline-variant)] rounded-2xl max-w-2xl w-full p-5 sm:p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-[var(--color-outline-variant)]">
               <div className="flex items-center gap-2 overflow-hidden">
@@ -993,7 +1002,10 @@ export function EvidenceManager({
 
       {/* MODAL: Edit Folder */}
       {folderToEdit && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setFolderToEdit(null); }}
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+        >
           <div className="bg-[var(--color-surface)] border border-[var(--color-outline-variant)] rounded-2xl max-w-md w-full p-5 sm:p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-[var(--color-outline-variant)]">
               <div className="flex items-center gap-2">
@@ -1078,7 +1090,10 @@ export function EvidenceManager({
 
       {/* CONFIRM MODAL: Delete Folder */}
       {folderToDelete && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setFolderToDelete(null); }}
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+        >
           <div className="bg-[var(--color-surface)] border border-[var(--color-outline-variant)] rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4">
             <div className="flex items-center gap-2.5 text-[var(--color-error)]">
               <Trash2 className="w-5 h-5" />
@@ -1115,7 +1130,10 @@ export function EvidenceManager({
 
       {/* CONFIRM MODAL: Delete File */}
       {fileToDelete && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setFileToDelete(null); }}
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+        >
           <div className="bg-[var(--color-surface)] border border-[var(--color-outline-variant)] rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4">
             <div className="flex items-center gap-2.5 text-[var(--color-error)]">
               <Trash2 className="w-5 h-5" />

@@ -451,6 +451,7 @@ Maa Bhagwati Suppliers\tSupplier\t09BBHPS7890L1Z3\t9876123456\tcontact@mbs.in\tL
   return (
     <div
       id="bulk-party-entry-backdrop"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 md:p-6 bg-[#001d34]/60 backdrop-blur-xs animate-in fade-in duration-200"
     >
       <div
@@ -766,7 +767,10 @@ Maa Bhagwati Suppliers\tSupplier\t09BBHPS7890L1Z3\t9876123456\tcontact@mbs.in\tL
 
       {/* PASTE FROM EXCEL MODAL */}
       {isPasteModalOpen && (
-        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-[#001d34]/70 backdrop-blur-xs animate-in fade-in duration-200">
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setIsPasteModalOpen(false); }}
+          className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-[#001d34]/70 backdrop-blur-xs animate-in fade-in duration-200"
+        >
           <div
             className="bg-[var(--color-surface-container-lowest)] w-full max-w-2xl rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] p-6 space-y-4"
             onClick={(e) => e.stopPropagation()}
@@ -837,7 +841,10 @@ Maa Bhagwati Suppliers\tSupplier\t09BBHPS7890L1Z3\t9876123456\tcontact@mbs.in\tL
 
       {/* REVIEW & CONFIRM MODAL */}
       {isReviewModalOpen && (
-        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-[#001d34]/70 backdrop-blur-xs animate-in fade-in duration-200">
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setIsReviewModalOpen(false); }}
+          className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-[#001d34]/70 backdrop-blur-xs animate-in fade-in duration-200"
+        >
           <div
             className="bg-[var(--color-surface-container-lowest)] w-full max-w-xl rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] p-6 space-y-5"
             onClick={(e) => e.stopPropagation()}

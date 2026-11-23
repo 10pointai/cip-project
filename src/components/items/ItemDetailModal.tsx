@@ -44,7 +44,10 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
     costPrice > 0 && item.salePrice > 0 ? (grossProfitPerUnit / item.salePrice) * 100 : 0;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
       <div className="bg-[var(--color-surface-container-lowest)] w-full max-w-2xl rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
@@ -311,9 +314,21 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
                               <div className="font-medium capitalize text-[var(--color-on-surface)]">
                                 {mov.type.replace('_', ' ')}
                               </div>
-                              {(mov.sourcePartyOrBatch || mov.notes) && (
-                                <div className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5 max-w-[200px] truncate" title={mov.notes}>
-                                  {mov.sourcePartyOrBatch || mov.notes}
+                              {/* Diesel fills: the source column shows ONLY
+                                  the vehicle — never the legacy verbose
+                                  notes. Other types keep source→notes. */}
+                              {(mov.type === 'diesel_issue' || mov.type === 'diesel_issue_reversal'
+                                ? mov.sourcePartyOrBatch
+                                : (mov.sourcePartyOrBatch || mov.notes)) && (
+                                <div
+                                  className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5 max-w-[200px] truncate"
+                                  title={mov.type === 'diesel_issue' || mov.type === 'diesel_issue_reversal'
+                                    ? mov.sourcePartyOrBatch
+                                    : (mov.sourcePartyOrBatch || mov.notes)}
+                                >
+                                  {mov.type === 'diesel_issue' || mov.type === 'diesel_issue_reversal'
+                                    ? mov.sourcePartyOrBatch
+                                    : (mov.sourcePartyOrBatch || mov.notes)}
                                 </div>
                               )}
                             </td>

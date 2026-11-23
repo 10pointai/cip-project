@@ -1025,7 +1025,11 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
                               className="font-mono text-[11px] font-black text-[var(--color-primary)] underline decoration-dotted underline-offset-2 hover:opacity-80 cursor-pointer whitespace-nowrap"
                               title={`Open RST ${slip.orderNumber || ''} details`}
                             >
-                              {slip.orderNumber || '—'}
+                              {/* RST label only for true bare-serial numbers —
+                                  the sales table's labelling rule, verbatim */}
+                              {slip.orderNumber
+                                ? (/^\d+$/.test(String(slip.orderNumber)) ? `RST ${slip.orderNumber}` : slip.orderNumber)
+                                : '—'}
                             </button>
                           ) : (
                             <span className="text-[var(--color-on-surface-variant)] font-semibold">—</span>
@@ -1806,7 +1810,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
 
       {/* 2. CREATE TRIP SLIP MODAL */}
       {isSlipModalOpen && (
-        <div className="fixed inset-0 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50" onClick={(e) => { if (e.target === e.currentTarget) setIsSlipModalOpen(false); }}>
           <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] max-w-2xl w-full overflow-hidden">
             <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
               <div>
@@ -2017,7 +2021,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
 
       {/* 3. ADD / EDIT VEHICLE & FINANCING MODAL */}
       {isVehicleModalOpen && (
-        <div className="fixed inset-0 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50" onClick={(e) => { if (e.target === e.currentTarget) setIsVehicleModalOpen(false); }}>
           <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] max-w-xl w-full overflow-hidden">
             <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
               <div>
@@ -2486,7 +2490,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
 
       {/* 7. VEHICLE EMI ENTRY MODAL — record manual / edit automated entries */}
       {isEmiEntryModalOpen && (
-        <div className="fixed inset-0 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50" onClick={(e) => { if (e.target === e.currentTarget) { setIsEmiEntryModalOpen(false); setEditingEmiEntry(null); } }}>
           <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] max-w-md w-full overflow-hidden">
             <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
               <div>
@@ -2623,7 +2627,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
           the save debits the account); the branch decides its own fields.
           Receipts upload through the same staged-documents flow as vehicles. */}
       {isExpenseModalOpen && (
-        <div className="fixed inset-0 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50" onClick={(e) => { if (e.target === e.currentTarget) { setIsExpenseModalOpen(false); setEditingExpense(null); } }}>
           <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] max-w-md w-full overflow-hidden">
             <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
               <div className="flex items-center gap-2">
@@ -2875,7 +2879,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({ onOpenDriverProfil
       {/* 9. EXPENSE DOCUMENTS DRAWER — view / upload receipts against a saved
           entry (row paperclip). Uploads link to the entry immediately. */}
       {expenseDocsOpen && (
-        <div className="fixed inset-0 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 z-50" onClick={(e) => { if (e.target === e.currentTarget) setExpenseDocsOpen(null); }}>
           <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] max-w-md w-full overflow-hidden">
             <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
               <div>

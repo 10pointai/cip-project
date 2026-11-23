@@ -56,7 +56,10 @@ export function SaleInvoiceDetailModal({ isOpen, onClose, invoice, settings, sal
   if (!isOpen || !detail) return null;
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
       <div className="w-full max-w-4xl max-h-[90vh] flex flex-col bg-[var(--color-surface-container-lowest)] rounded-3xl border border-[var(--color-outline-variant)] shadow-2xl animate-in zoom-in-95 duration-200">
         <div className="flex items-start justify-between gap-3 p-5 border-b border-[var(--color-outline-variant)]">
           <div className="flex items-center gap-3">

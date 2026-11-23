@@ -714,7 +714,10 @@ export function BulkSalesCreateModal({
   const totalLines = docs.reduce((sum, d) => sum + d.items.length, 0);
 
   return (
-    <div className="fixed inset-0 z-50 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4">
+    <div
+      className="fixed inset-0 z-50 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
       <div
         className="bg-[var(--color-surface)] rounded-3xl w-full max-w-6xl max-h-[92vh] overflow-hidden flex flex-col shadow-2xl border border-[var(--color-outline-variant)] animate-in fade-in zoom-in-95 duration-150"
         onPaste={handleGridPaste}

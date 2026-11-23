@@ -747,7 +747,7 @@ export const TyreManagementView: React.FC = () => {
 
       {/* 4. FIT TYRE MODAL — serial → vehicle + one of the 12 wheel positions */}
       {fitForm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-scrim)]/40 backdrop-blur-xs p-4 overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-scrim)]/40 backdrop-blur-xs p-4 overflow-y-auto" onClick={(e) => { if (e.target === e.currentTarget) setFitForm(null); }}>
           <form onSubmit={handleSaveFit} className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-xl border border-[var(--color-outline-variant)] max-w-lg w-full overflow-hidden my-auto">
             <div className="p-5 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
               <div>

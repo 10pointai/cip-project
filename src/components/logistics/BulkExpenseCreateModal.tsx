@@ -204,7 +204,7 @@ export function BulkExpenseCreateModal({ isOpen, onClose }: BulkExpenseCreateMod
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[70] bg-[var(--color-scrim)]/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-[70] bg-[var(--color-scrim)]/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-200" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="bg-[var(--color-surface-container-lowest)] rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] w-full max-w-[94vw] max-h-[92vh] flex flex-col animate-in zoom-in-95 duration-200">
         {/* Header */}
         <div className="p-4 border-b border-[var(--color-outline-variant)] flex items-start justify-between gap-3">

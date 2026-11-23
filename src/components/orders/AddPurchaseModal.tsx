@@ -681,7 +681,10 @@ export function AddPurchaseModal({
   })();
 
   return (
-    <div className="fixed inset-0 z-50 bg-[var(--color-scrim)]/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 overflow-y-auto">
+    <div
+      className="fixed inset-0 z-50 bg-[var(--color-scrim)]/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 overflow-y-auto"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
       <div className="bg-[var(--color-surface)] rounded-3xl w-full max-w-5xl max-h-[92vh] overflow-hidden flex flex-col shadow-2xl border border-[var(--color-outline-variant)] animate-in fade-in zoom-in-95 duration-150">
 
         {/* --- HEADER --- */}
@@ -1578,7 +1581,10 @@ export function AddPurchaseModal({
 
         {/* --- SHORTAGE CONFIRMATION MODAL --- */}
         {showShortageConfirmModal && (
-          <div className="fixed inset-0 z-60 bg-[var(--color-scrim)]/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 z-60 bg-[var(--color-scrim)]/60 backdrop-blur-xs flex items-center justify-center p-4"
+            onClick={(e) => { if (e.target === e.currentTarget) setShowShortageConfirmModal(false); }}
+          >
             <div className="bg-[var(--color-surface)] rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-[var(--color-outline-variant)] space-y-4 animate-in fade-in zoom-in-95 duration-150">
               <div className="flex items-start gap-3">
                 <div className="w-10 h-10 rounded-2xl bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)] flex items-center justify-center shrink-0">
@@ -1682,7 +1688,10 @@ export function AddPurchaseModal({
 
         {/* --- CANCEL CONFIRMATION MODAL --- */}
         {showCancelConfirmModal && (
-          <div className="fixed inset-0 z-60 bg-[var(--color-scrim)]/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 z-60 bg-[var(--color-scrim)]/60 backdrop-blur-xs flex items-center justify-center p-4"
+            onClick={(e) => { if (e.target === e.currentTarget) setShowCancelConfirmModal(false); }}
+          >
             <div className="bg-[var(--color-surface)] rounded-3xl max-w-md w-full p-6 shadow-2xl border border-[var(--color-outline-variant)] space-y-4 animate-in fade-in zoom-in-95 duration-150">
               <div className="flex items-start gap-3">
                 <div className="w-10 h-10 rounded-2xl bg-[var(--color-error-container)] text-[var(--color-on-error-container)] flex items-center justify-center shrink-0">

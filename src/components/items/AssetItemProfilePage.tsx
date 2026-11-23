@@ -475,7 +475,10 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
 
       {/* ===== DEPLOY MODAL ===== */}
       {deployForm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs"
+          onClick={(e) => { if (e.target === e.currentTarget) setDeployForm(null); }}
+        >
           <form onSubmit={handleDeploy} className="bg-[var(--color-surface-container-lowest)] w-full max-w-lg rounded-3xl shadow-2xl border border-[var(--color-outline-variant)]">
             <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
               <h3 className="text-sm font-bold text-[var(--color-on-surface)] flex items-center gap-2"><Truck className="w-4 h-4 text-[var(--color-primary)]" /> Deploy Unit {units.find((u) => u.id === deployForm.unitId)?.serialNumber}</h3>
@@ -559,7 +562,10 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
 
       {/* ===== RETURN / RESTORE MODAL ===== */}
       {returnForm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs"
+          onClick={(e) => { if (e.target === e.currentTarget) setReturnForm(null); }}
+        >
           <form onSubmit={handleReturn} className="bg-[var(--color-surface-container-lowest)] w-full max-w-lg rounded-3xl shadow-2xl border border-[var(--color-outline-variant)]">
             <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
               <h3 className="text-sm font-bold text-[var(--color-on-surface)] flex items-center gap-2"><Undo2 className="w-4 h-4 text-[var(--color-primary)]" /> {returnForm.notes?.includes('maintenance') ? 'Restore' : 'Return'} Unit {units.find((u) => u.id === returnForm.unitId)?.serialNumber}</h3>
@@ -725,7 +731,10 @@ export const AssetItemProfilePage: React.FC<AssetItemProfilePageProps> = ({
 
       {/* ===== UNIT TIMELINE MODAL ===== */}
       {viewingUnit && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs"
+          onClick={(e) => { if (e.target === e.currentTarget) { setViewingUnit(null); setUnitEvents(null); } }}
+        >
           <div className="bg-[var(--color-surface-container-lowest)] w-full max-w-2xl rounded-3xl shadow-2xl border border-[var(--color-outline-variant)] flex flex-col max-h-[85vh]">
             <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
               <div>

@@ -124,11 +124,16 @@ async function attachMovementsToItems(items: Item[]): Promise<Item[]> {
     const placeholders = itemIds.map(() => '?').join(',');
     const rows = await executeMysqlQuery(
       `SELECT sm.*, p.name AS party_display,
-              loc.name AS location_display
+              loc.name AS location_display,
+              veh.registration_number AS vehicle_display
        FROM stock_movements sm
        LEFT JOIN parties p ON p.id = sm.party_id
        LEFT JOIN item_locations loc ON loc.id = sm.location_id
-       
+       -- Fleet diesel fills: the movement's source is the VEHICLE (plate
+       -- resolved through the vehicle_expense_entries doc it traces to).
+       LEFT JOIN vehicle_expense_entries vxe ON vxe.id = sm.reference_id AND sm.reference_type = 'vehicle_expense'
+       LEFT JOIN vehicles veh ON veh.id = vxe.vehicle_id
+
        WHERE sm.item_id IN (${placeholders})
        ORDER BY sm.movement_date DESC, sm.created_at DESC`,
       itemIds
@@ -165,7 +170,7 @@ async function attachMovementsToItems(items: Item[]): Promise<Item[]> {
         referenceNumber: m.reference_number || undefined,
         locationId: m.location_id || undefined,
         locationName: m.location_display || undefined,
-        sourcePartyOrBatch: m.party_display || undefined,
+        sourcePartyOrBatch: m.party_display || m.vehicle_display || undefined,
         notes: m.notes || undefined,
       });
     }
@@ -345,7 +350,18 @@ export async function fetchBatchesDirect(): Promise<ProductionBatchRun[]> {
   if (!isMysqlConfigured()) {
     return resolveActorNames(serverDb.getProductionBatches());
   }
-  const rows = await executeMysqlQuery('SELECT * FROM production_batches ORDER BY date DESC, created_at DESC');
+  // OUTPUT PLACEMENT (2026-11-23): the run's landing location resolves live
+  // from its production_output ledger row → item_locations JOIN.
+  const rows = await executeMysqlQuery(`
+    SELECT pb.*,
+           oloc.name AS output_location_display
+    FROM production_batches pb
+    LEFT JOIN stock_movements osm
+           ON osm.reference_id = pb.id AND osm.movement_type = 'production_output'
+          AND osm.location_id IS NOT NULL
+    LEFT JOIN item_locations oloc ON oloc.id = osm.location_id
+    ORDER BY pb.date DESC, pb.created_at DESC
+  `);
   return resolveActorNames(rows.map((b: any) => ({
     id: b.id,
     batchNumber: b.batch_number,
@@ -370,6 +386,8 @@ export async function fetchBatchesDirect(): Promise<ProductionBatchRun[]> {
     // DONE-BY AUDIT (2026-11-21)
     createdById: b.created_by_id || undefined,
     updatedById: b.updated_by_id || undefined,
+    // Where the output LANDED (resolved from the ledger at read time)
+    outputLocationName: b.output_location_display || undefined,
   })));
 }
 

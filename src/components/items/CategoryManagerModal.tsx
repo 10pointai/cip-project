@@ -93,8 +93,84 @@ export const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
     }
   };
 
+  // Shared field markup — the create form (top) and the INLINE edit row use
+  // the same inputs, so an edit morphs the row in place (save/cancel restores
+  // the normal container).
+  const categoryFields = (
+    <>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
+            Category Name *
+          </label>
+          <input
+            type="text"
+            placeholder="e.g. Bituminous Emulsions & Primers"
+            value={name}
+            onChange={(e) => {
+              setName(e.target.value);
+              setError('');
+            }}
+            className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+            required
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
+            Applicable Type *
+          </label>
+          <select
+            value={type}
+            onChange={(e: any) => setType(e.target.value)}
+            className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+          >
+            <option value="product">Products (Goods / Raw Materials)</option>
+            <option value="service">Services (Work Contracts / Logistics / Tests)</option>
+            <option value="both">Both Products & Services</option>
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
+          Color Tag
+        </label>
+        <div className="flex items-center gap-2 flex-wrap">
+          {PRESET_COLORS.map((c) => (
+            <button
+              type="button"
+              key={c}
+              onClick={() => setColor(c)}
+              className={`w-6 h-6 rounded-full transition-transform ${
+                color === c ? 'scale-125 ring-2 ring-offset-2 ring-[var(--color-primary)]' : 'hover:scale-110'
+              }`}
+              style={{ backgroundColor: c }}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
+          Category Description / Remarks
+        </label>
+        <input
+          type="text"
+          placeholder="e.g. Highway tack coats, prime coats, micro-surfacing rapid setting emulsion formulations"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+        />
+      </div>
+    </>
+  );
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
       <div className="bg-[var(--color-surface-container-lowest)] w-full max-w-2xl rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
@@ -124,13 +200,14 @@ export const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
             </div>
           )}
 
-          {/* Form when adding or editing */}
-          {(isAddingNew || editingId) && (
+          {/* CREATE form (stays at the top) — only for creation. EDIT opens
+              INLINE: the row being edited morphs into the form in place. */}
+          {isAddingNew && (
             <form onSubmit={handleSave} className="p-4 bg-[var(--color-surface-container)] rounded-2xl border border-[var(--color-outline-variant)] space-y-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-2">
                   <Tag className="w-4 h-4 text-[var(--color-primary)]" />
-                  {isAddingNew ? 'Create New Category' : 'Edit Category'}
+                  Create New Category
                 </h3>
                 <button
                   type="button"
@@ -145,71 +222,7 @@ export const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                    Category Name *
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Bituminous Emulsions & Primers"
-                    value={name}
-                    onChange={(e) => {
-                      setName(e.target.value);
-                      setError('');
-                    }}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                    required
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                    Applicable Type *
-                  </label>
-                  <select
-                    value={type}
-                    onChange={(e: any) => setType(e.target.value)}
-                    className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs font-medium text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                  >
-                    <option value="product">Products (Goods / Raw Materials)</option>
-                    <option value="service">Services (Work Contracts / Logistics / Tests)</option>
-                    <option value="both">Both Products & Services</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                  Color Tag
-                </label>
-                <div className="flex items-center gap-2 flex-wrap">
-                  {PRESET_COLORS.map((c) => (
-                    <button
-                      type="button"
-                      key={c}
-                      onClick={() => setColor(c)}
-                      className={`w-6 h-6 rounded-full transition-transform ${
-                        color === c ? 'scale-125 ring-2 ring-offset-2 ring-[var(--color-primary)]' : 'hover:scale-110'
-                      }`}
-                      style={{ backgroundColor: c }}
-                    />
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[var(--color-on-surface-variant)] mb-1">
-                  Category Description / Remarks
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. Highway tack coats, prime coats, micro-surfacing rapid setting emulsion formulations"
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  className="w-full px-4 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-full text-xs text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                />
-              </div>
+              {categoryFields}
 
               <div className="flex justify-end gap-2 pt-2">
                 <button
@@ -217,14 +230,14 @@ export const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
                   className="flex items-center gap-1.5 px-5 py-2 bg-[var(--color-primary)] hover:opacity-95 text-[var(--color-on-primary)] font-medium text-xs rounded-full shadow-xs transition-all hover:scale-[1.01]"
                 >
                   <Check className="w-3.5 h-3.5" />
-                  {isAddingNew ? 'Add Category' : 'Save Changes'}
+                  Add Category
                 </button>
               </div>
             </form>
           )}
 
           {/* Top Bar with Add Button */}
-          {!isAddingNew && !editingId && (
+          {!isAddingNew && (
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
                 Existing Categories ({categories.length})
@@ -244,6 +257,44 @@ export const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
           <div className="space-y-2.5">
             {categories.map((cat) => {
               const linkedCount = items.filter((i) => i.categoryId === cat.id).length;
+              // INLINE EDIT — the edited category's container IS the form:
+              // save/cancel re-renders the normal row container here.
+              if (editingId === cat.id) {
+                return (
+                  <form
+                    key={cat.id}
+                    onSubmit={handleSave}
+                    className="p-3.5 rounded-2xl border border-[var(--color-primary)]/40 bg-[var(--color-surface-container)] space-y-3 animate-in fade-in duration-150"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-xs font-bold text-[var(--color-on-surface)] uppercase tracking-wider flex items-center gap-2 min-w-0">
+                        <Tag className="w-3.5 h-3.5 text-[var(--color-primary)] shrink-0" />
+                        <span className="truncate">Edit — {cat.name}</span>
+                      </h3>
+                    </div>
+                    {categoryFields}
+                    <div className="flex justify-end gap-4 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingId(null);
+                          setError('');
+                        }}
+                        className="px-5 py-2 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container-high)] font-medium text-xs rounded-full transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        className="flex items-center gap-1.5 px-5 py-2 bg-[var(--color-primary)] hover:opacity-95 text-[var(--color-on-primary)] font-bold text-xs rounded-full shadow-xs transition-all"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        Save Changes
+                      </button>
+                    </div>
+                  </form>
+                );
+              }
               return (
                 <div
                   key={cat.id}

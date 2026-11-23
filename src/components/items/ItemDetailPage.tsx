@@ -394,12 +394,22 @@ export function ItemDetailPage({ item, category, currencySymbol, onBack, onEdit 
                             </span>
                           </td>
                           {/* Party / Source — the party name; production
-                              batches and other sources carry theirs here */}
+                              batches carry theirs here. Fleet diesel fills
+                              source is the VEHICLE the fill was issued to
+                              (resolved by the server on the ledger row). */}
                           <td className="py-2.5 px-3">
                             <span className="font-semibold text-[var(--color-on-surface)] block max-w-[180px] truncate" title={mov.sourcePartyOrBatch}>
                               {mov.sourcePartyOrBatch || '—'}
                             </span>
-                            {mov.notes && (
+                            {mov.type === 'diesel_issue' || mov.type === 'diesel_issue_reversal' ? (
+                              // Diesel fills: the subtext is ONLY the label —
+                              // the vehicle no. sits in Party / Source and the
+                              // litres in In / Out, so notes never repeat them
+                              // (covers legacy rows whose stored notes did).
+                              <span className="text-[10px] text-[var(--color-on-surface-variant)] block">
+                                {mov.type === 'diesel_issue' ? 'Diesel Issue' : 'Diesel Issue Reversal'}
+                              </span>
+                            ) : mov.notes && (
                               <span className="text-[10px] text-[var(--color-on-surface-variant)] block max-w-[180px] truncate" title={mov.notes}>
                                 {mov.notes}
                               </span>

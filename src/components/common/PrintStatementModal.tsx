@@ -56,7 +56,10 @@ export function PrintStatementModal({
   const totalCredit = ledgerRows.reduce((acc, r) => acc + r.credit, 0) + (party.openingBalanceType === 'to_pay' ? party.openingBalance : 0);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/40 backdrop-blur-xs">
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/40 backdrop-blur-xs"
+    >
       <div className="bg-[var(--color-surface-container-lowest)] w-full max-w-4xl rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] overflow-hidden flex flex-col max-h-[95vh]">
         {/* Action Header (Hidden during print) */}
         <div className="print:hidden flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">

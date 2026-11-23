@@ -27,7 +27,6 @@ import {
   ChevronRight,
   FileCheck,
   FileSpreadsheet,
-  Receipt,
   ClipboardList,
   Database,
   Cloud,
@@ -52,7 +51,6 @@ import {
   isPurchaseLocked,
   editLabelFor,
   purchaseEditLabelFor,
-  canViewProforma,
 } from './orderDisplay';
 import { OrderDetailModal } from './OrderDetailModal';
 import { OrderDocumentPreviewModal } from './OrderDocumentPreviewModal';
@@ -1984,24 +1982,6 @@ export function OrdersView({
                   <Edit3 className="w-3.5 h-3.5 text-[var(--color-primary)]" />
                   {editLabelFor(target)}
                 </button>
-                {/* View Proforma — renders the Sales Order in Proforma format */}
-                {canViewProforma(target) && (
-                  <button
-                    type="button"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => {
-                      closeRowActionMenu();
-                      setPreviewOrder(target);
-                      setPreviewStage('proforma_invoice');
-                      setIsPreviewOpen(true);
-                    }}
-                    disabled
-                    className="w-full flex items-center gap-2 px-3 py-2 text-left text-[11px] font-bold text-[var(--color-on-surface)] hover:bg-[var(--color-surface-container)] transition-colors border-t border-[var(--color-outline-variant)]/50"
-                  >
-                    <Receipt className="w-3.5 h-3.5 text-[var(--color-primary)]" />
-                    View Proforma
-                  </button>
-                )}
                 {/* Higher-hierarchy stage actions */}
                 {salesStageActionMenu(target).map((sa) => {
                   const StageIcon = sa.icon;
@@ -2030,7 +2010,10 @@ export function OrdersView({
 
       {/* --- FORM MODAL FOR CREATE & EDIT --- */}
       {isFormOpen && (
-        <div className="fixed inset-0 z-50 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4">
+        <div
+          className="fixed inset-0 z-50 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={(e) => { if (e.target === e.currentTarget) { setStageIssueCtx(null); setIsFormOpen(false); } }}
+        >
           <div className="bg-[var(--color-surface)] rounded-3xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl border border-[var(--color-outline-variant)] animate-in fade-in zoom-in-95 duration-150">
             {/* Header */}
             <div className="px-6 py-4 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
@@ -2945,7 +2928,10 @@ export function OrdersView({
           return hay.includes(unitsPickerQuery.toLowerCase().trim());
         });
         return (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs">
+          <div
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs"
+            onClick={(e) => { if (e.target === e.currentTarget) { setUnitsPickerRow(null); setUnitsPickerQuery(''); } }}
+          >
             <div className="bg-[var(--color-surface-container-lowest)] w-full max-w-lg rounded-3xl shadow-2xl border border-[var(--color-outline-variant)] flex flex-col max-h-[80vh]">
               <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
                 <div>

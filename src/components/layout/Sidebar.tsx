@@ -227,7 +227,7 @@ export function Sidebar({
       {/* Mobile Backdrop */}
       {isOpenMobile && (
         <div
-          onClick={onCloseMobile}
+          onClick={(e) => { if (e.target === e.currentTarget) onCloseMobile(); }}
           className="fixed inset-0 z-40 bg-[var(--color-scrim)]/40 backdrop-blur-xs lg:hidden"
         />
       )}

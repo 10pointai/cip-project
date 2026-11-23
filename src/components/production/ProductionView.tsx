@@ -12,7 +12,6 @@ import {
   Pencil,
   FlaskConical,
   CheckCircle2,
-  Scale,
   Settings,
   ArrowRight,
   Percent,
@@ -449,19 +448,6 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
     });
   }, [batchMixes, searchQuery, activeTab, itemById]);
 
-  const stats = useMemo(() => {
-    const totalRuns = batches.length;
-    const totalOutputWeight = batches.reduce((sum, b) => sum + (b.targetQuantity || 0), 0);
-    const avgBatchSize = totalRuns > 0 ? (totalOutputWeight / totalRuns).toFixed(1) : '0';
-    const activeRecipes = batchMixes.filter((m) => m.isActive !== false).length;
-    return {
-      totalRuns,
-      totalOutputWeight: totalOutputWeight.toLocaleString('en-IN', { maximumFractionDigits: 1 }),
-      avgBatchSize,
-      activeRecipes,
-    };
-  }, [batches, batchMixes]);
-
   const handleDeleteMix = (mix: BatchMix) => {
     const usedByRun = batches.some((b) => b.batchMixId === mix.id);
     if (usedByRun) {
@@ -518,53 +504,6 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
         </button>
       </div>
 
-      {/* KPI Stats Banner */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="p-4 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl flex items-center justify-between shadow-xs">
-          <div>
-            <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Total Batch Runs</p>
-            <p className="text-lg font-black text-[var(--color-on-surface)] mt-1">{stats.totalRuns} Batches</p>
-            <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">Recorded against recipes</p>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-[var(--color-primary-container)] text-[var(--color-primary)] flex items-center justify-center">
-            <Layers className="w-5 h-5" />
-          </div>
-        </div>
-
-        <div className="p-4 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl flex items-center justify-between shadow-xs">
-          <div>
-            <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Total Output Yield</p>
-            <p className="text-lg font-black text-[var(--color-on-surface)] mt-1">{stats.totalOutputWeight}</p>
-            <p className="text-[10px] text-[var(--color-success)] font-medium mt-0.5">Stockpile additions posted</p>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-[var(--color-success-container)] text-[var(--color-success)] flex items-center justify-center">
-            <Scale className="w-5 h-5" />
-          </div>
-        </div>
-
-        <div className="p-4 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl flex items-center justify-between shadow-xs">
-          <div>
-            <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Average Batch Size</p>
-            <p className="text-lg font-black text-[var(--color-on-surface)] mt-1">{stats.avgBatchSize}</p>
-            <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">Average output yield per run</p>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-[var(--color-warning-container)] text-[var(--color-warning)] flex items-center justify-center">
-            <Building2 className="w-5 h-5" />
-          </div>
-        </div>
-
-        <div className="p-4 bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl flex items-center justify-between shadow-xs">
-          <div>
-            <p className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Active Batch Mixes</p>
-            <p className="text-lg font-black text-[var(--color-on-surface)] mt-1">{stats.activeRecipes} Recipes</p>
-            <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">Item ratios available for runs</p>
-          </div>
-          <div className="w-10 h-10 rounded-xl bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] flex items-center justify-center">
-            <FlaskConical className="w-5 h-5" />
-          </div>
-        </div>
-      </div>
-
       {/* Action Bar */}
       <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="relative flex-1 max-w-md">
@@ -601,75 +540,125 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {filteredMixes.map((mix) => {
-              const out = itemById.get(mix.outputItemId);
-              const inactive = mix.isActive === false;
-              const qtyRows = (mix.ingredients || []).some((i) => i.basis === 'quantity');
-              return (
-                <div
-                  key={mix.id}
-                  className="p-5 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] hover:border-[var(--color-outline)] hover:shadow-xs transition-all cursor-pointer group flex flex-col justify-between"
-                  onClick={() => setViewingMix(mix)}
-                >
-                  <div>
-                    <div className="flex justify-between items-start mb-3">
-                      <div className="flex items-center gap-2.5">
-                        <div className="w-10 h-10 rounded-xl bg-[var(--color-primary-container)] flex items-center justify-center text-[var(--color-primary)] font-bold">
-                          <FlaskConical className="w-5 h-5" />
-                        </div>
-                        <div>
-                          {/* 2026-11-16: the OUTPUT ITEM's name IS the recipe's
-                              identity — no separate user-typed title */}
-                          <h4 className="font-bold text-[var(--color-on-surface)] text-xs line-clamp-1">{out?.name || mix.name || '(missing item)'}</h4>
-                          <p className="text-[10px] text-[var(--color-on-surface-variant)] font-mono mt-0.5">{mix.mixNumber}</p>
-                        </div>
-                      </div>
-                      {inactive && (
-                        <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border border-[var(--color-outline-variant)]">INACTIVE</span>
-                      )}
-                    </div>
+          /* TABULAR LAYOUT (app-wide parity) — one row per recipe; the recipe
+              cell stacks every ingredient with its qty AND its % sizing so
+              the whole formula is readable in the table itself. */
+          <div className="bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs overflow-clip">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs min-w-[1150px]">
+                <thead>
+                  <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
+                    <th className="py-3.5 px-4 min-w-[150px]">Batch Mix</th>
+                    <th className="py-3.5 px-3 min-w-[170px]">Output Item</th>
+                    <th className="py-3.5 px-3">Recipe (Per Mix)</th>
+                    <th className="py-3.5 px-3 text-center min-w-[110px]">Yield / Mix</th>
+                    <th className="py-3.5 px-3 text-center min-w-[90px]">Usage</th>
+                    {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
+                    <th className="py-3.5 px-3 min-w-[110px]">Created By</th>
+                    <th className="py-3.5 px-4 text-center">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--color-outline-variant)]/60">
+                  {filteredMixes.map((mix) => {
+                    const out = itemById.get(mix.outputItemId);
+                    const inactive = mix.isActive === false;
+                    const ings = mix.ingredients || [];
+                    const qtyBasis = ings.some((i) => i.basis === 'quantity');
+                    const refQty = Number(mix.referenceOutputQty) || 0;
+                    return (
+                      <tr
+                        key={mix.id}
+                        onClick={() => setViewingMix(mix)}
+                        className="hover:bg-[var(--color-surface-container)]/60 transition-colors cursor-pointer"
+                      >
+                        {/* Batch Mix & Date */}
+                        <td className="py-3 px-4">
+                          <span className="font-mono text-xs font-bold text-[var(--color-primary)] block">{mix.mixNumber || 'BM'}</span>
+                          <span className="text-[10px] text-[var(--color-on-surface-variant)] flex items-center gap-1 mt-0.5">
+                            <Calendar className="w-3 h-3 text-[var(--color-outline)]" />
+                            {new Date(mix.createdAt).toLocaleDateString('en-IN')}
+                          </span>
+                        </td>
 
-                    <div className="p-3 bg-[var(--color-surface-container)] rounded-xl border border-[var(--color-outline-variant)] space-y-2 mb-3">
-                      <div className="flex justify-between items-center">
-                        <span className="text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase">Produces</span>
-                        <span className="text-xs font-black text-[var(--color-success)] flex items-center gap-1">
-                          {qtyRows > 0 ? `${fmtNum(mix.referenceOutputQty)} ${out?.unit || ''}` : 'per run'}
-                        </span>
-                      </div>
-                      {/* The actual ingredient items, by name */}
-                      <div className="border-t border-[var(--color-outline-variant)] pt-2">
-                        <span className="block text-[9px] font-bold text-[var(--color-on-surface-variant)] uppercase mb-1">Ingredients</span>
-                        <span className="block text-[10px] font-bold text-[var(--color-on-surface)] leading-relaxed line-clamp-3">
-                          {(mix.ingredients || []).map((ing) => itemById.get(ing.itemId)?.name || ing.itemId).join(' · ') || '—'}
-                        </span>
-                      </div>
-                    </div>
-                    {/* DONE-BY AUDIT (2026-11-21) */}
-                    <div className="text-[10px] text-[var(--color-on-surface-variant)]">
-                      Added by <strong className="text-[var(--color-on-surface)]">{mix.createdByName || 'Unknown'}</strong>
-                    </div>
-                  </div>
+                        {/* Output Item — the recipe's identity */}
+                        <td className="py-3 px-3">
+                          <div className="font-bold text-[var(--color-on-surface)]">{out?.name || mix.name || '(missing item)'}</div>
+                          {out?.code && (
+                            <span className="font-mono text-[10px] bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] px-1.5 py-0.5 rounded-full font-bold mt-0.5 inline-block">
+                              {out.code}
+                            </span>
+                          )}
+                        </td>
 
-                  <div className="flex items-center justify-between pt-2 border-t border-[var(--color-outline-variant)] mt-1">
-                    <span className="text-[10px] text-[var(--color-on-surface-variant)] font-bold">
-                      Used by {mixUsageCount(mix.id)} run{mixUsageCount(mix.id) === 1 ? '' : 's'}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleOpenEditMix(mix);
-                      }}
-                      title="Edit mix"
-                      className="p-1.5 text-[var(--color-on-surface-variant)] hover:bg-[var(--color-surface-container)] rounded-full transition-colors"
-                    >
-                      <Pencil className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
+                        {/* Recipe — per-ingredient qty AND % (user directive) */}
+                        <td className="py-3 px-3">
+                          {ings.length === 0 ? (
+                            <span className="text-xs text-[var(--color-outline)]">—</span>
+                          ) : (
+                            <div className="space-y-1">
+                              {ings.map((ing) => {
+                                const isQtyBasis = (ing.basis || 'quantity') === 'quantity';
+                                const ingQty = isQtyBasis ? (Number(ing.quantity) || 0) : (refQty > 0 ? ((Number(ing.percentage) || 0) / 100) * refQty : undefined);
+                                const ingPct = isQtyBasis
+                                  ? (refQty > 0 ? ((Number(ing.quantity) || 0) / refQty) * 100 : undefined)
+                                  : Number(ing.percentage) || 0;
+                                return (
+                                  <div key={ing.itemId} className="flex items-center justify-between gap-3 max-w-[320px]">
+                                    <span className="font-semibold text-[var(--color-on-surface)] truncate">
+                                      {itemById.get(ing.itemId)?.name || ing.itemId}
+                                    </span>
+                                    <span className="font-mono text-[10px] text-[var(--color-on-surface-variant)] whitespace-nowrap">
+                                      {ingQty !== undefined && ingQty !== null ? `${fmtNum(ingQty)} ${resolvedConsumedUnit(ing)}` : ''}
+                                      {ingQty !== undefined && ingPct !== undefined ? ' · ' : ''}
+                                      {ingPct !== undefined ? `${fmtNum(ingPct, 1)}%` : ''}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </td>
+
+                        {/* Yield / Mix */}
+                        <td className="py-3 px-3 text-center">
+                          <span className={`text-xs font-black ${inactive ? 'text-[var(--color-on-surface-variant)]' : 'text-[var(--color-success)]'}`}>
+                            {qtyBasis && refQty > 0 ? `${fmtNum(refQty)} ${out?.unit || ''}` : 'Per run'}
+                          </span>
+                        </td>
+
+                        {/* Usage */}
+                        <td className="py-3 px-3 text-center">
+                          <span className="text-[11px] font-bold text-[var(--color-on-surface)]">{mixUsageCount(mix.id)} run{mixUsageCount(mix.id) === 1 ? '' : 's'}</span>
+                          {inactive && (
+                            <span className="block mt-1 mx-auto w-fit px-2 py-0.5 rounded text-[9px] font-bold bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] border border-[var(--color-outline-variant)]">INACTIVE</span>
+                          )}
+                        </td>
+
+                        {/* DONE-BY AUDIT (2026-11-21) */}
+                        <td className="py-3 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
+                          {mix.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
+                        </td>
+
+                        {/* Actions */}
+                        <td className="py-3 px-4 text-center">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenEditMix(mix);
+                            }}
+                            title="Edit mix"
+                            className="p-1.5 text-[var(--color-on-surface-variant)] hover:text-[var(--color-primary)] hover:bg-[var(--color-primary-container)] rounded-full transition-colors"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
         )
       )}
@@ -706,7 +695,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
                   <th className="py-3.5 px-4">Batch #</th>
                   <th className="py-3.5 px-3">Output Item</th>
                   <th className="py-3.5 px-3">Batch Mix</th>
-                  <th className="py-3.5 px-3">Plant Unit</th>
+                  <th className="py-3.5 px-3">Output Location</th>
                   <th className="py-3.5 px-4 text-right">Batch Output</th>
                   {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
                   <th className="py-3.5 px-3">Created By</th>
@@ -740,7 +729,11 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
                       </td>
                       <td className="py-3.5 px-3">
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] truncate max-w-[200px]">
-                          {batch.plantUnit || 'Production floor'}
+                          <Building2 className="w-3 h-3 shrink-0 text-[var(--color-on-surface-variant)]" />
+                          {/* The OUTPUT LOCATION the produced qty landed in —
+                              resolved live from the run's output ledger row
+                              (direct-sale runs stock nothing → '—') */}
+                          {batch.outputLocationName || '—'}
                         </span>
                       </td>
                       <td className="py-3.5 px-4 text-right font-black text-[var(--color-on-surface)]">
@@ -760,7 +753,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
 
       {/* ===== CREATE / EDIT BATCH MIX MODAL ===== */}
       {mixForm && (
-        <div className="fixed inset-0 z-50 bg-[var(--color-scrim)]/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-[var(--color-scrim)]/60 backdrop-blur-xs flex items-center justify-center p-4" onClick={(e) => { if (e.target === e.currentTarget) setMixForm(null); }}>
           <div className="bg-[var(--color-surface-container-lowest)] rounded-3xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl border border-[var(--color-outline-variant)] animate-in fade-in zoom-in-95 duration-150">
             {/* Header */}
             <div className="px-6 py-4 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
@@ -856,7 +849,14 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
                           <tr key={idx} className="hover:bg-[var(--color-surface-container)]/50">
                             <td className="py-2 px-3 min-w-[200px]">
                               <SearchableSelect
-                                options={itemOptions.filter((o) => o.value !== mixForm.outputItemId || o.value === row.itemId)}
+                                options={itemOptions.filter((o) =>
+                                  // Keep this row's own pick, else exclude the
+                                  // OUTPUT item and anything another recipe row
+                                  // already consumes — one item per recipe.
+                                  o.value === row.itemId ||
+                                  (o.value !== mixForm.outputItemId &&
+                                    !mixForm.ingredients.some((r, i) => i !== idx && r.itemId === o.value))
+                                )}
                                 value={row.itemId}
                                 onChange={(v) => changeIngredientRow(idx, 'itemId', v)}
                                 placeholder="Choose ingredient..."
@@ -976,7 +976,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
 
       {/* ===== RECORD PRODUCTION RUN MODAL ===== */}
       {runForm && (
-        <div className="fixed inset-0 z-50 bg-[var(--color-scrim)]/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-[var(--color-scrim)]/60 backdrop-blur-xs flex items-center justify-center p-4" onClick={(e) => { if (e.target === e.currentTarget) setRunForm(null); }}>
           <div className="bg-[var(--color-surface-container-lowest)] rounded-3xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl border border-[var(--color-outline-variant)] animate-in fade-in zoom-in-95 duration-150">
             {/* Header */}
             <div className="px-6 py-4 border-b border-[var(--color-outline-variant)] flex items-center justify-between bg-[var(--color-surface-container)]">
@@ -1191,7 +1191,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
 
       {/* ===== VIEW MIX MODAL ===== */}
       {viewingMix && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200" onClick={(e) => { if (e.target === e.currentTarget) setViewingMix(null); }}>
           <div className="bg-[var(--color-surface-container-lowest)] w-full max-w-xl rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] overflow-hidden flex flex-col max-h-[92vh]">
             {/* Modal Header */}
             <div className="px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] flex justify-between items-start">
@@ -1312,7 +1312,7 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
 
       {/* ===== VIEW RUN DETAIL MODAL ===== */}
       {viewingBatch && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200" onClick={(e) => { if (e.target === e.currentTarget) setViewingBatch(null); }}>
           <div className="bg-[var(--color-surface-container-lowest)] w-full max-w-xl rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] overflow-hidden flex flex-col max-h-[92vh]">
             {/* Modal Header */}
             <div className="px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] flex justify-between items-start">
@@ -1351,6 +1351,12 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
               {/* Material Produced Output */}
               <div className="p-4 border border-[var(--color-outline-variant)] rounded-2xl bg-[var(--color-success-container)]/30 space-y-1">
                 <h4 className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-success)]">Yield Output Stock Addition</h4>
+                {viewingBatch.outputLocationName && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] font-bold text-[var(--color-on-surface-variant)] uppercase">Landed at</span>
+                    <span className="text-[11px] font-bold text-[var(--color-on-surface)]">{viewingBatch.outputLocationName}</span>
+                  </div>
+                )}
                 <div className="flex justify-between items-center pt-1">
                   <span className="text-xs font-extrabold text-[var(--color-on-surface)]">
                     {itemById.get(viewingBatch.targetItemId)?.name || viewingBatch.targetItemName}

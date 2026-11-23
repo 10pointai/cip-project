@@ -125,7 +125,10 @@ export function OrderDetailModal({
   const canEdit = !!onEditOrder;
 
   return (
-    <div className="fixed inset-0 z-50 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4">
+    <div
+      className="fixed inset-0 z-50 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
       {/* MODAL BOUNDS RULE — the card NEVER grows past the viewport: capped at
           90vh as a flex column, header/footer pinned (shrink-0), BODY SCROLLS
           (no matter how many stage documents/lines pile up). Same shell every

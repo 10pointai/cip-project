@@ -92,7 +92,7 @@ export function PaymentVoucherDetailModal({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/40 backdrop-blur-xs animate-in fade-in duration-200"
-      onClick={onClose}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div
         className="bg-[var(--color-surface)] rounded-3xl w-full max-w-lg shadow-2xl border border-[var(--color-outline-variant)] flex flex-col max-h-[92vh] overflow-hidden animate-in fade-in zoom-in-95 duration-200"

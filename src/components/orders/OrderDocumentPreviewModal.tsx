@@ -90,7 +90,11 @@ export function OrderDocumentPreviewModal({
   if (!isOpen || !previewOrder) return null;
 
   return (
-    <div id="printable-document-content-parent" className="fixed inset-0 z-50 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+    <div
+      id="printable-document-content-parent"
+      className="fixed inset-0 z-50 bg-[var(--color-scrim)]/40 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
       {/* AUTO margins (my-auto): centre the card when it fits the viewport,
           collapse to 0 margins when it's taller — every line of a long
           document stays scroll-reachable (fixed my-8 cuts the top off). */}

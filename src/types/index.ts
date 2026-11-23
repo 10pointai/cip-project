@@ -511,7 +511,7 @@ export interface ProductionBatchRun {
   id: string;
   batchNumber: string;
   date: string;
-  plantUnit: string; // e.g. "Asphalt Batching Plant #1 (160 TPH)"
+  plantUnit: string; // legacy free-text plant label — no longer the location source
   targetItemId: string;
   targetItemName: string;
   targetQuantity: number; // e.g. 200 MT
@@ -547,6 +547,11 @@ export interface ProductionBatchRun {
   // session id); name resolved live from the users master at read time.
   createdById?: string;
   updatedById?: string;
+  // OUTPUT PLACEMENT (2026-11-23): where the produced output LANDED — the
+  // stock location the run's production_output ledger row posted into,
+  // resolved live from the ledger + locations master at read time (a
+  // location rename propagates; a direct-sale run carries no location).
+  outputLocationName?: string;
   // Hydrated read-time view fields (never persisted)
   createdByName?: string;
   updatedByName?: string;

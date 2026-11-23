@@ -150,54 +150,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
   // Quick stats calculations for Catalog (asset/trackable items NEVER ride
   // the aggregate stock tab — they live in the Trackable register)
   const assetItems = useMemo(() => items.filter((i) => i.type === 'asset'), [items]);
-  const catalogStats = useMemo(() => {
-    const stockItems = items.filter((i) => i.type !== 'asset');
-    const products = stockItems.filter((i) => i.type === 'product');
-    const services = stockItems.filter((i) => i.type === 'service');
-    // Stock Valuation card values every product at its item MASTER cost rate
-    // (default: Opening Cost -> Purchase -> Sale). FIFO lots stay recorded on
-    // the stock_movements ledger for audit, but do not drive this card.
-    const totalInventoryValue = products.reduce((acc, itm) => {
-      const rate = itm.openingStockPrice || itm.purchasePrice || itm.salePrice || 0;
-      return acc + (itm.currentStock || 0) * rate;
-    }, 0);
-
-    return {
-      totalItems: stockItems.length,
-      totalProducts: products.length,
-      totalServices: services.length,
-      categoriesCount: categories.length,
-      unitsCount: units.length,
-      totalInventoryValue,
-    };
-  }, [items, categories, units]);
-
-  // Quick stats calculations for Stock Adjustments
-  const adjustmentStats = useMemo(() => {
-    const increases = stockAdjustments.filter((a) => a.type === 'increase');
-    const decreases = stockAdjustments.filter((a) => a.type === 'decrease');
-    const transfers = stockAdjustments.filter((a) => a.type === 'transfer');
-
-    const totalAddedQty = increases.reduce((sum, a) => sum + (a.quantity || 0), 0);
-    const totalReducedQty = decreases.reduce((sum, a) => sum + (a.quantity || 0), 0);
-    const totalTransferredQty = transfers.reduce((sum, a) => sum + (a.quantity || 0), 0);
-    const totalAddedValue = increases.reduce((sum, a) => sum + (a.totalValue || (a.quantity * (a.rate || 0))), 0);
-    const totalReducedValue = decreases.reduce((sum, a) => sum + (a.totalValue || (a.quantity * (a.rate || 0))), 0);
-    const netValueImpact = totalAddedValue - totalReducedValue;
-
-    return {
-      totalCount: stockAdjustments.length,
-      increaseCount: increases.length,
-      decreaseCount: decreases.length,
-      transferCount: transfers.length,
-      totalTransferredQty,
-      totalAddedQty,
-      totalReducedQty,
-      totalAddedValue,
-      totalReducedValue,
-      netValueImpact,
-    };
-  }, [stockAdjustments]);
 
   // Filtered & Sorted Catalog items
   const filteredItems = useMemo(() => {
@@ -333,13 +285,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
       });
   }, [assetItems, inventoryUnits, trkSearchQuery]);
 
-  const trackableTotals = useMemo(() => ({
-    items: trackableRows.length,
-    allUnits: trackableRows.reduce((s, r) => s + r.total, 0),
-    inStock: trackableRows.reduce((s, r) => s + r.inStock, 0),
-    inUse: trackableRows.reduce((s, r) => s + r.inUse, 0),
-  }), [trackableRows]);
-
   // Handlers
   const handleOpenAdd = (type?: ItemType) => {
     setEditingItem(null);
@@ -458,7 +403,10 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
         a.totalValue || (a.quantity * (a.rate || 0)),
         a.previousStock || 0,
         a.newStock || 0,
-        `"${(a.location || '').replace(/"/g, '""')}"`,
+        // A transfer's Location is the movement itself: FROM → TO (clubbed single row)
+        `"${(a.type === 'transfer'
+          ? `${a.fromLocationName || a.location || ''} → ${a.toLocationName || ''}`
+          : (a.location || '')).replace(/"/g, '""')}"`,
         `"${(a.reason || '').replace(/"/g, '""')}"`,
         `"${(a.referenceNumber || '').replace(/"/g, '""')}"`,
         `"${(a.notes || '').replace(/"/g, '""')}"`,
@@ -650,43 +598,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
       {/* ========================================================================= */}
       {activeSubTab === 'catalog' && (
         <div className="space-y-6">
-          {/* KPI Overview Cards */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-            {/* Total Catalog Items */}
-            <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-                  Master Catalog
-                </span>
-                <div className="w-8 h-8 rounded-xl bg-[var(--color-primary-container)] text-[var(--color-primary)] flex items-center justify-center font-bold">
-                  <Package className="w-4 h-4" />
-                </div>
-              </div>
-              <p className="text-2xl font-black text-[var(--color-on-surface)] mt-2">{catalogStats.totalItems}</p>
-              <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                Active items & services
-              </p>
-            </div>
-
-            {/* Inventory Valuation */}
-            <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-                  Stock Valuation
-                </span>
-                <div className="w-8 h-8 rounded-xl bg-[var(--color-surface-container)] text-[var(--color-primary)] flex items-center justify-center font-bold">
-                  <IndianRupee className="w-4 h-4" />
-                </div>
-              </div>
-              <p className="text-2xl font-black text-[var(--color-primary)] mt-2">
-                {currencySymbol} {catalogStats.totalInventoryValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-              </p>
-              <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                Valued at item's cost rate
-              </p>
-            </div>
-          </div>
-
           {/* Filter and Search Bar */}
           <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs space-y-3">
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
@@ -801,27 +712,25 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
               </button>
             </div>
           ) : viewMode === 'table' ? (
-            /* Tabular Layout — SAME STICKY-HEADER PARITY as the sales table
-                (OrdersView): the card clips rounded corners (overflow-clip) and
-                the table wraps in a PLAIN div — never overflow-x-auto, a nested
-                scroll container breaks the sticky top-16 thead (it would pin to
-                the wrapper instead of the viewport and leave a white band) so
-                the page itself scrolls under the sticky header. */
+            /* Tabular Layout — HORIZONTALLY SCROLLABLE (user directive): the
+                table wraps in overflow-x-auto (the adjustments table's
+                pattern). Trade-off: the thead no longer pins to the viewport
+                while scrolling — inside a scroll container it scrolls with the
+                page like every other header row. */
             <div className="bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs overflow-clip">
-              <div>
-                <table className="w-full text-left border-collapse text-xs min-w-[980px]">
-                  <thead className="sticky top-16 z-20">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs min-w-[1180px]">
+                  <thead>
                     <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
                       <th className="py-3.5 px-4 min-w-[240px]">Item Details & SKU</th>
                       <th className="py-3.5 px-3">Type & Category</th>
-                      <th className="py-3.5 px-3 text-right">Opening Stock</th>
-                      <th className="py-3.5 px-3 text-right min-w-[200px]">Current Stock</th>
-                      <th className="py-3.5 px-3">HSN / SAC</th>
-                      <th className="py-3.5 px-3 text-right">Selling Rate</th>
-                      <th className="py-3.5 px-3 text-right">Opening / Cost Rate</th>
-                      <th className="py-3.5 px-3 text-center">GST Slab</th>
+                      <th className="py-3.5 px-3 text-right min-w-[220px]">Current Stock</th>
+                      <th className="py-3.5 px-3 min-w-[115px]">HSN / SAC</th>
+                      <th className="py-3.5 px-3 text-right min-w-[115px]">Selling Rate</th>
+                      <th className="py-3.5 px-3 text-right min-w-[155px]">Opening / Cost Rate</th>
+                      <th className="py-3.5 px-3 text-center min-w-[105px]">GST Slab</th>
                       {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
-                      <th className="py-3.5 px-3">Created By</th>
+                      <th className="py-3.5 px-3 min-w-[115px]">Created By</th>
                       <th className="py-3.5 px-4 text-center">Actions</th>
                     </tr>
                   </thead>
@@ -905,20 +814,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                                 {item.categoryName || category?.name || 'General'}
                               </span>
                             </div>
-                          </td>
-
-                          {/* Opening Stock */}
-                          <td className="py-3 px-3 text-right">
-                            {item.type === 'product' ? (
-                              <>
-                                <p className="font-semibold text-[var(--color-on-surface-variant)]">
-                                  {(item.openingStock || 0).toLocaleString('en-IN')}
-                                </p>
-                                <p className="text-[10px] text-[var(--color-outline)]">{item.unit}</p>
-                              </>
-                            ) : (
-                              <span className="text-xs text-[var(--color-outline)]">—</span>
-                            )}
                           </td>
 
                           {/* Current Stock */}
@@ -1189,26 +1084,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
       {/* ========================================================================= */}
       {activeSubTab === 'trackable' && (
         <div className="space-y-5">
-          {/* KPI strip */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs">
-              <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Trackable Items</span>
-              <p className="text-2xl font-black text-[var(--color-on-surface)] mt-1">{trackableTotals.items}</p>
-            </div>
-            <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs">
-              <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">Total Units</span>
-              <p className="text-2xl font-black text-[var(--color-on-surface)] mt-1">{trackableTotals.allUnits}</p>
-            </div>
-            <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs">
-              <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">In Spare</span>
-              <p className="text-2xl font-black text-[var(--color-success)] mt-1">{trackableTotals.inStock}</p>
-            </div>
-            <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs">
-              <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">In Use (deployed)</span>
-              <p className="text-2xl font-black text-[var(--color-primary)] mt-1">{trackableTotals.inUse}</p>
-            </div>
-          </div>
-
           {/* Asset-item table */}
           <div className="bg-[var(--color-surface-container-lowest)] border border-[var(--color-outline-variant)] rounded-2xl overflow-clip shadow-xs">
             <div className="p-3 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]/60">
@@ -1298,121 +1173,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
       {/* ========================================================================= */}
       {activeSubTab === 'adjustments' && (
         <div className="space-y-6 animate-in fade-in duration-200">
-          {/* Adjustment Metric Cards */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-            <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-                  Total Adjustments
-                </span>
-                <div className="w-8 h-8 rounded-xl bg-[var(--color-surface-container)] text-[var(--color-primary)] flex items-center justify-center font-bold">
-                  <SlidersHorizontal className="w-4 h-4" />
-                </div>
-              </div>
-              <p className="text-2xl font-black text-[var(--color-on-surface)] mt-2">{adjustmentStats.totalCount}</p>
-              <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                Vouchers & reconciliation logs
-              </p>
-            </div>
-
-            {/* Inward Additions */}
-            <div
-              onClick={() => setAdjTypeFilter(adjTypeFilter === 'increase' ? 'all' : 'increase')}
-              className={`p-4 rounded-2xl border cursor-pointer transition-all ${
-                adjTypeFilter === 'increase'
-                  ? 'bg-[var(--color-success-container)]/30 border-[var(--color-success)]'
-                  : 'bg-[var(--color-surface-container-lowest)] border-[var(--color-outline-variant)]'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-[var(--color-success)] uppercase tracking-wider">
-                  Stock Additions (+)
-                </span>
-                <div className="w-8 h-8 rounded-xl bg-[var(--color-success-container)] text-[var(--color-success)] flex items-center justify-center font-bold">
-                  <TrendingUp className="w-4 h-4" />
-                </div>
-              </div>
-              <p className="text-2xl font-black text-[var(--color-success)] mt-2">
-                {adjustmentStats.increaseCount}
-              </p>
-              <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                Addition vouchers · {adjustmentStats.totalAddedQty.toLocaleString('en-IN', { maximumFractionDigits: 2 })} qty ({currencySymbol} {adjustmentStats.totalAddedValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })})
-              </p>
-            </div>
-
-            {/* Outward Deductions */}
-            <div
-              onClick={() => setAdjTypeFilter(adjTypeFilter === 'decrease' ? 'all' : 'decrease')}
-              className={`p-4 rounded-2xl border cursor-pointer transition-all ${
-                adjTypeFilter === 'decrease'
-                  ? 'bg-[var(--color-error-container)]/30 border-[var(--color-error)]'
-                  : 'bg-[var(--color-surface-container-lowest)] border-[var(--color-outline-variant)]'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-[var(--color-error)] uppercase tracking-wider">
-                  Stock Reductions (-)
-                </span>
-                <div className="w-8 h-8 rounded-xl bg-[var(--color-error-container)] text-[var(--color-error)] flex items-center justify-center font-bold">
-                  <TrendingDown className="w-4 h-4" />
-                </div>
-              </div>
-              <p className="text-2xl font-black text-[var(--color-error)] mt-2">
-                {adjustmentStats.decreaseCount}
-              </p>
-              <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                Reduction vouchers · {adjustmentStats.totalReducedQty.toLocaleString('en-IN', { maximumFractionDigits: 2 })} qty ({currencySymbol} {adjustmentStats.totalReducedValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })})
-              </p>
-            </div>
-
-            {/* Stock Transfers (2026-11-17) */}
-            <div
-              onClick={() => setAdjTypeFilter(adjTypeFilter === 'transfer' ? 'all' : 'transfer')}
-              className={`p-4 rounded-2xl border cursor-pointer transition-all ${
-                adjTypeFilter === 'transfer'
-                  ? 'bg-[var(--color-tertiary-container)]/40 border-[var(--color-tertiary)]'
-                  : 'bg-[var(--color-surface-container-lowest)] border-[var(--color-outline-variant)]'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-[var(--color-tertiary)] uppercase tracking-wider">
-                  Location Transfers (⇄)
-                </span>
-                <div className="w-8 h-8 rounded-xl bg-[var(--color-tertiary-container)] text-[var(--color-tertiary)] flex items-center justify-center font-bold">
-                  <ArrowRightLeft className="w-4 h-4" />
-                </div>
-              </div>
-              <p className="text-2xl font-black text-[var(--color-tertiary)] mt-2">
-                {adjustmentStats.transferCount}
-              </p>
-              <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                Transfer vouchers · {adjustmentStats.totalTransferredQty.toLocaleString('en-IN', { maximumFractionDigits: 2 })} qty moved
-              </p>
-            </div>
-
-            {/* Net Valuation Impact */}
-            <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-[var(--color-on-surface-variant)] uppercase tracking-wider">
-                  Net Value Impact
-                </span>
-                <div className="w-8 h-8 rounded-xl bg-[var(--color-primary-container)] text-[var(--color-primary)] flex items-center justify-center font-bold">
-                  <IndianRupee className="w-4 h-4" />
-                </div>
-              </div>
-              <p
-                className={`text-2xl font-black mt-2 ${
-                  adjustmentStats.netValueImpact >= 0 ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]'
-                }`}
-              >
-                {adjustmentStats.netValueImpact >= 0 ? '+' : ''}{currencySymbol} {adjustmentStats.netValueImpact.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-              </p>
-              <p className="text-[11px] text-[var(--color-on-surface-variant)] mt-0.5">
-                Valuation adjustment total
-              </p>
-            </div>
-          </div>
-
           {/* Search, Filter & Action Bar */}
           <div className="p-4 bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs space-y-3">
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
@@ -1439,6 +1199,18 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
 
               {/* Controls */}
               <div className="flex items-center gap-2 flex-wrap">
+                {/* Type Filter — replaces the removed metric cards' click-to-filter */}
+                <select
+                  value={adjTypeFilter}
+                  onChange={(e: any) => setAdjTypeFilter(e.target.value)}
+                  className="px-3 py-1.5 bg-[var(--color-surface-container)] border border-[var(--color-outline-variant)] rounded-full text-xs font-semibold text-[var(--color-on-surface)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                >
+                  <option value="all">All Types</option>
+                  <option value="increase">Additions</option>
+                  <option value="decrease">Reductions</option>
+                  <option value="transfer">Transfers</option>
+                </select>
+
                 {/* Item Filter */}
                 <select
                   value={adjItemFilter}
@@ -1603,7 +1375,7 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                               ) : adj.type === 'transfer' ? (
                                 <>
                                   <ArrowRightLeft className="w-3 h-3" />
-                                  ⇄ Transfer Out
+                                  ⇄ Transfer
                                 </>
                               ) : (
                                 <>
@@ -1614,18 +1386,19 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                             </span>
                           </td>
 
-                          {/* Adjusted Qty */}
+                          {/* Adjusted Qty — a transfer MOVEs stock (source → destination,
+                              item total unchanged), so no +/- sign */}
                           <td className="py-3 px-3 text-right">
                             <span
                               className={`text-sm font-black ${
                                 adj.type === 'increase'
                                   ? 'text-[var(--color-success)]'
                                   : adj.type === 'transfer'
-                                    ? 'text-[var(--color-error)]'
+                                    ? 'text-[var(--color-tertiary)]'
                                     : 'text-[var(--color-error)]'
                               }`}
                             >
-                              {adj.type === 'transfer' ? '- ' : adj.type === 'increase' ? '+' : '-'} {adj.quantity.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                              {adj.type === 'increase' ? '+ ' : adj.type === 'transfer' ? '' : '-'} {adj.quantity.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
                             </span>
                             <span className="text-[10px] text-[var(--color-outline)] block">{adj.unit}</span>
                           </td>
@@ -1683,71 +1456,6 @@ export const ItemsView: React.FC<ItemsViewProps> = ({
                           </td>
 
                         </tr>
-
-                        {/* STOCK TRANSFER — the paired DESTINATION leg rendered
-                            UNDER the voucher: where the transferred stock LANDED
-                            it reads as a positive (inward) entry. One voucher,
-                            two register lines (user directive 2026-11-17). */}
-                        {adj.type === 'transfer' && (
-                          <tr className="bg-[var(--color-tertiary-container)]/25 hover:bg-[var(--color-tertiary-container)]/40 transition-colors">
-                            <td className="py-2.5 px-4">
-                              <span className="font-mono text-[10px] font-bold text-[var(--color-on-surface-variant)] flex items-center gap-1">
-                                <span className="text-[var(--color-tertiary)]">↳</span> {adj.adjustmentNumber || 'STK-ADJ'}
-                              </span>
-                              <span className="text-[10px] text-[var(--color-on-surface-variant)] flex items-center gap-1 mt-0.5">
-                                <Calendar className="w-3 h-3 text-[var(--color-outline)]" />
-                                {new Date(adj.date).toLocaleDateString('en-IN')}
-                              </span>
-                            </td>
-                            <td className="py-2.5 px-3">
-                              <div className="flex items-center gap-1.5 mt-0.5">
-                                <span className="font-mono text-[10px] bg-[var(--color-surface-container-high)] text-[var(--color-on-surface-variant)] px-1.5 py-0.2 rounded-full font-bold">
-                                  {adj.itemCode}
-                                </span>
-                                <span className="text-[10px] text-[var(--color-on-surface-variant)] flex items-center gap-0.5 font-semibold">
-                                  <Warehouse className="w-3 h-3 text-[var(--color-tertiary)]" />
-                                  {adj.toLocationName || '—'}
-                                  <span className="text-[9px] text-[var(--color-outline)] uppercase">(destination)</span>
-                                </span>
-                              </div>
-                            </td>
-                            <td className="py-2.5 px-3 text-center">
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-[var(--color-success-container)] text-[var(--color-success)] border border-[var(--color-success)]/30">
-                                <TrendingUp className="w-3 h-3" />
-                                ⇄ Transfer In
-                              </span>
-                            </td>
-                            <td className="py-2.5 px-3 text-right">
-                              <span className="text-sm font-black text-[var(--color-success)]">
-                                + {adj.quantity.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
-                              </span>
-                              <span className="text-[10px] text-[var(--color-outline)] block">{adj.unit}</span>
-                            </td>
-                            <td className="py-2.5 px-3 text-right">
-                              <div className="text-[11px] font-bold text-[var(--color-on-surface-variant)]">Value-neutral</div>
-                            </td>
-                            <td className="py-2.5 px-3 text-center">
-                              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-[var(--color-surface-container)] rounded-xl border border-[var(--color-outline-variant)] text-[11px] font-mono">
-                                <span className="text-[var(--color-on-surface-variant)] font-semibold">
-                                  {adj.previousStock?.toLocaleString('en-IN') ?? '—'}
-                                </span>
-                                <span className="text-[var(--color-outline)]">➔</span>
-                                <span className="font-bold text-[var(--color-primary)]">
-                                  {adj.newStock?.toLocaleString('en-IN') ?? '—'}
-                                </span>
-                                <span className="text-[9px] text-[var(--color-outline)]">{adj.unit}</span>
-                              </div>
-                            </td>
-                            <td className="py-2.5 px-3">
-                              <div className="font-semibold text-[var(--color-on-surface-variant)] max-w-xs truncate text-[11px]">
-                                Stock landed here from {adj.fromLocationName || adj.location || 'the source'}
-                              </div>
-                            </td>
-                            <td className="py-2.5 px-3 text-[11px] font-medium text-[var(--color-on-surface)]">
-                              {adj.createdByName || <span className="italic text-[var(--color-outline)]">Unknown</span>}
-                            </td>
-                          </tr>
-                        )}
                         </React.Fragment>
                       );
                     })}

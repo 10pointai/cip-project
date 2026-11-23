@@ -319,6 +319,11 @@ class ServerLocalDatabase {
       this.data = this.getDefaultSchema();
       this.ensureDefaultUsersAndHashes();
       this.ensureOrphanedTransactionsCleaned();
+      // Local (non-MySQL) mode: backfill the seeds' initial opening rows once.
+      // MySQL mode must NOT do this here — the seeded sandbox is about to be
+      // replaced by the live hydration, and backfill would post seed rows to
+      // the cloud ledger; initFromMysql runs the backfill after hydration.
+      if (!isMysqlConfigured()) this.backfillOpeningMovements();
       this.isLoaded = true;
       console.log('[DB] Cloud-authoritative database engine initialized. Local JSON file writing decommissioned.');
     } catch (err) {
@@ -433,6 +438,10 @@ class ServerLocalDatabase {
           mysqlData.transactions = (mysqlData.transactions || []).filter((t) => validPartyIds.has(t.partyId));
           this.data = mysqlData;
           this.lastMysqlHydrationTime = Date.now();
+          // Opening-stock backfill (idempotent): every item that carries an
+          // opening qty and has no 'opening' ledger row yet gets its INITIAL
+          // entry; items already carrying one are untouched.
+          this.backfillOpeningMovements();
           this.persistSync();
           // Balance-stream sweep: accounts touched by vehicle expense entries
           // recompute their balance straight from the entry lists (opening +
@@ -466,6 +475,8 @@ class ServerLocalDatabase {
       salesInvoices: (this.data.salesInvoices || []).map((si) => this.hydrateSaleInvoice(si)),
       tripSlips: this.visibleTripSlips(),
       purchases: (this.data.purchases || []).map((p) => this.hydratePurchase(p)),
+      // Runs carry their output landing location as a live view (ledger JOIN equivalent)
+      productionBatches: (this.data.productionBatches || []).map((b) => this.hydrateBatchOutputLocation(b)),
       // Transfer/adjustment display names are live views from the account master
       transfers: (this.data.transfers || []).map((t) => this.hydrateTransfer(t)),
       adjustments: (this.data.adjustments || []).map((a) => this.hydrateAdjustment(a)),
@@ -848,6 +859,15 @@ class ServerLocalDatabase {
       hydrated.stockLocation = hydrated.stockLocations.join(', ');
     }
     if (ledger.length === 0) return hydrated;
+    // Fleet diesel fills: the movement's Party / Source is the VEHICLE the
+    // fill was issued to — resolved live (entry → vehicleId → plate) so a
+    // plate correction propagates, mirroring the MySQL JOIN path.
+    const vehicleNoForMovement = (m: StockMovementRecord): string | undefined => {
+      if (m.referenceType !== 'vehicle_expense' || !m.referenceId) return undefined;
+      const entry = (this.data.vehicleExpenseEntries || []).find((e) => e.id === m.referenceId);
+      const vehicle = entry ? this.data.vehicles.find((v) => v.id === entry.vehicleId) : undefined;
+      return vehicle?.vehicleNo;
+    };
     hydrated.movements = ledger.slice(0, 100).map((m) => ({
       id: m.id,
       date: m.date,
@@ -858,7 +878,7 @@ class ServerLocalDatabase {
       movementValue: m.movementValue,
       valuationRateAfter: m.valuationRateAfter,
       referenceNumber: m.referenceNumber,
-      sourcePartyOrBatch: m.sourcePartyOrBatch,
+      sourcePartyOrBatch: m.sourcePartyOrBatch || vehicleNoForMovement(m),
       notes: m.notes,
     }));
     return hydrated;
@@ -1010,6 +1030,9 @@ class ServerLocalDatabase {
     this.logAudit(existingIdx !== -1 ? 'UPDATE' : 'CREATE', 'ITEM', newId, `Item ${newItem.name} (${newItem.code})`);
     this.save();
     liveSyncItem(newItem);
+    // INITIAL LEDGER ENTRY (user directive): a created item with an opening
+    // quantity opens its FIFO ledger with one 'opening' row.
+    this.postOpeningStockMovement(newItem);
     if (createDocIds.length > 0) this.linkItemDocuments(newId, createDocIds);
     return newItem;
   }
@@ -1139,6 +1162,64 @@ class ServerLocalDatabase {
     this.save();
     liveSyncItem(removedItem, true);
     return true;
+  }
+
+  // ==========================================
+  // OPENING STOCK — the movements ledger's INITIAL entry (user directive):
+  // every item whose master carries an opening quantity gets ONE 'opening'
+  // row as the first line of its FIFO ledger:
+  //   +opening @ the item's opening/cost rate, dated the item's opening date.
+  // Idempotent (one row per item, ever) — safe to re-run after every hydration.
+  // The ledger row is DISPLAY-ONLY bookends: it never re-applies stock (the
+  // opening qty already lives on the item), and FIFO valuation skips
+  // 'opening' rows (inventoryValuation.ts seeds the first lot from the item).
+  // ==========================================
+  private postOpeningStockMovement(item: Item): void {
+    const opening = Number(item.openingStock) || 0;
+    if (opening <= 0) return;
+    // Never duplicate: an existing 'opening' row for this item wins.
+    if ((this.data.stockMovements || []).some((m) => m.itemId === item.id && m.type === 'opening')) return;
+    const firstBucket = (item.locations || [])[0];
+    const rate = Number(item.openingStockPrice) > 0
+      ? Number(item.openingStockPrice)
+      : (Number(item.purchasePrice) > 0 ? Number(item.purchasePrice) : undefined);
+    const movement: StockMovementRecord = {
+      id: `stk-${this.nextLedgerMs()}-${Math.random().toString(36).slice(2, 8)}`,
+      itemId: item.id,
+      locationId: firstBucket?.locationId,
+      date: item.openingStockDate || item.createdAt || new Date().toISOString(),
+      type: 'opening',
+      quantity: opening,
+      // The balance right AFTER this event is the opening qty itself (the
+      // ledger continues from here as purchases/production arrive).
+      balanceAfter: opening,
+      rate,
+      movementValue: rate ? Math.round(opening * rate * 100) / 100 : undefined,
+      referenceNumber: undefined,
+      referenceId: item.id,
+      sourcePartyOrBatch: undefined,
+      partyId: undefined,
+      notes: 'Opening stock entry',
+      referenceType: 'opening',
+    };
+    this.data.stockMovements.unshift(movement);
+    if (isMysqlConfigured()) {
+      // Ledger row ONLY (applyStockDelta=false): the item-row write already
+      // carried the opening qty — a stock increment would double-count it.
+      liveSyncStockMovement(item, movement, firstBucket?.locationName, undefined, { applyStockDelta: false });
+    }
+  }
+
+  /** Boot-time backfill (idempotent): historical items created before the
+   *  initial-entry rule get their one 'opening' ledger row now. */
+  public backfillOpeningMovements(): void {
+    for (const item of this.data.items || []) {
+      try {
+        this.postOpeningStockMovement(item);
+      } catch (e: any) {
+        console.warn('[DB] Opening-stock backfill failed for item', item.code, e.message);
+      }
+    }
   }
 
   public adjustItemStock(id: string, delta: number, logType: 'purchase_inward' | 'production_output' | 'production_consumed' | 'production_consumed_reversal' | 'sale_dispatch' | 'opening' | 'adjustment_increase' | 'adjustment_decrease' | 'dispatch_reversal' | 'inward_reversal' | 'diesel_issue' | 'diesel_issue_reversal' | 'transfer_out' | 'transfer_in', refNo?: string, notes?: string, locationName?: string, partyId?: string, rate?: number, referenceId?: string): Item {
@@ -4916,8 +4997,23 @@ class ServerLocalDatabase {
   }
 
   // --- PRODUCTION BATCHES ---
+  /** Where the run's output LANDED: the production_output ledger row this
+   *  batch posted (referenceId = batch id) carries the location FK — resolve
+   *  the LIVE name from the locations master so renames propagate (§2). */
+  private hydrateBatchOutputLocation(batch: ProductionBatchRun): ProductionBatchRun {
+    const outputMovement = (this.data.stockMovements || []).find(
+      (m) => m.type === 'production_output' && m.referenceId === batch.id,
+    );
+    const locId = outputMovement?.locationId;
+    if (locId) {
+      const name = (this.data.locations || []).find((l) => l.id === locId)?.name;
+      if (name) return { ...batch, outputLocationName: name };
+    }
+    return batch;
+  }
+
   public getProductionBatches(): ProductionBatchRun[] {
-    return this.data.productionBatches;
+    return this.data.productionBatches.map((b) => this.hydrateBatchOutputLocation(b));
   }
 
   /**
@@ -5456,8 +5552,11 @@ class ServerLocalDatabase {
       isRestore ? 'diesel_issue_reversal' : 'diesel_issue',
       reversalKey || entryId,
       notes?.trim() || (isRestore
-        ? `Diesel issue reversal — ${vehicleNo}${litres ? ` ${litres.toFixed(2)} L re-entered` : ''}`
-        : `Diesel issue — ${vehicleNo}${litres ? ` ${Math.abs(litres).toFixed(2)} L` : ''}`),
+        ? `Diesel issue reversal`
+        : `Diesel issue`),
+      // The subtext stays bare ("Diesel issue") — the vehicle no. lives in the
+      // movement's Party / Source column and the litres in the In / Out
+      // column, so neither is spelled into the notes again.
       locName,
       undefined,
       reverseRate,

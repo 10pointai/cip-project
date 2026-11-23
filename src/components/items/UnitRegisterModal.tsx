@@ -127,7 +127,10 @@ const UnitRegisterModal: React.FC<UnitRegisterModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
       <form onSubmit={handleSave} className="bg-[var(--color-surface-container-lowest)] w-full max-w-2xl rounded-3xl shadow-2xl border border-[var(--color-outline-variant)] flex flex-col max-h-[90vh]">
         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
           <div className="flex items-center gap-2.5">

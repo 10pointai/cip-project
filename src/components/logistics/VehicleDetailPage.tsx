@@ -677,10 +677,17 @@ export function VehicleDetailPage({ vehicle, sales, onBack, onEdit, onOpenRst }:
                             className="font-mono text-[11px] font-black text-[var(--color-primary)] underline decoration-dotted underline-offset-2 hover:opacity-80 cursor-pointer whitespace-nowrap"
                             title={`Open RST ${s.orderNumber || ''} details`}
                           >
-                            {s.orderNumber || '—'}
+                            {/* RST label only for bare-serial numbers (sales-table rule) */}
+                            {s.orderNumber
+                              ? (/^\d+$/.test(String(s.orderNumber)) ? `RST ${s.orderNumber}` : s.orderNumber)
+                              : '—'}
                           </button>
                         ) : (
-                          <span className="font-semibold text-[var(--color-on-surface-variant)]">{s.orderNumber || '—'}</span>
+                          <span className="font-semibold text-[var(--color-on-surface-variant)]">
+                            {s.orderNumber
+                              ? (/^\d+$/.test(String(s.orderNumber)) ? `RST ${s.orderNumber}` : s.orderNumber)
+                              : '—'}
+                          </span>
                         )}
                       </td>
                       <td className="py-2.5 px-3">
@@ -743,7 +750,7 @@ export function VehicleDetailPage({ vehicle, sales, onBack, onEdit, onOpenRst }:
 
       {/* ===== TYRE MODALS — fit a spare into an empty slot / unload a fitted serial ===== */}
       {tyreModal && tyreModal.mode === 'fit' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs" onClick={(e) => { if (e.target === e.currentTarget) setTyreModal(null); }}>
           <form onSubmit={handleFitSerial} className="bg-[var(--color-surface-container-lowest)] w-full max-w-lg rounded-3xl shadow-2xl border border-[var(--color-outline-variant)]">
             <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
               <h3 className="text-sm font-bold text-[var(--color-on-surface)] flex items-center gap-2">
@@ -812,7 +819,7 @@ export function VehicleDetailPage({ vehicle, sales, onBack, onEdit, onOpenRst }:
         if (!unit) return null;
         const cond = unit.condition || 'good';
         return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs" onClick={(e) => { if (e.target === e.currentTarget) setTyreModal(null); }}>
             <div className="bg-[var(--color-surface-container-lowest)] w-full max-w-md rounded-3xl shadow-2xl border border-[var(--color-outline-variant)]">
               <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
                 <h3 className="text-sm font-bold text-[var(--color-on-surface)] flex items-center gap-2">

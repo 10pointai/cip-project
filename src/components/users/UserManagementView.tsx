@@ -954,7 +954,10 @@ export function UserManagementView() {
 
       {/* SUSPEND CONFIRMATION MODAL */}
       {userToSuspend && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-sm animate-in fade-in">
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setUserToSuspend(null); }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-sm animate-in fade-in"
+        >
           <div
             className="w-full max-w-sm bg-[var(--color-surface)] text-[var(--color-on-surface)] rounded-3xl border border-[var(--color-outline-variant)] shadow-2xl p-6"
             onClick={(e) => e.stopPropagation()}
@@ -998,7 +1001,10 @@ export function UserManagementView() {
 
       {/* CREATE USER MODAL */}
       {isCreateModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-sm animate-in fade-in">
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setIsCreateModalOpen(false); }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-sm animate-in fade-in"
+        >
           <div
             className="w-full max-w-2xl bg-[var(--color-surface)] text-[var(--color-on-surface)] rounded-3xl border border-[var(--color-outline-variant)] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
             onClick={(e) => e.stopPropagation()}
@@ -1223,7 +1229,10 @@ export function UserManagementView() {
 
       {/* EDIT USER MODAL */}
       {isEditModalOpen && editingUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-sm animate-in fade-in">
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setIsEditModalOpen(false); }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-sm animate-in fade-in"
+        >
           <div
             className="w-full max-w-2xl bg-[var(--color-surface)] text-[var(--color-on-surface)] rounded-3xl border border-[var(--color-outline-variant)] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
             onClick={(e) => e.stopPropagation()}
@@ -1434,7 +1443,10 @@ export function UserManagementView() {
 
       {/* NEW USER INVITE SHARE CARD MODAL */}
       {newlyCreatedUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-sm animate-in fade-in">
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setNewlyCreatedUser(null); }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-sm animate-in fade-in"
+        >
           <div
             className="w-full max-w-md bg-[var(--color-surface)] text-[var(--color-on-surface)] rounded-3xl border border-[var(--color-outline-variant)] shadow-2xl p-6 overflow-hidden"
             onClick={(e) => e.stopPropagation()}
@@ -1530,7 +1542,10 @@ export function UserManagementView() {
 
       {/* DELETE CONFIRMATION MODAL */}
       {userToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-sm animate-in fade-in">
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) setUserToDelete(null); }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-sm animate-in fade-in"
+        >
           <div
             className="w-full max-w-sm bg-[var(--color-surface)] text-[var(--color-on-surface)] rounded-3xl border border-[var(--color-outline-variant)] shadow-2xl p-6"
             onClick={(e) => e.stopPropagation()}

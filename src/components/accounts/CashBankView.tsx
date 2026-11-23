@@ -865,18 +865,9 @@ export function CashBankView({
       {/* VIEW: Internal Transfers Tab */}
       {activeTab === 'transfers' && !selectedAccountId && (
         <div className="bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs overflow-hidden">
-          <div className="p-4 border-b border-[var(--color-outline-variant)] flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-bold text-[var(--color-on-surface)]">Internal Fund Transfers</h3>
-              <p className="text-xs text-[var(--color-on-surface-variant)]">Contra vouchers (Bank to Bank, Cash to Bank, Bank to Cash)</p>
-            </div>
-            <button
-              onClick={() => setIsTransferModalOpen(true)}
-              className="flex items-center gap-1 px-3 py-1.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] text-xs font-semibold rounded-full"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              New Transfer
-            </button>
+          <div className="p-4 border-b border-[var(--color-outline-variant)]">
+            <h3 className="text-sm font-bold text-[var(--color-on-surface)]">Internal Fund Transfers</h3>
+            <p className="text-xs text-[var(--color-on-surface-variant)]">Contra vouchers (Bank to Bank, Cash to Bank, Bank to Cash)</p>
           </div>
 
           <div className="overflow-x-auto">
@@ -936,18 +927,9 @@ export function CashBankView({
       {/* VIEW: Adjustments Tab */}
       {activeTab === 'adjustments' && !selectedAccountId && (
         <div className="bg-[var(--color-surface-container-lowest)] rounded-2xl border border-[var(--color-outline-variant)] shadow-xs overflow-hidden">
-          <div className="p-4 border-b border-[var(--color-outline-variant)] flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-bold text-[var(--color-on-surface)]">Account Balance Adjustments</h3>
-              <p className="text-xs text-[var(--color-on-surface-variant)]">Physical reconciliation & balance corrections</p>
-            </div>
-            <button
-              onClick={() => setIsAdjustmentModalOpen(true)}
-              className="flex items-center gap-1 px-3 py-1.5 bg-[var(--color-primary)] text-[var(--color-on-primary)] text-xs font-semibold rounded-full"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              New Adjustment
-            </button>
+          <div className="p-4 border-b border-[var(--color-outline-variant)]">
+            <h3 className="text-sm font-bold text-[var(--color-on-surface)]">Account Balance Adjustments</h3>
+            <p className="text-xs text-[var(--color-on-surface-variant)]">Physical reconciliation & balance corrections</p>
           </div>
 
           <div className="overflow-x-auto">
@@ -1468,7 +1450,7 @@ export function CashBankView({
       {/* MODAL 1: ADD BANK / CASH ACCOUNT                                          */}
       {/* ========================================================================= */}
       {isAddAccountModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200" onClick={(e) => { if (e.target === e.currentTarget) { setIsAddAccountModalOpen(false); setEditingAccountId(null); } }}>
           <div className="bg-[var(--color-surface-container-lowest)] w-full max-w-lg rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] overflow-hidden flex flex-col max-h-[90vh]">
             <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
               <div>
@@ -1676,7 +1658,7 @@ export function CashBankView({
       {/* MODAL 2: TRANSFER FUNDS (CONTRA)                                          */}
       {/* ========================================================================= */}
       {isTransferModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200" onClick={(e) => { if (e.target === e.currentTarget) setIsTransferModalOpen(false); }}>
           <div className="bg-[var(--color-surface-container-lowest)] w-full max-w-lg rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] overflow-hidden flex flex-col max-h-[90vh]">
             <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
               <div>
@@ -1826,7 +1808,7 @@ export function CashBankView({
       {/* MODAL 3: ADJUST ACCOUNT BALANCE                                          */}
       {/* ========================================================================= */}
       {isAdjustmentModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/60 backdrop-blur-xs animate-in fade-in duration-200" onClick={(e) => { if (e.target === e.currentTarget) setIsAdjustmentModalOpen(false); }}>
           <div className="bg-[var(--color-surface-container-lowest)] w-full max-w-lg rounded-[28px] shadow-2xl border border-[var(--color-outline-variant)] overflow-hidden flex flex-col max-h-[90vh]">
             <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)]">
               <div>

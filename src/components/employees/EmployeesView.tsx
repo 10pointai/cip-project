@@ -450,7 +450,7 @@ export function EmployeesView({ focusEmployeeId, onFocusHandled, onProfileBack }
       {/* MODAL: Employee Form — rendered over EITHER state (the detail page
           stays open underneath; the roster refresh re-hydrates it on save) */}
       {isEmployeeModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/40 backdrop-blur-xs">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--color-scrim)]/40 backdrop-blur-xs" onClick={(e) => { if (e.target === e.currentTarget) setIsEmployeeModalOpen(false); }}>
           <div className="bg-[var(--color-surface)] rounded-2xl border border-[var(--color-outline-variant)] shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
             <div className="p-5 border-b border-[var(--color-outline-variant)] flex justify-between items-center bg-[var(--color-surface-container)]">
               <h3 className="text-sm font-black text-[var(--color-on-surface)] flex items-center gap-2">

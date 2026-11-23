@@ -287,11 +287,16 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
       try {
         const [smRows]: [any[], any] = await conn.query(`
           SELECT sm.*, p.name AS party_display,
-                 loc.name AS location_display
+                 loc.name AS location_display,
+                 veh.registration_number AS vehicle_display
           FROM stock_movements sm
           LEFT JOIN parties p ON p.id = sm.party_id
           LEFT JOIN item_locations loc ON loc.id = sm.location_id
-          
+          -- Fleet diesel fills: the ledger row's source is the VEHICLE the
+          -- fill was issued to (via the vehicle_expense_entries doc it
+          -- traces to), joined live so a plate correction propagates.
+          LEFT JOIN vehicle_expense_entries vxe ON vxe.id = sm.reference_id AND sm.reference_type = 'vehicle_expense'
+          LEFT JOIN vehicles veh ON veh.id = vxe.vehicle_id
           ORDER BY sm.movement_date DESC, sm.created_at DESC
         `);
         const movsByItem = new Map<string, StockMovementLog[]>();
@@ -312,7 +317,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
             valuationRateAfter: m.valuation_rate_after !== null && m.valuation_rate_after !== undefined ? parseNum(m.valuation_rate_after) : undefined,
             referenceNumber: m.reference_number || undefined,
             referenceId: m.reference_id || undefined,
-            sourcePartyOrBatch: m.party_display || undefined,
+            sourcePartyOrBatch: m.party_display || m.vehicle_display || undefined,
             notes: m.notes || undefined,
             referenceType: m.reference_type || undefined,
           } as StockMovementRecord);
@@ -329,7 +334,7 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
             quantity: parseNum(m.quantity),
             balanceAfter: m.balance_after !== null && m.balance_after !== undefined ? parseNum(m.balance_after) : 0,
             referenceNumber: m.reference_number || undefined,
-            sourcePartyOrBatch: m.party_display || undefined,
+            sourcePartyOrBatch: m.party_display || m.vehicle_display || undefined,
             notes: m.notes || undefined,
           });
         }
@@ -507,7 +512,18 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
 
       // 7. Production Batches (batchMixId / outputRate / outputValue are the
       // 2026-11-12 recipe columns — NULL on pre-recipe historical runs)
-      const [batchRows]: [any[], any] = await conn.query('SELECT * FROM production_batches ORDER BY date DESC, created_at DESC');
+      // OUTPUT PLACEMENT (2026-11-23): each run's landing location resolves
+      // live from its production_output ledger row → item_locations JOIN.
+      const [batchRows]: [any[], any] = await conn.query(`
+        SELECT pb.*,
+               oloc.name AS output_location_display
+        FROM production_batches pb
+        LEFT JOIN stock_movements osm
+               ON osm.reference_id = pb.id AND osm.movement_type = 'production_output'
+              AND osm.location_id IS NOT NULL
+        LEFT JOIN item_locations oloc ON oloc.id = osm.location_id
+        ORDER BY pb.date DESC, pb.created_at DESC
+      `);
       const productionBatches: ProductionBatchRun[] = batchRows.map((b) => ({
         id: b.id,
         batchNumber: b.batch_number,
@@ -533,6 +549,8 @@ export async function loadAllFromMysql(): Promise<DatabaseSchema | null> {
         // DONE-BY AUDIT (2026-11-21)
         createdById: b.created_by_id || undefined,
         updatedById: b.updated_by_id || undefined,
+        // Where the output LANDED (resolved from the ledger at read time)
+        outputLocationName: b.output_location_display || undefined,
       }));
 
       // 7a. BATCH MIXES (recipes) — ingredients JOINed per mix from their FKs
@@ -3210,7 +3228,17 @@ export async function liveSyncStockAdjustment(adj: ItemStockAdjustment, isDelete
  * The ledger stores primary keys (item_id, location_id, party_id) — display names
  * are always resolved with JOINs at read time, so renames propagate everywhere.
  */
-export async function liveSyncStockMovement(item: Item, movement: StockMovementRecord, locationName?: string, partyId?: string) {
+export async function liveSyncStockMovement(
+  item: Item,
+  movement: StockMovementRecord,
+  locationName?: string,
+  partyId?: string,
+  /** applyStockDelta=false: ledger row ONLY (no items.current_stock /
+   *  mapping increment). For the OPENING STOCK entry the opening qty is
+   *  already baked into the item's stock (the item-row write carried it) —
+   *  a delta increment would double-count it. */
+  opts?: { applyStockDelta?: boolean },
+) {
   const pool = getMysqlPool();
   if (!pool) return;
   const delta = Number(movement.quantity) || 0;
@@ -3229,13 +3257,27 @@ export async function liveSyncStockMovement(item: Item, movement: StockMovementR
         console.warn(`[Azure MySQL LiveSync] stock movement: location "${locationName}" not found in item_locations — per-location increment skipped for item ${item.id}`);
       }
     }
+    // balance_after: normal movements anchor to the DB's own pre-delta
+    // current_stock (authoritative). Ledger-ONLY rows (opening stock) carry
+    // the movement's own balance snapshot — the item's CURRENT stock must not
+    // leak into a historical row (it would read like a double-count).
+    const isLedgerOnly = opts?.applyStockDelta === false;
+    const balanceSql = isLedgerOnly
+      ? `?`
+      : `IFNULL((SELECT current_stock FROM items WHERE id = ?) + ?, ?)`;
+    const balanceFallback = movement.balanceAfter !== undefined && movement.balanceAfter !== null
+      ? Number(movement.balanceAfter)
+      : null;
+    const balanceParams = isLedgerOnly
+      ? [balanceFallback]
+      : [item.id, delta, balanceFallback];
     await pool.query(
       `INSERT INTO stock_movements (
         id, item_id, location_id, movement_type, quantity,
         balance_after, rate, movement_value, valuation_rate_after,
         reference_type, reference_number, reference_id, party_id, notes, movement_date, created_at
       ) VALUES (?, ?, ?, ?, ?,
-        IFNULL((SELECT current_stock FROM items WHERE id = ?) + ?, ?),
+        ${balanceSql},
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         movement.id,
@@ -3243,12 +3285,7 @@ export async function liveSyncStockMovement(item: Item, movement: StockMovementR
         locId || null,
         movement.type,
         delta,
-        // Running balance anchored to the DB's own pre-delta current_stock
-        // (authoritative; falls back to the in-memory snapshot if the items
-        // row does not exist yet — the REPLACE fallback below creates it).
-        item.id,
-        delta,
-        movement.balanceAfter !== undefined && movement.balanceAfter !== null ? Number(movement.balanceAfter) : null,
+        ...balanceParams,
         movement.rate !== undefined && movement.rate !== null ? Number(movement.rate) : null,
         movement.movementValue !== undefined && movement.movementValue !== null ? Number(movement.movementValue) : null,
         movement.valuationRateAfter !== undefined && movement.valuationRateAfter !== null ? Number(movement.valuationRateAfter) : null,
@@ -3261,6 +3298,10 @@ export async function liveSyncStockMovement(item: Item, movement: StockMovementR
         movement.date,
       ]
     );
+
+    // Apply the stock delta ONLY when asked (the opening-stock ledger entry
+    // skips this entirely — its qty already lives on the item row).
+    if (opts?.applyStockDelta === false) return;
 
     // Atomic item-level stock increment (single statement, race-safe)
     const [updateRes]: any = await pool.query(
