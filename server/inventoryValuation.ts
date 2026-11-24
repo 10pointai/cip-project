@@ -30,7 +30,15 @@ export interface valuationMovementInput {
   quantity: number; // signed
   rate?: number | null;
   date?: string;
+  /** The row's source marker — 'direct_sale_dispatch' rows are AUDIT-ONLY
+   *  ledger traces (the output never entered stock) and never enter the FIFO
+   *  replay as lots or consumption (mirrors the 'opening' skip). */
+  referenceType?: string;
 }
+
+/** AUDIT-ONLY marker (db.ts, produce-&-sell-direct rows): excluded from the
+ *  FIFO replay everywhere — the cost already left via the ingredients. */
+export const AUDIT_ONLY_DIRECT_SALE = 'direct_sale_dispatch';
 
 export interface ItemValuation {
   valuationRate: number; // blended rate of the remaining lots (display only)
@@ -68,6 +76,7 @@ function replayLots(item: Item, movements: valuationMovementInput[]): FifoReplay
 
   for (const m of chronoSort(movements)) {
     if (m.type === 'opening') continue; // represented by the seed lot
+    if (m.referenceType === AUDIT_ONLY_DIRECT_SALE) continue; // never a real stock event
     const qty = Number(m.quantity) || 0;
     if (qty > 0) {
       const rateIn = Number(m.rate);

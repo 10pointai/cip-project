@@ -3228,6 +3228,24 @@ export async function liveSyncStockAdjustment(adj: ItemStockAdjustment, isDelete
  * The ledger stores primary keys (item_id, location_id, party_id) — display names
  * are always resolved with JOINs at read time, so renames propagate everywhere.
  */
+/**
+ * Re-stamps ONE movement row's timestamps (sandbox-only repairs re-persisted
+ * to MySQL: the direct-sale audit rows posted before the timestamp fix
+ * carried a date-only string that displayed as the bogus "5:30 am").
+ */
+export async function updateStockMovementDate(id: string, date: string): Promise<void> {
+  const pool = getMysqlPool();
+  if (!pool) return;
+  try {
+    await pool.query(
+      `UPDATE stock_movements SET movement_date = ?, created_at = ? WHERE id = ?`,
+      [date, date, id]
+    );
+  } catch (e: any) {
+    console.error('[Azure MySQL LiveSync] Failed to re-stamp stock movement date:', e.message);
+  }
+}
+
 export async function liveSyncStockMovement(
   item: Item,
   movement: StockMovementRecord,

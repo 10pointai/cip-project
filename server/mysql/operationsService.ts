@@ -140,7 +140,9 @@ async function attachMovementsToItems(items: Item[]): Promise<Item[]> {
     );
 
     // Full per-item ledger for valuation (uncapped) + capped display history.
-    const fullLedger = new Map<string, { type: string; quantity: number; rate?: number | null; date?: string }[]>();
+    // referenceType rides the replay entries so the audit-only direct-sale
+    // rows (direct_sale_dispatch marker) are skipped by the FIFO replay.
+    const fullLedger = new Map<string, { type: string; quantity: number; rate?: number | null; date?: string; referenceType?: string }[]>();
     const movsByItem = new Map<string, StockMovementLog[]>();
     for (const m of rows) {
       const rate = m.rate !== null && m.rate !== undefined ? parseNum(m.rate) : undefined;
@@ -149,6 +151,7 @@ async function attachMovementsToItems(items: Item[]): Promise<Item[]> {
         quantity: parseNum(m.quantity),
         rate,
         date: m.movement_date || m.created_at,
+        referenceType: m.reference_type || undefined,
       };
       if (!fullLedger.has(m.item_id)) fullLedger.set(m.item_id, []);
       fullLedger.get(m.item_id)!.push(entry);

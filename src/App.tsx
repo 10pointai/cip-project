@@ -604,6 +604,8 @@ function AppContent() {
               batchMixes={batchMixes}
               items={items}
               settings={settings}
+              parties={parties}
+              sales={sales}
             />
           )}
 

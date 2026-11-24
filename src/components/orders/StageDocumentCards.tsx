@@ -58,16 +58,7 @@ export function SaleStageDocCard({ doc, order, currencyCode, onOpenDocument, onV
                 <Printer className="w-3 h-3" /> Open document
               </button>
             )} */}
-            {doc.stageType === 'sales_order' && onViewProforma && (
-              <button
-                type="button"
-                disabled
-                onClick={onViewProforma}
-                className="flex items-center gap-1 px-3 py-1.5 border border-[var(--color-primary)]/40 text-[var(--color-primary)] rounded-full text-[10px] font-bold hover:bg-[var(--color-primary-container)]/30 transition-all"
-              >
-                <Receipt className="w-3 h-3" /> View Proforma
-              </button>
-            )}
+          
           </div>
         )}
       </div>

@@ -16,8 +16,9 @@ import {
   ArrowRight,
   Percent,
   PackagePlus,
+  User,
 } from 'lucide-react';
-import { ProductionBatchRun, BatchMix, Item, CompanySettings } from '../../types';
+import { ProductionBatchRun, BatchMix, Item, CompanySettings, Party, Sale } from '../../types';
 import { cloudStore as localDb } from '../../services/cloudStore';
 import { SearchableSelect } from '../orders/SearchableSelect';
 
@@ -26,6 +27,10 @@ interface ProductionViewProps {
   batchMixes: BatchMix[];
   items: Item[];
   settings: CompanySettings;
+  // DIRECT-SALE runs sell straight to a party — the Location / Party column
+  // resolves that party live (sale → party FK) instead of a stock location.
+  parties: Party[];
+  sales: Sale[];
   onRefresh?: () => void;
 }
 
@@ -88,6 +93,8 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
   batchMixes,
   items,
   settings,
+  parties,
+  sales,
   onRefresh,
 }) => {
   const [activeTab, setActiveTab] = useState<RecipeTab>('runs');
@@ -689,11 +696,10 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
             <table className="w-full text-left border-collapse">
               <thead className="sticky top-16 z-20">
                 <tr className="border-b border-[var(--color-outline-variant)] bg-[var(--color-surface-container)] text-[var(--color-on-surface-variant)] font-bold uppercase tracking-wider text-[11px]">
-                  <th className="py-3.5 px-4">Batch #</th>
-                  <th className="py-3.5 px-3">Output Item</th>
+                  <th className="py-3.5 px-4">Batch No.</th>
                   <th className="py-3.5 px-3">Batch Mix</th>
                   <th className="py-3.5 px-3">Items Used (Qty)</th>
-                  <th className="py-3.5 px-3">Output Location</th>
+                  <th className="py-3.5 px-3">Location / Party</th>
                   <th className="py-3.5 px-4 text-right">Batch Output</th>
                   {/* DONE-BY AUDIT (2026-11-21): acting user resolved from the users master */}
                   <th className="py-3.5 px-3">Created By</th>
@@ -702,6 +708,15 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
               <tbody className="divide-y divide-[var(--color-outline-variant)]/60">
                 {filteredBatches.map((batch) => {
                   const mix = batchMixes.find((m) => m.id === batch.batchMixId);
+                  // DIRECT-SALE runs (user directive): the output sold straight
+                  // to a party — the Location / Party column shows that PARTY
+                  // (sale → party FK, resolved live) instead of a location.
+                  const directParty = batch.directSale || batch.saleId
+                    ? (() => {
+                        const sale = (sales || []).find((s) => s.id === batch.saleId);
+                        return (parties || []).find((p) => p.id === sale?.partyId)?.name;
+                      })()
+                    : undefined;
                   return (
                     <tr
                       key={batch.id}
@@ -714,9 +729,6 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
                           <span className="font-bold text-[var(--color-on-surface)] font-mono">{batch.batchNumber}</span>
                         </div>
                         <p className="text-[10px] text-[var(--color-on-surface-variant)] mt-0.5">{batch.date}</p>
-                      </td>
-                      <td className="py-3.5 px-3 font-semibold text-[var(--color-on-surface)]">
-                        {itemById.get(batch.targetItemId)?.name || batch.targetItemName}
                       </td>
                       <td className="py-3.5 px-3">
                         <span className="inline-flex items-center gap-1 max-w-[220px]">
@@ -748,12 +760,21 @@ export const ProductionView: React.FC<ProductionViewProps> = ({
                         </td>
                       )}
                       <td className="py-3.5 px-3">
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] truncate max-w-[200px]">
-                          <Building2 className="w-3 h-3 shrink-0 text-[var(--color-on-surface-variant)]" />
-                          {/* The OUTPUT LOCATION the produced qty landed in —
-                              resolved live from the run's output ledger row
-                              (direct-sale runs stock nothing → '—') */}
-                          {batch.outputLocationName || '—'}
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[var(--color-surface-container-high)] text-[var(--color-on-surface)] border border-[var(--color-outline-variant)] max-w-[200px]">
+                          {directParty ? (
+                            <>
+                              <User className="w-3 h-3 shrink-0 text-[var(--color-on-surface-variant)]" />
+                              {/* Direct-sale run: who the output was sold to */}
+                              <span className="truncate">{directParty || '—'}</span>
+                            </>
+                          ) : (
+                            <>
+                              <Building2 className="w-3 h-3 shrink-0 text-[var(--color-on-surface-variant)]" />
+                              {/* Stocked run: the OUTPUT LOCATION the produced
+                                  qty landed in (resolved live from the ledger) */}
+                              <span className="truncate">{batch.outputLocationName || '—'}</span>
+                            </>
+                          )}
                         </span>
                       </td>
                       <td className="py-3.5 px-4 text-right font-black text-[var(--color-on-surface)]">

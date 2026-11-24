@@ -119,6 +119,7 @@ import {
   liveSyncAdjustment,
   liveSyncStockAdjustment,
   liveSyncStockMovement,
+  updateStockMovementDate,
 } from './mysql/azureSync';
 import { isMysqlConfigured } from './mysql/connection';
 
@@ -323,7 +324,10 @@ class ServerLocalDatabase {
       // MySQL mode must NOT do this here — the seeded sandbox is about to be
       // replaced by the live hydration, and backfill would post seed rows to
       // the cloud ledger; initFromMysql runs the backfill after hydration.
-      if (!isMysqlConfigured()) this.backfillOpeningMovements();
+      if (!isMysqlConfigured()) {
+        this.backfillOpeningMovements();
+        this.backfillDirectSaleDispatchRows();
+      }
       this.isLoaded = true;
       console.log('[DB] Cloud-authoritative database engine initialized. Local JSON file writing decommissioned.');
     } catch (err) {
@@ -438,11 +442,14 @@ class ServerLocalDatabase {
           mysqlData.transactions = (mysqlData.transactions || []).filter((t) => validPartyIds.has(t.partyId));
           this.data = mysqlData;
           this.lastMysqlHydrationTime = Date.now();
-          // Opening-stock backfill (idempotent): every item that carries an
-          // opening qty and has no 'opening' ledger row yet gets its INITIAL
-          // entry; items already carrying one are untouched.
-          this.backfillOpeningMovements();
-          this.persistSync();
+      // Opening-stock backfill (idempotent): every item that carries an
+      // opening qty and has no 'opening' ledger row yet gets its INITIAL
+      // entry; items already carrying one are untouched.
+      this.backfillOpeningMovements();
+      // Direct-sale ledger trace backfill (idempotent): sale-bound runs
+      // recorded before the trace rule get their one audit row now.
+      this.backfillDirectSaleDispatchRows();
+      this.persistSync();
           // Balance-stream sweep: accounts touched by vehicle expense entries
           // recompute their balance straight from the entry lists (opening +
           // streams) — covers expenses recorded before this stream joined
@@ -1177,8 +1184,21 @@ class ServerLocalDatabase {
   private postOpeningStockMovement(item: Item): void {
     const opening = Number(item.openingStock) || 0;
     if (opening <= 0) return;
-    // Never duplicate: an existing 'opening' row for this item wins.
-    if ((this.data.stockMovements || []).some((m) => m.itemId === item.id && m.type === 'opening')) return;
+    // An already-posted opening row whose date is BARE (date-only) is
+    // re-stamped once at LOCAL midnight of its own date — a bare date parsed
+    // as UTC midnight displayed the bogus "5:30 am" in IST.
+    const existingOpening = (this.data.stockMovements || []).find(
+      (m) => m.itemId === item.id && m.type === 'opening',
+    );
+    if (existingOpening) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(String(existingOpening.date || ''))) {
+        const fixedDate = new Date(`${existingOpening.date}T00:00:00`).toISOString();
+        existingOpening.date = fixedDate;
+        this.save();
+        if (isMysqlConfigured()) updateStockMovementDate(existingOpening.id, fixedDate);
+      }
+      return;
+    }
     const firstBucket = (item.locations || [])[0];
     const rate = Number(item.openingStockPrice) > 0
       ? Number(item.openingStockPrice)
@@ -1187,7 +1207,11 @@ class ServerLocalDatabase {
       id: `stk-${this.nextLedgerMs()}-${Math.random().toString(36).slice(2, 8)}`,
       itemId: item.id,
       locationId: firstBucket?.locationId,
-      date: item.openingStockDate || item.createdAt || new Date().toISOString(),
+      // A chosen opening DATE stays the row's date but at LOCAL midnight — a
+      // bare date-only string parses as UTC midnight and displayed 5:30 am.
+      date: item.openingStockDate
+        ? new Date(`${/^\d{4}-\d{2}-\d{2}$/.test(item.openingStockDate) ? item.openingStockDate : new Date(item.openingStockDate).toISOString().slice(0, 10)}T00:00:00`).toISOString()
+        : (item.createdAt || new Date().toISOString()),
       type: 'opening',
       quantity: opening,
       // The balance right AFTER this event is the opening qty itself (the
@@ -2716,7 +2740,10 @@ class ServerLocalDatabase {
     // the product movements.
     this.releaseUnitsFromSale(sale, reason, actorId);
     const originals = (this.data.stockMovements || []).filter(
-      (m) => m.referenceId === sale.id && m.type === 'sale_dispatch'
+      // The direct-sale AUDIT rows (referenceType marker, tracekey = run id)
+      // are ledger-only bookends — never stock-bearing, never reversed here;
+      // their lifecycle rides the runs (postDirectSaleAuditRow).
+      (m) => m.referenceId === sale.id && m.type === 'sale_dispatch' && m.referenceType !== 'direct_sale_dispatch'
     );
     const reversalKeys = new Set(
       (this.data.stockMovements || [])
@@ -2799,6 +2826,8 @@ class ServerLocalDatabase {
         continue;
       }
       this.reverseDirectRunConsumption(run, sale);
+      // The OUTPUT item's audit trace closes with the run (same ledger-only mode).
+      this.postDirectSaleAuditRow(run, sale, false, actorId);
       this.data.productionBatches = (this.data.productionBatches || []).filter((b) => b.id !== run.id);
       liveSyncBatch(run, true);
       this.logAudit('DELETE', 'PRODUCTION_BATCH', run.id, `Direct-sale run ${run.batchNumber} torn down with sale ${sale.saleNumber} (line changed) — raw-material consumption reversed`);
@@ -2806,7 +2835,10 @@ class ServerLocalDatabase {
     if (!apply) return;
     for (const line of directLines) {
       if (!unlinked.has(line.id)) continue;
-      this.createDirectSaleRun(sale, line, actorId);
+      const run = this.createDirectSaleRun(sale, line, actorId);
+      // OUTPUT item's ledger trace (user directive, 2026-11-23): the sale
+      // becomes VISIBLE on the produced item's movements (audit-only row).
+      this.postDirectSaleAuditRow(run, sale, true, actorId);
     }
   }
 
@@ -2910,9 +2942,112 @@ class ServerLocalDatabase {
     const runs = (this.data.productionBatches || []).filter((b) => b.saleId === sale.id);
     for (const run of runs) {
       this.reverseDirectRunConsumption(run, sale);
+      // The OUTPUT item's audit trace closes with the run.
+      this.postDirectSaleAuditRow(run, sale, false);
       this.data.productionBatches = (this.data.productionBatches || []).filter((b) => b.id !== run.id);
       liveSyncBatch(run, true);
       this.logAudit('DELETE', 'PRODUCTION_BATCH', run.id, `Direct-sale run ${run.batchNumber} removed (${reason} ${sale.saleNumber}) — raw-material consumption reversed`);
+    }
+  }
+
+  /**
+   * DIRECT-SALE LEDGER TRACE (2026-11-23, user directive): a sale-bound run
+   * never stocked its output (the 2026-11-16 rule — output lot inward and
+   * dispatch outward are both skipped), so the OUTPUT item's movements ledger
+   * showed nothing for the sale. Every sale-bound run therefore raises ONE
+   * audit-only `sale_dispatch` row on the output item:
+   *   - type sale_dispatch → the Sale Dispatch chip, `RST <serial>` doc id,
+   *     party FK linkage, −line qty, rate = the run's costing (what one unit
+   *     actually consumed);
+   *   - referenceType 'direct_sale_dispatch' = the AUDIT marker every
+   *     stock/FIFO path skips (inventoryValuation.replayLots); the row never
+   *     moves stock — MySQL writes the ledger row only (applyStockDelta=false).
+   * Reverse rows (run teardown on sale edit/cancel) carry the same marker with
+   * a Dispatch Reversal chip — also ledger-only — matched by run id so the
+   * append-only ledger stays idempotent.
+   */
+  private postDirectSaleAuditRow(run: ProductionBatchRun, sale: Sale, apply: boolean, actorId?: string): void {
+    const marker = (this.data.stockMovements || []).filter(
+      (m) => m.referenceType === 'direct_sale_dispatch' && m.referenceId === run.id,
+    );
+    const hasUnreversed = marker.some((m) => m.type === 'sale_dispatch');
+    const alreadyReversed = marker.some((m) => m.type === 'dispatch_reversal');
+    // TIMESTAMP REPAIR (2026-11-23): rows posted before this fix carried the
+    // run's DATE-ONLY date ("2026-11-23") — JS parses that as UTC midnight and
+    // the ledger displayed the bogus "5:30 am". Such a row is re-stamped with
+    // the run's real creation timestamp once (sandbox + MySQL), then skipped.
+    if (apply && hasUnreversed) {
+      const existing = marker.find((m) => m.type === 'sale_dispatch')!;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(String(existing.date || ''))) {
+        const fixedDate = run.createdAt || this.nextLedgerTimestamp();
+        existing.date = fixedDate;
+        this.save();
+        if (isMysqlConfigured()) updateStockMovementDate(existing.id, fixedDate);
+      }
+      return;
+    }
+    if (apply && alreadyReversed) return;
+    if (!apply && (!hasUnreversed || alreadyReversed)) return;
+    const item = this.findItemRaw(run.targetItemId);
+    if (!item) return;
+    const qty = Math.abs(Number(apply ? run.targetQuantity : marker.find((m) => m.type === 'sale_dispatch')?.quantity) || 0);
+    const rate = apply
+      ? (Number(run.outputRate) > 0 ? Number(run.outputRate) : undefined)
+      : marker.find((m) => m.type === 'sale_dispatch')?.rate;
+    const movement: StockMovementRecord = {
+      id: `stk-${this.nextLedgerMs()}-${Math.random().toString(36).slice(2, 8)}`,
+      itemId: item.id,
+      locationId: undefined, // the output never sat at a location — source column shows '—'
+      date: apply
+        // Real timestamp (user directive): the run's creation moment — a
+        // date-only string here displayed as the bogus "5:30 am" (UTC
+        // midnight parsed in IST). The run's other rows carry real times.
+        ? (run.createdAt || this.nextLedgerTimestamp())
+        : new Date().toISOString(),
+      type: apply ? 'sale_dispatch' : 'dispatch_reversal',
+      quantity: apply ? -qty : qty,
+      balanceAfter: Number(item.currentStock) || 0,
+      rate,
+      movementValue: rate ? Math.round(qty * rate * 100) / 100 : undefined,
+      referenceNumber: apply ? sale.saleNumber : run.batchNumber,
+      referenceId: run.id, // trace key — matches reversals per run id
+      sourcePartyOrBatch: undefined,
+      partyId: sale.partyId,
+      notes: apply
+        ? 'Direct sale — output sold straight off the run (never stocked)'
+        : `Direct-sale trace closed — run ${run.batchNumber} reversed (sale edit/cancel)`,
+      referenceType: 'direct_sale_dispatch',
+    };
+    this.data.stockMovements.unshift(movement);
+    if (isMysqlConfigured()) {
+      // Ledger row ONLY — the output never entered stock; a delta increment
+      // would invent it (mirrors the opening-stock row's mode).
+      liveSyncStockMovement(item, movement, undefined, sale.partyId, { applyStockDelta: false });
+    }
+    this.save();
+    this.logAudit(
+      'UPDATE',
+      'ITEM_STOCK',
+      item.id,
+      apply
+        ? `Direct-sale ledger trace for ${sale.saleNumber} (run ${run.batchNumber}) — ${qty} ${item.unit} sold off production, audit-only`
+        : `Direct-sale ledger trace reversed for ${sale.saleNumber} (run ${run.batchNumber})`
+    );
+    void actorId;
+  }
+
+  /** Boot-time backfill (idempotent): sale-bound runs recorded before the
+   *  ledger-trace rule get their one audit row now (active sales only). */
+  public backfillDirectSaleDispatchRows(): void {
+    for (const run of this.data.productionBatches || []) {
+      if (!run.directSale && !run.saleId) continue;
+      const sale = (this.data.sales || []).find((s) => s.id === run.saleId);
+      if (!sale || !this.isVisibleSale(sale)) continue;
+      try {
+        this.postDirectSaleAuditRow(run, sale, true);
+      } catch (e: any) {
+        console.warn('[DB] Direct-sale ledger trace backfill failed for run', run.batchNumber, e.message);
+      }
     }
   }
 
