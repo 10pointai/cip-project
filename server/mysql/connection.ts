@@ -37,6 +37,15 @@ function parseConnectionConfig() {
   const port = parseInt(process.env.AZURE_MYSQL_PORT || process.env.MYSQL_PORT || process.env.DB_PORT || '3306', 10);
   const ssl = process.env.AZURE_MYSQL_SSL === 'false' || process.env.MYSQL_SSL === 'false' ? undefined : { rejectUnauthorized: false };
 
+  // Staging override (development vs production): when AZURE_MYSQL_USE_STAGING
+  // is "true", the pool is pointed at the staging database (cipstaging) so
+  // everyday development never writes to the production database. Production
+  // deployments simply don't set the flag (or set it to "false") and keep
+  // landing on AZURE_MYSQL_DATABASE.
+  if (process.env.AZURE_MYSQL_USE_STAGING === 'true' && process.env.AZURE_MYSQL_DATABASE_STAGING) {
+    return { host, user, password, database: process.env.AZURE_MYSQL_DATABASE_STAGING, port, ssl };
+  }
+
   return { host, user, password, database, port, ssl };
 }
 
