@@ -465,11 +465,13 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
         if (!colNames.includes('opening_stock_date')) {
           await conn.query('ALTER TABLE items ADD COLUMN opening_stock_date VARCHAR(32) DEFAULT NULL AFTER opening_stock_price');
         }
-        if (!colNames.includes('locations')) {
-          await conn.query('ALTER TABLE items ADD COLUMN locations JSON NULL AFTER stock_location');
-        }
-        if (!colNames.includes('stock_locations')) {
-          await conn.query('ALTER TABLE items ADD COLUMN stock_locations JSON NULL AFTER locations');
+        if (colNames.includes('stock_location')) {
+          if (!colNames.includes('locations')) {
+            await conn.query('ALTER TABLE items ADD COLUMN locations JSON NULL AFTER stock_location');
+          }
+          if (!colNames.includes('stock_locations')) {
+            await conn.query('ALTER TABLE items ADD COLUMN stock_locations JSON NULL AFTER locations');
+          }
         }
       } catch (itemAlterErr: any) {
         console.warn('[MySQL Migration] Items column alter check notice:', itemAlterErr.message);
@@ -566,33 +568,36 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
       try {
         const [mappingCount]: any = await conn.query('SELECT COUNT(*) as cnt FROM item_location_mapping');
         if (mappingCount[0]?.cnt === 0) {
-          const [itemRows]: any = await conn.query('SELECT id, locations FROM items WHERE locations IS NOT NULL');
-          for (const row of itemRows || []) {
-            let locs: any[] = [];
-            try {
-              locs = typeof row.locations === 'string' ? JSON.parse(row.locations) : row.locations;
-            } catch {
-              locs = [];
-            }
-            if (Array.isArray(locs) && locs.length > 0) {
-              for (const l of locs) {
-                const locId = l.locationId || `loc-${Math.random().toString(36).substring(2, 8)}`;
-                const mappingId = `ilm-${row.id}-${locId}`;
-                await conn.query(`
-                  INSERT IGNORE INTO item_location_mapping
-                  (id, item_id, location_id, max_capacity, opening_stock, current_stock, min_stock_level, created_at, updated_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                `, [
-                  mappingId,
-                  row.id,
-                  locId,
-                  l.maxCapacity !== undefined && l.maxCapacity !== null ? Number(l.maxCapacity) : null,
-                  Number(l.openingStock) || 0,
-                  Number(l.currentStock) || 0,
-                  Number(l.minStockLevel) || 0,
-                  new Date().toISOString(),
-                  new Date().toISOString(),
-                ]);
+          const [locCol]: any = await conn.query("SHOW COLUMNS FROM items LIKE 'locations'");
+          if (locCol && locCol.length > 0) {
+            const [itemRows]: any = await conn.query('SELECT id, locations FROM items WHERE locations IS NOT NULL');
+            for (const row of itemRows || []) {
+              let locs: any[] = [];
+              try {
+                locs = typeof row.locations === 'string' ? JSON.parse(row.locations) : row.locations;
+              } catch {
+                locs = [];
+              }
+              if (Array.isArray(locs) && locs.length > 0) {
+                for (const l of locs) {
+                  const locId = l.locationId || `loc-${Math.random().toString(36).substring(2, 8)}`;
+                  const mappingId = `ilm-${row.id}-${locId}`;
+                  await conn.query(`
+                    INSERT IGNORE INTO item_location_mapping
+                    (id, item_id, location_id, max_capacity, opening_stock, current_stock, min_stock_level, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  `, [
+                    mappingId,
+                    row.id,
+                    locId,
+                    l.maxCapacity !== undefined && l.maxCapacity !== null ? Number(l.maxCapacity) : null,
+                    Number(l.openingStock) || 0,
+                    Number(l.currentStock) || 0,
+                    Number(l.minStockLevel) || 0,
+                    new Date().toISOString(),
+                    new Date().toISOString(),
+                  ]);
+                }
               }
             }
           }
@@ -2453,14 +2458,21 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
           // actually backs; plates whose vehicle master row is already gone
           // are preserved so no history goes blank.
           try {
-            await conn.query('ALTER TABLE trip_slips MODIFY COLUMN vehicle_number VARCHAR(64) NULL');
-            await conn.query(
-              'UPDATE trip_slips ts LEFT JOIN vehicles v ON v.id = ts.vehicle_id SET ts.vehicle_number = NULL WHERE ts.vehicle_id IS NOT NULL AND v.id IS NOT NULL'
+            let alteredVehNum = false;
+            const vehNumCol = (mtsCols || []).find((c: any) => c.Field === 'vehicle_number');
+            if (vehNumCol && vehNumCol.Null !== 'YES') {
+              await conn.query('ALTER TABLE trip_slips MODIFY COLUMN vehicle_number VARCHAR(64) NULL');
+              alteredVehNum = true;
+            }
+            const [tsUpd]: any = await conn.query(
+              'UPDATE trip_slips ts LEFT JOIN vehicles v ON v.id = ts.vehicle_id SET ts.vehicle_number = NULL WHERE ts.vehicle_id IS NOT NULL AND v.id IS NOT NULL AND ts.vehicle_number IS NOT NULL'
             );
-            await conn.query(
-              'UPDATE sales_orders s JOIN vehicles v ON v.id = s.vehicle_id SET s.vehicle_no = NULL WHERE s.vehicle_id IS NOT NULL AND v.id IS NOT NULL'
+            const [soUpd]: any = await conn.query(
+              'UPDATE sales_orders s JOIN vehicles v ON v.id = s.vehicle_id SET s.vehicle_no = NULL WHERE s.vehicle_id IS NOT NULL AND v.id IS NOT NULL AND s.vehicle_no IS NOT NULL'
             );
-            console.log('[MySQL Migration] Nullable trip_slips.vehicle_number; cleared FK-backed vehicle_no copies on trip_slips + sales_orders.');
+            if (alteredVehNum || (tsUpd?.affectedRows || 0) > 0 || (soUpd?.affectedRows || 0) > 0) {
+              console.log('[MySQL Migration] Nullable trip_slips.vehicle_number; cleared FK-backed vehicle_no copies on trip_slips + sales_orders.');
+            }
           } catch (vehNoErr: any) {
             console.warn('[MySQL Migration] vehicle_no FK-copy cleanup notice:', vehNoErr.message);
           }
@@ -2481,11 +2493,13 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
             await conn.query('ALTER TABLE trip_slips ADD COLUMN material_item_id VARCHAR(64) NULL AFTER party_name');
             console.log('[MySQL Migration] Added trip_slips.material_item_id column.');
           }
-          if (mts.includes('party_id')) {
+          const partyIdCol = (mtsCols || []).find((c: any) => c.Field === 'party_id');
+          if (partyIdCol && partyIdCol.Null !== 'YES') {
             await conn.query('ALTER TABLE trip_slips MODIFY party_id VARCHAR(64) NULL');
           }
           // Outsourced (typed-plate) slips carry no fleet vehicle FK
-          if (mts.includes('vehicle_id')) {
+          const vehIdCol = (mtsCols || []).find((c: any) => c.Field === 'vehicle_id');
+          if (vehIdCol && vehIdCol.Null !== 'YES') {
             await conn.query('ALTER TABLE trip_slips MODIFY vehicle_id VARCHAR(64) NULL');
           }
           // Backfill: sale-derived slips created before the saleId key landed
@@ -2521,7 +2535,8 @@ export async function runMysqlMigrations(): Promise<{ success: boolean; message:
             await conn.query('ALTER TABLE trip_slips DROP COLUMN party_name');
             console.log('[MySQL Migration] Dropped trip_slips.party_name (resolved by JOIN parties on party_id).');
           }
-          if (mts.includes('material_name')) {
+          const matNameCol = (mtsCols || []).find((c: any) => c.Field === 'material_name');
+          if (matNameCol && matNameCol.Null !== 'YES') {
             await conn.query('ALTER TABLE trip_slips MODIFY material_name VARCHAR(128) NULL COMMENT \'manual (non-order) slips only — sale-derived slips resolve their material from the sale items\'');
           }
           const [idxRows]: any = await conn.query('SHOW INDEX FROM trip_slips WHERE Key_name = "idx_trip_sale"');

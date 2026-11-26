@@ -54,9 +54,47 @@ app.use((req, res, next) => {
   next();
 });
 
+// Track Azure MySQL migrations & hydration so port 3000 can bind immediately
+// for Cloud Run TCP startup probes while /api/* waits until Cloud DB is ready.
+let dbInitDone = false;
+let dbInitPromise: Promise<void> = Promise.resolve();
+
+async function initializeDatabase(): Promise<void> {
+  try {
+    if (isMysqlConfigured()) {
+      console.log('[Server] Connecting to Azure Database for MySQL Flexible Server...');
+      const test = await testMysqlConnection();
+      if (test.ok) {
+        console.log('[Azure MySQL] Connection established successfully:', test.message);
+        await runMysqlMigrations();
+        const hydrated = await serverDb.initFromMysql();
+        if (hydrated) {
+          console.log('[Azure MySQL] Operations Management System initialized directly from Cloud DB.');
+        }
+      } else {
+        console.warn('[Azure MySQL] Warning during startup:', test.message);
+      }
+    }
+  } catch (err: any) {
+    console.error('[Azure MySQL] Non-fatal initialization note:', err.message);
+  } finally {
+    dbInitDone = true;
+    // Vehicle EMI auto-debit cron — daily check (hourly ticks, idempotent per
+    // vehicle-month) after MySQL hydration settles.
+    startEmiScheduler();
+  }
+}
+
 // ==========================================
 // REST API ROUTES
 // ==========================================
+
+app.use('/api', async (_req, _res, next) => {
+  if (!dbInitDone) {
+    await dbInitPromise;
+  }
+  next();
+});
 
 // Health & System Info — collectionCounts reveal business volume (parties,
 // transactions, users), so this is an authenticated endpoint now. The client
@@ -208,25 +246,10 @@ app.all('/api/*', (req, res) => {
 // VITE / STATIC SERVING
 // ==========================================
 async function startServer() {
-  // Check and initialize Azure Database for MySQL Flexible Server
-  try {
-    if (isMysqlConfigured()) {
-      console.log('[Server] Connecting to Azure Database for MySQL Flexible Server...');
-      const test = await testMysqlConnection();
-      if (test.ok) {
-        console.log('[Azure MySQL] Connection established successfully:', test.message);
-        await runMysqlMigrations();
-        const hydrated = await serverDb.initFromMysql();
-        if (hydrated) {
-          console.log('[Azure MySQL] Operations Management System initialized directly from Cloud DB.');
-        }
-      } else {
-        console.warn('[Azure MySQL] Warning during startup:', test.message);
-      }
-    }
-  } catch (err: any) {
-    console.error('[Azure MySQL] Non-fatal initialization note:', err.message);
-  }
+  // Start Azure MySQL connection, migrations, and hydration in the background
+  // so port 3000 binds immediately for Cloud Run startup probes; /api routes
+  // wait on dbInitPromise before serving requests.
+  dbInitPromise = initializeDatabase();
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
@@ -250,10 +273,6 @@ async function startServer() {
     console.log(`  Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`======================================================\n`);
   });
-
-  // Vehicle EMI auto-debit cron — daily check (hourly ticks, idempotent per
-  // vehicle-month) after MySQL hydration settles.
-  startEmiScheduler();
 }
 
 startServer();
